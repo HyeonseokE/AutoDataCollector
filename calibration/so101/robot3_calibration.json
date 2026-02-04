@@ -1,0 +1,50 @@
+{
+  "motor_1": {
+    "motor_id": 1,
+    "model": "sts3215",
+    "drive_mode": 0,
+    "homing_offset": 1752,
+    "range_min": 723,
+    "range_max": 3379
+  },
+  "motor_2": {
+    "motor_id": 2,
+    "model": "sts3215",
+    "drive_mode": 0,
+    "homing_offset": -1194,
+    "range_min": 807,
+    "range_max": 3182
+  },
+  "motor_3": {
+    "motor_id": 3,
+    "model": "sts3215",
+    "drive_mode": 0,
+    "homing_offset": 1782,
+    "range_min": 881,
+    "range_max": 3092
+  },
+  "motor_4": {
+    "motor_id": 4,
+    "model": "sts3215",
+    "drive_mode": 0,
+    "homing_offset": -1590,
+    "range_min": 892,
+    "range_max": 3193
+  },
+  "motor_5": {
+    "motor_id": 5,
+    "model": "sts3215",
+    "drive_mode": 0,
+    "homing_offset": 1163,
+    "range_min": 23,
+    "range_max": 3977
+  },
+  "motor_6": {
+    "motor_id": 6,
+    "model": "sts3215",
+    "drive_mode": 0,
+    "homing_offset": 1240,
+    "range_min": 2047,
+    "range_max": 3519
+  }
+}

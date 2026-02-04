@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Results
+results/
+outputs/
+pipeline_multi/results_multi/
+# Local config
+.env
+openai_api_key.json
+
+# Legacy folders (DO NOT MODIFY)
+code_gen/
+
+# Claude Code local config
+CLAUDE.md
+claude_document/branch_guidelines.md
+
+# Cloud inference (local development)
+cloud_inference2/
+lerobot/

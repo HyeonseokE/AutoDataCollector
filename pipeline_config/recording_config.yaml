@@ -1,0 +1,49 @@
+# Recording Configuration
+# LeRobot 데이터셋 레코딩 관련 설정
+
+# =============================================================================
+# Dataset Configuration
+# =============================================================================
+dataset_repo_id: "local/test"
+recording_fps: 30
+robot_type: "so101"
+
+# =============================================================================
+# Camera Configuration
+# =============================================================================
+cameras:
+  ## Intel RealSense D435
+  ## pyrealsense2 SDK가 자동 감지 (serial_number로 특정 카메라 지정 가능)
+  - name: "realsense"
+    type: "realsense"
+    serial_number: "335622072328"
+    enabled: true
+    enable_depth: true
+    width: 640
+    height: 480
+    fps: 30
+
+  ## Innomaker U20CAM 1080p
+  ## OpenCV는 index_or_path로 장치 경로 지정 필요
+  ## v4l2-ctl --list-devices로 확인
+
+  # robot
+  # - name: "innomaker"
+  #   type: "opencv"
+  #   enabled: true
+  #   index_or_path: "/dev/video6"
+  #   width: 640
+  #   height: 480
+  #   fps: 30
+  #   fourcc: "MJPG"
+
+  # - name: "innomaker"
+  #   type: "opencv"
+  #   enabled: true
+  #   index_or_path: "/dev/video8"
+  #   width: 640
+  #   height: 480
+  #   fps: 30
+  #   fourcc: "MJPG"
+
+  

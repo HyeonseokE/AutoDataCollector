@@ -1,0 +1,24 @@
+# Detection Configuration for Multi-Robot Pipeline
+# 객체 검출 관련 설정 (모든 로봇에 공유)
+
+## 검출할 객체 목록
+objects:
+## ======== pnp task objects ========
+  # - "red block"
+  # - "blue dish"
+
+## ======== fold towel task objects ========
+  # - "green towel"
+
+
+## ======== Door hinge assembly task ========
+  - "red part"
+  - "pink part"
+  - "gray circle of the pink part"
+
+# 검출 타임아웃 (초)
+# 멀티로봇은 감지 결과를 공유하므로 넉넉하게 설정
+detection_timeout: 15.0
+
+# 검출 결과 시각화 여부
+visualize_detection: true

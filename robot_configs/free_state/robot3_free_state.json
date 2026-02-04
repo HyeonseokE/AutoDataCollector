@@ -1,0 +1,15 @@
+{
+  "initial_state_normalized": [
+    -3.8403613567352295,
+    -97.89473724365234,
+    97.91949462890625,
+    73.92437744140625,
+    51.99797821044922
+  ],
+  "gripper_normalized": -100.0,
+  "recorded_at": "2026-01-20T10:02:37.906044",
+  "robot_id": "robot3",
+  "config_file": "/home/csi/lerobot_CaP_distillation/robot_configs/robot/so101_robot3.yaml",
+  "state_type": "free_state",
+  "description": "Safe free/parking state. Robot moves here when idle to clear workspace."
+}

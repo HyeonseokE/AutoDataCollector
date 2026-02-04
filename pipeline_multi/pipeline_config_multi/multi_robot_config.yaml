@@ -1,0 +1,63 @@
+# Multi-Robot Pipeline Configuration
+# 멀티로봇 파이프라인 전용 설정
+
+# =============================================================================
+# Robot Configuration
+# 제어할 로봇 목록 및 개별 설정
+# =============================================================================
+robots:
+  - robot_id: 2
+    enabled: true
+    # Frame transformation config (world → robot 변환)
+    frames_file: "robot_configs/world2robot_matrices/robot2_matrix.json"
+
+  - robot_id: 3
+    enabled: true
+    frames_file: "robot_configs/world2robot_matrices/robot3_matrix.json"
+
+# =============================================================================
+# Task Configuration
+# 태스크 실행 관련 설정
+# =============================================================================
+task:
+  # 태스크 명령어 (쉘 스크립트에서 override 가능)
+  instruction: "assemble the red part and the pink part"
+
+  # 에피소드 수
+  num_episodes: 1
+
+# =============================================================================
+# Execution Settings
+# 실행 관련 설정
+# =============================================================================
+execution:
+  # Reset 실행 여부 (false면 Forward + Judge만 실행)
+  execute_reset: false
+
+  # Reset 모드 ("original": 원래 위치로 복귀, "random": 랜덤 위치로 배치)
+  reset_mode: "original"
+
+  # Judge 건너뛰기 여부
+  skip_judge: true
+
+  # 병렬 실행 타임아웃 (초)
+  parallel_timeout: 120.0
+
+# =============================================================================
+# Recording Settings
+# 데이터셋 레코딩 관련 설정
+# =============================================================================
+recording:
+  # 레코딩 활성화 여부
+  enabled: true
+
+  # 레코딩 FPS
+  fps: 30
+
+# =============================================================================
+# Results Settings
+# 결과 저장 관련 설정
+# =============================================================================
+results:
+  # 결과 저장 경로
+  save_dir: "./results/multi_robot"

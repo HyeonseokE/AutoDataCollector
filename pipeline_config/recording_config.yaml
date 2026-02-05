@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/test"
+dataset_repo_id: "local/pick_and_place_30epis"
 recording_fps: 30
 robot_type: "so101"
 

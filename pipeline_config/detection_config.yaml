@@ -4,15 +4,15 @@
 ## 검출할 객체 목록
 objects:
 ## ======== pnp task objects ========
-  # - "red block"
-  # - "blue dish"
+  - "red block"
+  - "blue dish"
 
 ## ======== fold towel task objects ========
   # - "green towel"
 
 ## ======== pick the toy and place it on the blue dish ========
-  - "the toy"
-  - "blue dish"
+  # - "the toy"
+  # - "blue dish"
 
 # 검출 타임아웃 (초)
 detection_timeout: 1.5

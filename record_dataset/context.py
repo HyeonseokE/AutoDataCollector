@@ -93,6 +93,16 @@ class RecordingContext:
     _skipped_frames: int = 0
     _camera_errors: int = 0
 
+    # Skill-level subgoal info
+    _current_skill_label: Optional[str] = None
+    _current_skill_type: Optional[str] = None
+    _skill_start_time: Optional[float] = None
+    _skill_duration: Optional[float] = None
+    _current_goal_joint: Optional[np.ndarray] = None
+    _current_goal_world_xyzrpy: Optional[np.ndarray] = None
+    _current_goal_robot_xyzrpy: Optional[np.ndarray] = None
+    _current_goal_gripper: Optional[float] = None
+
     def __init__(
         self,
         recorder: 'DatasetRecorder',
@@ -212,6 +222,81 @@ class RecordingContext:
         return cls._is_active and cls._recorder is not None
 
     @classmethod
+    def set_skill_label(cls, label: str) -> None:
+        """현재 실행 중인 스킬의 자연어 라벨 설정 (레거시 호환)"""
+        with cls._lock:
+            cls._current_skill_label = label
+
+    @classmethod
+    def clear_skill_label(cls) -> None:
+        """스킬 라벨 해제 (레거시 호환)"""
+        with cls._lock:
+            cls._current_skill_label = None
+
+    @classmethod
+    def get_skill_label(cls) -> Optional[str]:
+        """현재 스킬 라벨 반환"""
+        return cls._current_skill_label
+
+    @classmethod
+    def set_skill_info(
+        cls,
+        label: str,
+        skill_type: str,
+        duration: float,
+        goal_joint: np.ndarray,
+        goal_world_xyzrpy: np.ndarray,
+        goal_robot_xyzrpy: np.ndarray,
+        goal_gripper: float,
+    ) -> None:
+        """스킬 정보 설정 (스킬 시작 시 호출)"""
+        with cls._lock:
+            cls._current_skill_label = label
+            cls._current_skill_type = skill_type
+            cls._skill_start_time = time.time()
+            cls._skill_duration = duration
+            cls._current_goal_joint = np.asarray(goal_joint, dtype=np.float32)
+            cls._current_goal_world_xyzrpy = np.asarray(goal_world_xyzrpy, dtype=np.float32)
+            cls._current_goal_robot_xyzrpy = np.asarray(goal_robot_xyzrpy, dtype=np.float32)
+            cls._current_goal_gripper = float(goal_gripper)
+            if cls._is_active:
+                print(f"[RecordingContext] Skill: {skill_type} - {label}")
+
+    @classmethod
+    def clear_skill_info(cls) -> None:
+        """스킬 정보 해제 (스킬 종료 시 호출)"""
+        with cls._lock:
+            cls._current_skill_label = None
+            cls._current_skill_type = None
+            cls._skill_start_time = None
+            cls._skill_duration = None
+            cls._current_goal_joint = None
+            cls._current_goal_world_xyzrpy = None
+            cls._current_goal_robot_xyzrpy = None
+            cls._current_goal_gripper = None
+
+    @classmethod
+    def get_skill_progress(cls) -> float:
+        """스킬 진행률 반환 (0.0 ~ 1.0)"""
+        if cls._skill_start_time is None or cls._skill_duration is None:
+            return 0.0
+        elapsed = time.time() - cls._skill_start_time
+        return min(elapsed / cls._skill_duration, 1.0)
+
+    @classmethod
+    def get_skill_info(cls) -> dict:
+        """현재 스킬 정보 반환"""
+        return {
+            "label": cls._current_skill_label or "",
+            "type": cls._current_skill_type or "",
+            "progress": cls.get_skill_progress(),
+            "goal_joint": cls._current_goal_joint if cls._current_goal_joint is not None else np.zeros(6, dtype=np.float32),
+            "goal_world_xyzrpy": cls._current_goal_world_xyzrpy if cls._current_goal_world_xyzrpy is not None else np.zeros(6, dtype=np.float32),
+            "goal_robot_xyzrpy": cls._current_goal_robot_xyzrpy if cls._current_goal_robot_xyzrpy is not None else np.zeros(6, dtype=np.float32),
+            "goal_gripper": cls._current_goal_gripper if cls._current_goal_gripper is not None else 0.0,
+        }
+
+    @classmethod
     def reset_episode(cls) -> None:
         """에피소드 시작 시 카운터 리셋"""
         with cls._lock:
@@ -287,11 +372,12 @@ class RecordingContext:
                 cls._camera_errors += 1
                 return False
 
-            # 멀티 카메라 레코딩 (통합)
+            # 멀티 카메라 레코딩 (통합) + 스킬 라벨
             cls._recorder.record_frame_multi(
                 observation=state,
                 action=action,
                 images=images,
+                skill_label=cls._current_skill_label,
             )
 
             # 상태 업데이트

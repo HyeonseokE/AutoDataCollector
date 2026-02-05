@@ -230,9 +230,10 @@ class DatasetRecorder:
         observation: np.ndarray,
         action: np.ndarray,
         images: Dict[str, np.ndarray],
+        skill_label: Optional[str] = None,
     ) -> None:
         """
-        멀티 카메라 프레임 레코딩
+        멀티 카메라 프레임 레코딩 + 스킬 라벨
 
         Args:
             observation: 현재 로봇 상태 (shape: (6,), normalized)
@@ -240,6 +241,8 @@ class DatasetRecorder:
             images: 카메라별 이미지 딕셔너리
                     {camera_name: image} 형태
                     예: {"realsense": img1, "innomaker": img2}
+            skill_label: 현재 실행 중인 스킬의 자연어 설명 (optional)
+                        예: "move to blue dish", "pick yellow dice"
 
         Note:
             - timestamp는 LeRobotDataset이 frame index와 FPS 기반으로 자동 계산
@@ -274,6 +277,26 @@ class DatasetRecorder:
             "action": action,
             "task": self._current_task,
         }
+
+        # Skill-level subgoal info (RecordingContext에서 가져옴)
+        try:
+            from .context import RecordingContext
+            skill_info = RecordingContext.get_skill_info()
+            frame["skill.natural_language"] = skill_info["label"]
+            frame["skill.type"] = skill_info["type"]
+            frame["skill.progress"] = np.array([skill_info["progress"]], dtype=np.float32)
+            frame["skill.goal_position.joint"] = skill_info["goal_joint"]
+            frame["skill.goal_position.world_xyzrpy"] = skill_info["goal_world_xyzrpy"]
+            frame["skill.goal_position.robot_xyzrpy"] = skill_info["goal_robot_xyzrpy"]
+            frame["skill.goal_position.gripper"] = np.array([skill_info["goal_gripper"]], dtype=np.float32)
+        except ImportError:
+            frame["skill.natural_language"] = skill_label if skill_label else ""
+            frame["skill.type"] = ""
+            frame["skill.progress"] = np.array([0.0], dtype=np.float32)
+            frame["skill.goal_position.joint"] = np.zeros(6, dtype=np.float32)
+            frame["skill.goal_position.world_xyzrpy"] = np.zeros(6, dtype=np.float32)
+            frame["skill.goal_position.robot_xyzrpy"] = np.zeros(6, dtype=np.float32)
+            frame["skill.goal_position.gripper"] = np.array([0.0], dtype=np.float32)
 
         # 각 카메라 이미지 추가
         for cam in self.enabled_cameras:

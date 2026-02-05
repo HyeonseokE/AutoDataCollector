@@ -19,18 +19,18 @@ cd "$SCRIPT_DIR"
 ROBOT_ID=3
 
 ## [필수] 태스크 명령어
-# INSTRUCTION="pick up the red block and place it on the blue dish"
+INSTRUCTION="pick up the red block and place it on the blue dish"
 # INSTRUCTION="fold the green towel"
-INSTRUCTION="pick up the toy and place it on the blue dish"
+# INSTRUCTION="pick up the toy and place it on the blue dish"
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=10
+NUM_EPISODES=30
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
-USE_SERVER=true
+USE_SERVER=false
 
 # ============================================================
 # Reset execution 설정

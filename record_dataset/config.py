@@ -162,6 +162,15 @@ def build_dataset_features(cameras: List[CameraConfigRecord] = None) -> Dict[str
     for cam in cameras:
         features[cam.to_feature_key()] = cam.to_feature_schema()
 
+    # Skill-level subgoal labels
+    features["skill.natural_language"] = {"dtype": "string", "shape": (1,), "names": None}
+    features["skill.type"] = {"dtype": "string", "shape": (1,), "names": None}
+    features["skill.progress"] = {"dtype": "float32", "shape": (1,), "names": None}
+    features["skill.goal_position.joint"] = {"dtype": "float32", "shape": (NUM_JOINTS,), "names": JOINT_NAMES}
+    features["skill.goal_position.world_xyzrpy"] = {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]}
+    features["skill.goal_position.robot_xyzrpy"] = {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]}
+    features["skill.goal_position.gripper"] = {"dtype": "float32", "shape": (1,), "names": ["gripper.pos"]}
+
     return features
 
 
@@ -194,6 +203,43 @@ DATASET_FEATURES = {
         "dtype": "video",
         "shape": (480, 640, 3),
         "names": ["height", "width", "channels"],
+    },
+
+    # Skill-level subgoal labels
+    "skill.natural_language": {
+        "dtype": "string",
+        "shape": (1,),
+        "names": None,
+    },
+    "skill.type": {
+        "dtype": "string",
+        "shape": (1,),
+        "names": None,
+    },
+    "skill.progress": {
+        "dtype": "float32",
+        "shape": (1,),
+        "names": None,
+    },
+    "skill.goal_position.joint": {
+        "dtype": "float32",
+        "shape": (NUM_JOINTS,),
+        "names": JOINT_NAMES,
+    },
+    "skill.goal_position.world_xyzrpy": {
+        "dtype": "float32",
+        "shape": (6,),
+        "names": ["x", "y", "z", "roll", "pitch", "yaw"],
+    },
+    "skill.goal_position.robot_xyzrpy": {
+        "dtype": "float32",
+        "shape": (6,),
+        "names": ["x", "y", "z", "roll", "pitch", "yaw"],
+    },
+    "skill.goal_position.gripper": {
+        "dtype": "float32",
+        "shape": (1,),
+        "names": ["gripper.pos"],
     },
 }
 

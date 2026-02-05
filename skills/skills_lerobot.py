@@ -40,6 +40,28 @@ from lerobot_cap.compensation import AdaptiveCompensator
 from lerobot_cap.transforms import FrameTransformer
 from lerobot_cap.workspace import BaseWorkspace
 
+# Recording context for skill-level subgoal labeling
+try:
+    from record_dataset.context import RecordingContext
+    HAS_RECORDING_CONTEXT = True
+except ImportError:
+    HAS_RECORDING_CONTEXT = False
+    RecordingContext = None
+
+
+def _compute_ee_xyzrpy(kinematics, joints_rad: np.ndarray) -> np.ndarray:
+    """FK로 EE의 xyzrpy 계산"""
+    pos, R = kinematics.forward_kinematics(joints_rad)
+    # Rotation matrix to euler (ZYX convention)
+    pitch = np.arcsin(-R[2, 0])
+    if np.abs(np.cos(pitch)) > 1e-6:
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        roll = np.arctan2(-R[1, 2], R[1, 1])
+        yaw = 0.0
+    return np.array([pos[0], pos[1], pos[2], roll, pitch, yaw], dtype=np.float32)
+
 
 class LeRobotSkills:
     """
@@ -397,6 +419,67 @@ class LeRobotSkills:
             if self.frame_transformer.has_frame(self.frame):
                 return self.frame_transformer.transform_position(position, self.frame)
         return position
+
+    def _compute_goal_xyzrpy(self, joints_rad: np.ndarray, kinematics=None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        목표 joint로부터 world/robot xyzrpy 계산
+
+        Returns:
+            (world_xyzrpy, robot_xyzrpy) 각각 (6,) 배열
+        """
+        kin = kinematics if kinematics else self.kinematics
+        robot_xyzrpy = _compute_ee_xyzrpy(kin, joints_rad)
+
+        # robot(base_link) frame -> world frame 역변환 (position만)
+        if self.frame != "base_link" and self.frame_transformer and self.frame_transformer.has_frame(self.frame):
+            T = self.frame_transformer.frames[self.frame]["T_base_from_frame"]
+            T_inv = np.linalg.inv(T)
+            p_base = np.array([robot_xyzrpy[0], robot_xyzrpy[1], robot_xyzrpy[2], 1.0])
+            world_pos = (T_inv @ p_base)[:3]
+        else:
+            world_pos = robot_xyzrpy[:3]
+
+        world_xyzrpy = np.array([world_pos[0], world_pos[1], world_pos[2],
+                                  robot_xyzrpy[3], robot_xyzrpy[4], robot_xyzrpy[5]], dtype=np.float32)
+        return world_xyzrpy, robot_xyzrpy
+
+    def _set_skill_recording(
+        self,
+        label: str,
+        skill_type: str,
+        duration: float,
+        goal_joint_5: np.ndarray,
+        goal_gripper: float,
+        kinematics=None,
+    ) -> None:
+        """스킬 레코딩 정보 설정 (헬퍼)
+
+        Args:
+            goal_joint_5: 목표 arm joint (radians, 5축)
+            goal_gripper: 목표 gripper (normalized, -100~+100)
+        """
+        if not HAS_RECORDING_CONTEXT or not RecordingContext.is_active():
+            return
+
+        # arm joints: radians → normalized (observation.state/action과 동일 단위)
+        goal_arm_normalized = self._radians_to_normalized(goal_joint_5)
+        goal_joint_6 = np.concatenate([goal_arm_normalized, [goal_gripper]])
+        world_xyzrpy, robot_xyzrpy = self._compute_goal_xyzrpy(goal_joint_5, kinematics)
+
+        RecordingContext.set_skill_info(
+            label=label,
+            skill_type=skill_type,
+            duration=duration,
+            goal_joint=goal_joint_6,
+            goal_world_xyzrpy=world_xyzrpy,
+            goal_robot_xyzrpy=robot_xyzrpy,
+            goal_gripper=goal_gripper,
+        )
+
+    def _clear_skill_recording(self) -> None:
+        """스킬 레코딩 정보 해제 (헬퍼)"""
+        if HAS_RECORDING_CONTEXT and RecordingContext.is_active():
+            RecordingContext.clear_skill_info()
 
     def _apply_end_deceleration(self, t_normalized: float) -> float:
         """Apply time warping to slow down at the end of trajectory.
@@ -855,7 +938,7 @@ class LeRobotSkills:
             return {q: None for q in queries}
         
     # ========== Primitive Skills ==========
-    def move_to_initial_state(self, duration: Optional[float] = None) -> bool:
+    def move_to_initial_state(self, duration: Optional[float] = None, skill_description: Optional[str] = None) -> bool:
         """
         Move robot to recorded initial (home) state including gripper.
 
@@ -871,24 +954,34 @@ class LeRobotSkills:
 
         duration = duration or self.movement_duration
 
+        # Set skill recording info
+        goal_joint_rad = self._normalized_to_radians(self.initial_state)
+        self._set_skill_recording(
+            label=skill_description or "move to initial state",
+            skill_type="move_initial",
+            duration=duration,
+            goal_joint_5=goal_joint_rad,
+            goal_gripper=self.initial_state_gripper,
+        )
+
         self._log(f"\nMoving to Initial State...")
         current_arm_norm, _, _ = self._get_current_state()
 
-        # Check if already at initial state (arm + gripper)
-        arm_dist = np.max(np.abs(current_arm_norm - self.initial_state))
-        gripper_dist = abs(self.current_gripper_pos - self.initial_state_gripper)
-        if arm_dist < 5.0 and gripper_dist < 5.0:
-            self._log(f"  Already at initial state (arm: {arm_dist:.1f}, gripper: {gripper_dist:.1f})")
-        else:
-            # Arm + Gripper simultaneous movement
-            self._execute_move_to_known_pose(
-                current_arm_norm, self.initial_state,
-                duration, "Moving to Initial State",
-                start_gripper=self.current_gripper_pos,
-                end_gripper=self.initial_state_gripper,
-            )
-
-        return True
+        try:
+            arm_dist = np.max(np.abs(current_arm_norm - self.initial_state))
+            gripper_dist = abs(self.current_gripper_pos - self.initial_state_gripper)
+            if arm_dist < 5.0 and gripper_dist < 5.0:
+                self._log(f"  Already at initial state (arm: {arm_dist:.1f}, gripper: {gripper_dist:.1f})")
+            else:
+                self._execute_move_to_known_pose(
+                    current_arm_norm, self.initial_state,
+                    duration, "Moving to Initial State",
+                    start_gripper=self.current_gripper_pos,
+                    end_gripper=self.initial_state_gripper,
+                )
+            return True
+        finally:
+            self._clear_skill_recording()
 
     def move_to_position(
         self,
@@ -899,6 +992,8 @@ class LeRobotSkills:
         maintain_pitch: bool = False,
         target_pitch: Optional[float] = None,
         tcp_offset_override: Optional[List[float]] = None,
+        target_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
     ) -> bool:
         """
         Move end-effector to target position with orientation constraints.
@@ -926,6 +1021,9 @@ class LeRobotSkills:
                                 instead of self.tcp_offset to adjust the target position.
                                 Useful for picking at a different point (e.g., pin position)
                                 than the default gripper center.
+            target_name: Name of the target object for subgoal labeling (optional).
+                        예: "blue dish", "yellow dice"
+                        Used for recording skill-level subgoal labels.
 
         Returns:
             True if movement successful
@@ -1070,15 +1168,30 @@ class LeRobotSkills:
                 target_z=target_position[2],
             )
 
-        # Execute trajectory with active kinematics for correct error measurement
-        return self._execute_trajectory(
-            trajectory=trajectory,
-            target_position=target_position,
-            description=f"Moving to [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}]",
+        # Set skill recording info (after trajectory planning)
+        label = skill_description or (f"move to {target_name}" if target_name else "move to position")
+        goal_joint_rad = trajectory.joint_positions[-1]
+        self._set_skill_recording(
+            label=label,
+            skill_type="move",
+            duration=duration,
+            goal_joint_5=goal_joint_rad,
+            goal_gripper=self.current_gripper_pos,
             kinematics=active_planner.kinematics,
         )
-    
-    def gripper_open(self, duration: float = 1.5, ratio: float = 1.0):
+
+        # Execute trajectory with active kinematics for correct error measurement
+        try:
+            return self._execute_trajectory(
+                trajectory=trajectory,
+                target_position=target_position,
+                description=f"Moving to [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}]",
+                kinematics=active_planner.kinematics,
+            )
+        finally:
+            self._clear_skill_recording()
+
+    def gripper_open(self, duration: float = 1.5, ratio: float = 1.0, skill_description: Optional[str] = None):
         """
         Open gripper with recording support.
 
@@ -1086,25 +1199,49 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        # Calculate target position based on ratio
-        # closed_pos + (open_pos - closed_pos) * ratio
         target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * ratio
-        self._log(f"Gripper: Opening to {ratio*100:.0f}% (pos={target_pos:.0f})...")
-        self._execute_move_gripper_pose(target_pos, duration=duration)
-        self._log(f"Gripper: Open ({ratio*100:.0f}%)")
+        current_arm_norm, current_arm_rad, _ = self._get_current_state()
 
-    def gripper_close(self, duration: float = 1.5):
+        self._set_skill_recording(
+            label=skill_description or "open gripper",
+            skill_type="gripper_open",
+            duration=duration,
+            goal_joint_5=current_arm_rad,
+            goal_gripper=target_pos,
+        )
+
+        try:
+            self._log(f"Gripper: Opening to {ratio*100:.0f}% (pos={target_pos:.0f})...")
+            self._execute_move_gripper_pose(target_pos, duration=duration)
+            self._log(f"Gripper: Open ({ratio*100:.0f}%)")
+        finally:
+            self._clear_skill_recording()
+
+    def gripper_close(self, duration: float = 1.5, skill_description: Optional[str] = None):
         """
         Close gripper with recording support.
 
         Args:
             duration: Movement duration in seconds (default: 1.5)
         """
-        self._log(f"Gripper: Closing (pos={self.gripper_close_pos:.0f})...")
-        self._execute_move_gripper_pose(self.gripper_close_pos, duration=duration)
-        self._log("Gripper: Closed")
+        current_arm_norm, current_arm_rad, _ = self._get_current_state()
+
+        self._set_skill_recording(
+            label=skill_description or "close gripper",
+            skill_type="gripper_close",
+            duration=duration,
+            goal_joint_5=current_arm_rad,
+            goal_gripper=self.gripper_close_pos,
+        )
+
+        try:
+            self._log(f"Gripper: Closing (pos={self.gripper_close_pos:.0f})...")
+            self._execute_move_gripper_pose(self.gripper_close_pos, duration=duration)
+            self._log("Gripper: Closed")
+        finally:
+            self._clear_skill_recording()
     
-    def rotate_90degree(self, direction: int = 1, duration: float = 2.0) -> bool:
+    def rotate_90degree(self, direction: int = 1, duration: float = 2.0, skill_description: Optional[str] = None) -> bool:
         """
         Rotate gripper (wrist_roll) by 90 degrees.
 
@@ -1140,34 +1277,47 @@ class LeRobotSkills:
         target_joints = current_joints.copy()
         target_joints[wrist_roll_idx] = target_wrist_roll_rad
 
+        # Set skill recording info
+        dir_str = "clockwise" if direction > 0 else "counter-clockwise"
+        self._set_skill_recording(
+            label=skill_description or f"rotate gripper {dir_str}",
+            skill_type="rotate",
+            duration=duration,
+            goal_joint_5=target_joints,
+            goal_gripper=self.current_gripper_pos,
+        )
+
         # Convert to normalized
         start_normalized = current_arm_norm
         end_normalized = self._radians_to_normalized(target_joints)
 
         self._log(f"  Wrist roll: {np.degrees(current_joints[wrist_roll_idx]):.1f}° -> {np.degrees(target_wrist_roll_rad):.1f}°")
 
-        # Execute joint trajectory
-        success = self._execute_move_to_known_pose(
-            start_normalized=start_normalized,
-            end_normalized=end_normalized,
-            duration=duration,
-            description=f"Rotating wrist 90° {'CW' if direction > 0 else 'CCW'}",
-        )
+        try:
+            # Execute joint trajectory
+            success = self._execute_move_to_known_pose(
+                start_normalized=start_normalized,
+                end_normalized=end_normalized,
+                duration=duration,
+                description=f"Rotating wrist 90° {'CW' if direction > 0 else 'CCW'}",
+            )
 
-        # Calculate and store error
-        _, final_rad, final_ee = self._get_current_state()
-        self.last_error = self._calculate_error(
-            target_position=current_ee,  # Position should stay the same
-            actual_position=final_ee,
-            target_wrist_roll_rad=target_wrist_roll_rad,
-            actual_wrist_roll_rad=final_rad[wrist_roll_idx],
-        )
-        self._print_error(self.last_error, "Rotate 90°")
+            # Calculate and store error
+            _, final_rad, final_ee = self._get_current_state()
+            self.last_error = self._calculate_error(
+                target_position=current_ee,
+                actual_position=final_ee,
+                target_wrist_roll_rad=target_wrist_roll_rad,
+                actual_wrist_roll_rad=final_rad[wrist_roll_idx],
+            )
+            self._print_error(self.last_error, "Rotate 90°")
 
-        self._log("ROTATE 90 DEGREE: Complete")
-        return success
+            self._log("ROTATE 90 DEGREE: Complete")
+            return success
+        finally:
+            self._clear_skill_recording()
 
-    def move_to_free_state(self, duration: Optional[float] = None) -> bool:
+    def move_to_free_state(self, duration: Optional[float] = None, skill_description: Optional[str] = None) -> bool:
         """
         Move robot to recorded free state for safe parking.
 
@@ -1186,50 +1336,60 @@ class LeRobotSkills:
 
         duration = duration or self.movement_duration
 
+        # Set skill recording info
+        goal_joint_rad = self._normalized_to_radians(self.free_state)
+        self._set_skill_recording(
+            label=skill_description or "move to free state",
+            skill_type="move_free",
+            duration=duration,
+            goal_joint_5=goal_joint_rad,
+            goal_gripper=self.free_state_gripper,
+        )
+
         self._log(f"\n{'='*60}")
         self._log("MOVE TO FREE STATE")
         self._log(f"{'='*60}")
 
         current_arm_norm, _, current_ee = self._get_current_state()
 
-        # Check if already at free state (arm + gripper)
-        arm_dist = np.max(np.abs(current_arm_norm - self.free_state))
-        gripper_dist = abs(self.current_gripper_pos - self.free_state_gripper)
-        if arm_dist < 5.0 and gripper_dist < 5.0:
-            self._log(f"  Already at free state (arm: {arm_dist:.1f}, gripper: {gripper_dist:.1f})")
-            return True
+        try:
+            arm_dist = np.max(np.abs(current_arm_norm - self.free_state))
+            gripper_dist = abs(self.current_gripper_pos - self.free_state_gripper)
+            if arm_dist < 5.0 and gripper_dist < 5.0:
+                self._log(f"  Already at free state (arm: {arm_dist:.1f}, gripper: {gripper_dist:.1f})")
+                return True
 
-        self._log(f"  Target: {self.free_state}")
-        self._log(f"  Gripper: {self.free_state_gripper:.1f}")
+            self._log(f"  Target: {self.free_state}")
+            self._log(f"  Gripper: {self.free_state_gripper:.1f}")
 
-        # Arm + Gripper simultaneous movement
-        success = self._execute_move_to_known_pose(
-            current_arm_norm, self.free_state,
-            duration, "Moving to Free State",
-            start_gripper=self.current_gripper_pos,
-            end_gripper=self.free_state_gripper,
-        )
+            success = self._execute_move_to_known_pose(
+                current_arm_norm, self.free_state,
+                duration, "Moving to Free State",
+                start_gripper=self.current_gripper_pos,
+                end_gripper=self.free_state_gripper,
+            )
 
-        # Calculate final position for error reporting
-        _, final_rad, final_ee = self._get_current_state()
+            _, final_rad, final_ee = self._get_current_state()
+            free_state_rad = self._normalized_to_radians(self.free_state)
+            expected_ee = self.kinematics.get_ee_position(free_state_rad)
 
-        # Calculate expected EE position from free state
-        free_state_rad = self._normalized_to_radians(self.free_state)
-        expected_ee = self.kinematics.get_ee_position(free_state_rad)
+            self.last_error = self._calculate_error(
+                target_position=expected_ee,
+                actual_position=final_ee,
+            )
+            self._print_error(self.last_error, "Free State")
 
-        self.last_error = self._calculate_error(
-            target_position=expected_ee,
-            actual_position=final_ee,
-        )
-        self._print_error(self.last_error, "Free State")
-
-        self._log("MOVE TO FREE STATE: Complete")
-        return success
+            self._log("MOVE TO FREE STATE: Complete")
+            return success
+        finally:
+            self._clear_skill_recording()
 
     def execute_pick_object(
         self,
         object_position: Union[List[float], np.ndarray],
         gripper_offset: float = 0.0,
+        object_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
     ) -> bool:
         """
         Execute pick at object position (called from pick_approach position).
@@ -1240,15 +1400,16 @@ class LeRobotSkills:
         Args:
             object_position: Object top surface position [x, y, z] in meters (from 3D detection)
             gripper_offset: Gripper offset for asymmetric gripper (meters)
+            object_name: Name of the object being picked for subgoal labeling (optional).
+                        예: "yellow dice", "red cup"
 
         Returns:
             True if successful
         """
         object_position = np.array(object_position)
-        object_height = object_position[2]  # table is z=0, so z = object height
+        object_height = object_position[2]
 
-        # Calculate pick Z: object top - pick_offset (self.pick_offset = fixed 3cm from top)
-        MIN_PICK_Z = 0.01  # minimum 1cm from ground
+        MIN_PICK_Z = 0.01
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
@@ -1256,19 +1417,20 @@ class LeRobotSkills:
         self._log(f"  Object height: {object_height*100:.1f}cm")
         self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.0f}cm from top)")
 
-        # Move to pick position
-        if not self.move_to_position(pick_position, 
-                                     gripper_offset=gripper_offset):
+        # Move to pick position (skill recording handled inside)
+        pick_label = f"pick {object_name}" if object_name else None
+        if not self.move_to_position(pick_position, gripper_offset=gripper_offset, target_name=pick_label, skill_description=skill_description):
             print("Error: Failed to reach pick position")
             return False
 
-        # Close gripper
-        self.gripper_close()
+        # Close gripper (skill recording handled inside)
+        grasp_desc = f"grasp {object_name}" if object_name else None
+        self.gripper_close(skill_description=grasp_desc)
 
-        # Store pick_z for place operation (to place object bottom on surface)
+        # Store pick_z for place operation
         self._pick_z = pick_z
 
-        # Store current pitch for place operation (pitch restoration pattern)
+        # Store current pitch for place operation
         _, current_joints, _ = self._get_current_state()
         self._saved_pitch = self.kinematics.get_gripper_pitch(current_joints)
         self._log(f"  Saved pitch: {np.degrees(self._saved_pitch):.1f}°")
@@ -1281,8 +1443,10 @@ class LeRobotSkills:
         place_position: Union[List[float], np.ndarray],
         gripper_offset: float = 0.0,
         is_table: bool = True,
-        gripper_open_ratio: float = 0.3,
+        gripper_open_ratio: float = 1.0,
         tcp_offset_override: Optional[List[float]] = None,
+        target_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
     ) -> bool:
         """
         Execute place at target position (called from place_approach position).
@@ -1297,6 +1461,8 @@ class LeRobotSkills:
             tcp_offset_override: Dynamic TCP offset [x, y, z] in TCP local frame (meters).
                                 When specified with gripper_offset > 0, passed to move_to_position
                                 to adjust the target position for different TCP origins.
+            target_name: Name of the target for subgoal labeling (optional).
+                        예: "blue dish", "table"
 
         Returns:
             True if successful
@@ -1304,14 +1470,10 @@ class LeRobotSkills:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
 
-        # Get saved pick_z (TCP height when object was picked)
         pick_z = getattr(self, '_pick_z', self.pick_offset)
-
-        # Calculate place Z: target surface + pick_z (so object bottom touches surface)
         place_z = target_surface_height + pick_z
         final_position = [place_position[0], place_position[1], place_z]
 
-        # Get saved pitch from pick operation (pitch restoration pattern)
         saved_pitch = getattr(self, '_saved_pitch', None)
 
         self._log(f"\n[Execute Place Object]")
@@ -1320,16 +1482,20 @@ class LeRobotSkills:
         if saved_pitch is not None:
             self._log(f"  Restoring pitch: {np.degrees(saved_pitch):.1f}°")
 
-        # Move to place position with saved pitch (from pick operation)
+        # Move to place position (skill recording handled inside)
+        place_label = f"place on {target_name}" if target_name else None
         if not self.move_to_position(final_position,
                                      gripper_offset=gripper_offset,
                                      target_pitch=saved_pitch,
-                                     tcp_offset_override=tcp_offset_override):
+                                     tcp_offset_override=tcp_offset_override,
+                                     target_name=place_label,
+                                     skill_description=skill_description):
             print("Error: Failed to reach place position")
             return False
 
-        # Open gripper (partial open based on ratio)
-        self.gripper_open(ratio=gripper_open_ratio)
+        # Open gripper (skill recording handled inside)
+        release_desc = f"release object on {target_name}" if target_name else None
+        self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
 
         # Clear saved state
         self._pick_z = None

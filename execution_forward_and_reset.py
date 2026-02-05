@@ -1006,11 +1006,27 @@ class ForwardAndResetPipeline:
             forward_success = self.execute_code(self.generated_code, self.detected_positions)
             result['forward']['execution_success'] = forward_success
 
-            # 레코딩 모드: 에피소드 종료 (실패 시 버림)
+            # 레코딩 모드: 에피소드 종료 + 시각화 (forward 직후 즉시)
             if self.record_dataset:
-                # Judge 결과에 따라 버릴지 결정하기 위해 여기서는 종료하지 않음
-                # Judge 후에 종료
-                pass
+                self._end_episode_recording(discard=False)
+
+                # Skill recording 시각화 저장
+                try:
+                    from record_dataset.visualize_skills import generate_skill_visualizations
+                    dataset = self.dataset_recorder._dataset
+                    dataset._ensure_hf_dataset_loaded()
+                    episode_df = dataset.hf_dataset.to_pandas()
+                    saved_viz = generate_skill_visualizations(
+                        dataframe=episode_df,
+                        save_dir=forward_dir,
+                        episode_index=self.dataset_recorder.episode_count - 1,
+                    )
+                    if saved_viz:
+                        print(f"  Skill visualizations saved: {len(saved_viz)} files")
+                except Exception as e:
+                    import traceback
+                    print(f"  Warning: Skill visualization failed: {e}")
+                    traceback.print_exc()
 
             if forward_success:
                 print(f"  {GREEN}Forward execution SUCCESS{RESET}")
@@ -1097,14 +1113,6 @@ class ForwardAndResetPipeline:
                     )
             else:
                 print(f"\n{YELLOW}" + self._log("Judge skipped (--skip-judge)", step="Step 2/3", tag="Judge") + f"{RESET}")
-
-            # 레코딩 모드: 에피소드 종료
-            if self.record_dataset:
-                judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-                # Judge 결과가 FALSE면 에피소드 버림 (옵션)
-                # 현재는 모든 에피소드 저장
-                discard = False  # judge_pred == 'FALSE'
-                self._end_episode_recording(discard=discard)
 
             # Forward 로깅 종료
             forward_log_path = forward_logger.stop()

@@ -79,28 +79,41 @@ def lerobot_code_gen_prompt(
     4. **Available Skills**:
        The LeRobotSkills class provides these methods:
 
-       | Method | Description | Parameters |
-       |--------|-------------|------------|
+       | Method | Description | Key Parameters |
+       |--------|-------------|----------------|
        | `connect()` | Connect to robot | - |
        | `disconnect()` | Disconnect from robot | - |
-       | `gripper_open()` | Open gripper | - |
-       | `move_to_initial_state()` | Move to initial/home position | - |
-       | `move_to_free_state()` | Move to safe parking position | - |
-       | `move_to_position(position, gripper_offset=0.0)` | Move end-effector to [x,y,z] | position: List[float], gripper_offset: float |
-       | `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
-       | `execute_pick_object(object_position, gripper_offset=0.0)` | Descend to pick position (3cm from top), close gripper, save pitch | object_position: [x,y,z], gripper_offset: float |
-       | `execute_place_object(place_position, gripper_offset=0.0, is_table=True, gripper_open_ratio=0.7)` | Descend to place position with saved pitch, open gripper 70% | place_position: [x,y,z], gripper_offset: float, is_table: bool, gripper_open_ratio: float |
+       | `gripper_open(skill_description=None)` | Open gripper | skill_description: str |
+       | `move_to_initial_state(skill_description=None)` | Move to initial/home position | skill_description: str |
+       | `move_to_free_state(skill_description=None)` | Move to safe parking position | skill_description: str |
+       | `move_to_position(position, ..., skill_description=None)` | Move end-effector to [x,y,z] | position, gripper_offset, target_name, skill_description: str |
+       | `rotate_90degree(direction, skill_description=None)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW), skill_description: str |
+       | `execute_pick_object(object_position, ..., skill_description=None)` | Descend to pick position (3cm from top), close gripper, save pitch | object_position, gripper_offset, object_name, skill_description: str |
+       | `execute_place_object(place_position, ..., skill_description=None)` | Descend to place position with saved pitch, open gripper 70% | place_position, gripper_offset, is_table, gripper_open_ratio, target_name, skill_description: str |
 
        **execute_pick_object**: Call from pick_approach position. Moves TCP to pick height, closes gripper, and **saves current pitch**.
          - **IMPORTANT**: Pass position with z = object_height / 2 (cz/2) to grasp at middle of object
+         - **object_name**: Pass the object name for subgoal labeling (e.g., "yellow dice")
        **execute_place_object**: Call from place_approach position. Moves TCP to place height **with saved pitch restored**, then opens gripper.
          - **IMPORTANT**: Pass position with z = picked_object_height / 2 (pick_pos[2]/2) to release at middle height
          - is_table=True: place on table, is_table=False: place on another object
          - gripper_open_ratio=0.7: opens gripper to 70% (ALWAYS use 0.7)
          - Pitch is automatically restored from the saved value at pick time
+         - **target_name**: Pass the target name for subgoal labeling (e.g., "blue dish")
 
        **Gripper Offset**: Use `gripper_offset=positions["object"]["gripper_offset"]` for asymmetric gripper collision avoidance.
        **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
+       **skill_description (REQUIRED)**: A natural language sentence describing the semantic intent of each skill call.
+         - This is recorded as `skill.natural_language` in the dataset for robot policy learning.
+         - Describe WHY the robot is performing this action, not just WHAT it does.
+         - Include the object name, the spatial context (e.g., "above", "onto"), and the role in the overall task.
+         - Each call MUST have a unique, descriptive `skill_description` that distinguishes it from other calls.
+         - Examples: "move to initial position to start the task", "open gripper to prepare for picking the red block",
+           "approach above the red block for grasping", "descend and grasp the red block at its center",
+           "lift the red block to safe height after grasping", "move above the blue dish to place the red block",
+           "lower the red block onto the blue dish", "return to initial position after completing the task",
+           "move to free position for safe parking"
+         - Use "initial position" (not "home position") and "free position" (not "parking position") to match skill names.
 
     5. **Skill Composition Patterns**:
 
@@ -111,18 +124,18 @@ def lerobot_code_gen_prompt(
        offset = pick_obj["gripper_offset"]
        approach_height = 0.15  # 15cm above object
 
-       skills.gripper_open()
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset)  # pick_approach
-       skills.execute_pick_object([pick_pos[0], pick_pos[1], pick_pos[2]/2], gripper_offset=offset)  # grasp at half height (cz/2)
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset)  # lift
+       skills.gripper_open(skill_description="open gripper to prepare for picking the object_name")
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name", skill_description="approach above the object_name for grasping")
+       skills.execute_pick_object([pick_pos[0], pick_pos[1], pick_pos[2]/2], gripper_offset=offset, object_name="object_name", skill_description="descend and grasp the object_name at its center")  # grasp at half height (cz/2)
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name", skill_description="lift the object_name to safe height after grasping")
 
        # PLACE on OBJECT pattern (e.g., place or stack on another object):
        place_obj = positions["target_object"]
        place_pos = place_obj["position"]  # target x, y position
 
-       skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset) # place_approach
-       skills.execute_place_object([place_pos[0], place_pos[1], pick_pos[2]/2], gripper_offset=offset, is_table=False, gripper_open_ratio=0.7)  # release at picked object's half height (cz/2)
-       skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset) # lift
+       skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset, target_name="target_object", skill_description="move above the target_object to place the object_name")
+       skills.execute_place_object([place_pos[0], place_pos[1], pick_pos[2]/2], gripper_offset=offset, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="lower the object_name onto the target_object")  # release at picked object's half height (cz/2)
+       skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset, target_name="target_object", skill_description="retreat upward after placing the object_name on the target_object")
        ```
 
     6. **Executable Code Skeleton**:
@@ -143,8 +156,7 @@ def execute_task():
     try:
         approach_height = 0.15  # 15cm above objects
 
-        skills.move_to_initial_state()
-        skills.rotate_90degree(-1)  # Rotate 90° CCW after initial state
+        skills.move_to_initial_state(skill_description="move to initial position to start the task")
 
         # === Object Positions ===
         pick_obj = positions["object_name"]
@@ -155,19 +167,19 @@ def execute_task():
         place_pos = place_obj["position"]
 
         # === PICK ===
-        skills.gripper_open()
-        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset)
-        skills.execute_pick_object([pick_pos[0], pick_pos[1], pick_pos[2]/2], gripper_offset=offset)  # grasp at half height (cz/2)
-        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height])  # lift
+        skills.gripper_open(skill_description="open gripper to prepare for picking the object_name")
+        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name", skill_description="approach above the object_name for grasping")
+        skills.execute_pick_object([pick_pos[0], pick_pos[1], pick_pos[2]/2], gripper_offset=offset, object_name="object_name", skill_description="descend and grasp the object_name at its center")  # grasp at half height (cz/2)
+        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name", skill_description="lift the object_name to safe height after grasping")  # lift
 
         # === PLACE on object ===
-        skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset)  # place_approach
-        skills.execute_place_object([place_pos[0], place_pos[1], pick_pos[2]/2], gripper_offset=offset, is_table=False, gripper_open_ratio=0.7)  # release at picked object's half height (cz/2)
-        skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset) # lift
+        skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset, target_name="target_name", skill_description="move above the target_name to place the object_name")  # place_approach
+        skills.execute_place_object([place_pos[0], place_pos[1], pick_pos[2]/2], gripper_offset=offset, is_table=False, gripper_open_ratio=0.7, target_name="target_name", skill_description="lower the object_name onto the target_name")  # release at picked object's half height (cz/2)
+        skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset, target_name="target_name", skill_description="retreat upward after placing the object_name on the target_name") # lift
 
         # === Cleanup ===
-        skills.move_to_initial_state()
-        skills.move_to_free_state()
+        skills.move_to_initial_state(skill_description="return to initial position after completing the task")
+        skills.move_to_free_state(skill_description="move to free position for safe parking")
 
     finally:
         skills.disconnect()
@@ -183,13 +195,15 @@ if __name__ == "__main__":
    - Ensure the code is executable as-is
 
 2. **Guidelines for Implementation:**
-   - Always start with `move_to_initial_state()` followed by `rotate_90degree(-1)` (CCW rotation)
+   - Always start with `move_to_initial_state()`
    - Always end with `move_to_initial_state()` then `move_to_free_state()`
    - Use `approach_height = 0.15` (15cm) for approach/lift movements
    - **ALWAYS use z = pick_pos[2]/2 (half height) for both execute_pick_object and execute_place_object** to grasp/release at middle of object
    - Use `is_table=True` when placing on table, `is_table=False` when placing on another object
    - **ALWAYS use `gripper_open_ratio=0.7`** in `execute_place_object()` to open gripper 70%
    - Always include try/finally for proper cleanup
+   - **ALWAYS pass `target_name` or `object_name` parameters** for subgoal labeling in dataset recording
+   - **ALWAYS pass `skill_description`** for EVERY skill call. Write a natural language sentence that describes the semantic intent (why the robot is doing this action in context of the overall task). Each description must be unique and distinguishable from other skill calls.
 
 3. **Output Format:**
    - Do not use code blocks in your final answer
@@ -281,19 +295,18 @@ Specification: {{"required_skills": [...], "steps": [...]}}
 **Example 1**: "Pick up the red cup and place it on the carrier"
 ```
 Specification: {{
-  "required_skills": ["move_to_initial_state", "rotate_90degree", "gripper_open", "move_to_position", "execute_pick_object", "execute_place_object", "move_to_free_state"],
+  "required_skills": ["move_to_initial_state", "gripper_open", "move_to_position", "execute_pick_object", "execute_place_object", "move_to_free_state"],
   "steps": [
     {{"step": 1, "action": "move_to_initial_state"}},
-    {{"step": 2, "action": "rotate_90degree", "direction": "ccw"}},
-    {{"step": 3, "action": "gripper_open"}},
-    {{"step": 4, "action": "move_to_position", "object": "red cup", "approach_height": 0.15, "gripper_offset": true}},
-    {{"step": 5, "action": "execute_pick_object", "object": "red cup", "gripper_offset": true}},
-    {{"step": 6, "action": "move_to_position", "object": "red cup", "approach_height": 0.15}},
-    {{"step": 7, "action": "move_to_position", "target": "carrier", "approach_height": 0.15, "gripper_offset": true}},
-    {{"step": 8, "action": "execute_place_object", "target": "carrier", "gripper_offset": true, "is_table": true}},
-    {{"step": 9, "action": "move_to_position", "target": "carrier", "approach_height": 0.15, "gripper_offset": true}},
-    {{"step": 10, "action": "move_to_initial_state"}},
-    {{"step": 11, "action": "move_to_free_state"}}
+    {{"step": 2, "action": "gripper_open"}},
+    {{"step": 3, "action": "move_to_position", "object": "red cup", "approach_height": 0.15, "gripper_offset": true}},
+    {{"step": 4, "action": "execute_pick_object", "object": "red cup", "gripper_offset": true}},
+    {{"step": 5, "action": "move_to_position", "object": "red cup", "approach_height": 0.15}},
+    {{"step": 6, "action": "move_to_position", "target": "carrier", "approach_height": 0.15, "gripper_offset": true}},
+    {{"step": 7, "action": "execute_place_object", "target": "carrier", "gripper_offset": true, "is_table": true}},
+    {{"step": 8, "action": "move_to_position", "target": "carrier", "approach_height": 0.15, "gripper_offset": true}},
+    {{"step": 9, "action": "move_to_initial_state"}},
+    {{"step": 10, "action": "move_to_free_state"}}
   ]
 }}
 ```
@@ -301,19 +314,18 @@ Specification: {{
 **Example 2**: "Stack the red dice on top of the blue box"
 ```
 Specification: {{
-  "required_skills": ["move_to_initial_state", "rotate_90degree", "gripper_open", "move_to_position", "execute_pick_object", "execute_place_object", "move_to_free_state"],
+  "required_skills": ["move_to_initial_state", "gripper_open", "move_to_position", "execute_pick_object", "execute_place_object", "move_to_free_state"],
   "steps": [
     {{"step": 1, "action": "move_to_initial_state"}},
-    {{"step": 2, "action": "rotate_90degree", "direction": "ccw"}},
-    {{"step": 3, "action": "gripper_open"}},
-    {{"step": 4, "action": "move_to_position", "object": "red dice", "approach_height": 0.15, "gripper_offset": true}},
-    {{"step": 5, "action": "execute_pick_object", "object": "red dice", "gripper_offset": true}},
-    {{"step": 6, "action": "move_to_position", "object": "red dice", "approach_height": 0.15}},
-    {{"step": 7, "action": "move_to_position", "target": "blue box", "approach_height": 0.15, "gripper_offset": true}},
-    {{"step": 8, "action": "execute_place_object", "target": "blue box", "gripper_offset": true, "is_table": false}},
-    {{"step": 9, "action": "move_to_position", "target": "blue box", "approach_height": 0.15, "gripper_offset": true}},
-    {{"step": 10, "action": "move_to_initial_state"}},
-    {{"step": 11, "action": "move_to_free_state"}}
+    {{"step": 2, "action": "gripper_open"}},
+    {{"step": 3, "action": "move_to_position", "object": "red dice", "approach_height": 0.15, "gripper_offset": true}},
+    {{"step": 4, "action": "execute_pick_object", "object": "red dice", "gripper_offset": true}},
+    {{"step": 5, "action": "move_to_position", "object": "red dice", "approach_height": 0.15}},
+    {{"step": 6, "action": "move_to_position", "target": "blue box", "approach_height": 0.15, "gripper_offset": true}},
+    {{"step": 7, "action": "execute_place_object", "target": "blue box", "gripper_offset": true, "is_table": false}},
+    {{"step": 8, "action": "move_to_position", "target": "blue box", "approach_height": 0.15, "gripper_offset": true}},
+    {{"step": 9, "action": "move_to_initial_state"}},
+    {{"step": 10, "action": "move_to_free_state"}}
   ]
 }}
 ```
@@ -321,7 +333,7 @@ Specification: {{
 ### **Guidelines**
 
 1. Use `execute_pick_object` and `execute_place_object` for pick/place operations
-2. Always start with `move_to_initial_state` followed by `rotate_90degree` (direction: "ccw")
+2. Always start with `move_to_initial_state`
 3. Always end with `move_to_initial_state` then `move_to_free_state`
 4. Use `approach_height: 0.15` for approach/retract movements (15cm above target)
 5. Use `is_table: true` when placing on table, `is_table: false` when stacking on another object

@@ -257,23 +257,34 @@ Your task is to generate reset code that moves objects from their current positi
 {task_description}
 
 ### **Available Skills**:
-| Method | Description | Parameters |
-|--------|-------------|------------|
+| Method | Description | Key Parameters |
+|--------|-------------|----------------|
 | `connect()` | Connect to robot | - |
 | `disconnect()` | Disconnect from robot | - |
-| `gripper_open()` | Open gripper | - |
-| `move_to_initial_state()` | Move to initial/home position | - |
-| `move_to_free_state()` | Move to safe parking position | - |
-| `move_to_position(position, gripper_offset=0.0)` | Move end-effector to [x,y,z] | position: List[float], gripper_offset: float |
-| `rotate_90degree(direction)` | Rotate gripper 90 deg | direction: 1 (CW) or -1 (CCW) |
-| `execute_pick_object(object_position, gripper_offset=0.0)` | Descend (3cm from top) + gripper_close + save pitch | object_position: [x,y,z], gripper_offset: float |
-| `execute_place_object(place_position, gripper_offset=0.0, is_table=True)` | Descend with saved pitch + gripper_open | place_position: [x,y,z], gripper_offset: float, is_table: bool |
+| `gripper_open(skill_description=None)` | Open gripper | skill_description: str |
+| `move_to_initial_state(skill_description=None)` | Move to initial/home position | skill_description: str |
+| `move_to_free_state(skill_description=None)` | Move to safe parking position | skill_description: str |
+| `move_to_position(position, ..., skill_description=None)` | Move end-effector to [x,y,z] | position, gripper_offset, target_name, skill_description: str |
+| `rotate_90degree(direction, skill_description=None)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW), skill_description: str |
+| `execute_pick_object(object_position, ..., skill_description=None)` | Descend to pick position (3cm from top), close gripper, save pitch | object_position, gripper_offset, **object_name**: str, skill_description: str |
+| `execute_place_object(place_position, ..., skill_description=None)` | Descend to place position with saved pitch, open gripper 70% | place_position, gripper_offset, is_table, gripper_open_ratio, **target_name**: str, skill_description: str |
 
 **execute_pick_object**: Call from pick_approach position. Moves TCP to 3cm below object top, closes gripper, and **saves current pitch**.
+  - **IMPORTANT**: Pass position with z = object_height / 2 (cz/2) to grasp at middle of object
+  - **object_name**: Pass the object name for subgoal labeling (e.g., "red cup")
 **execute_place_object**: Call from place_approach position. Moves TCP to place height **with saved pitch restored**, then opens gripper.
-  - is_table=True: place on table (z=0)
-  - is_table=False: place on another object
+  - **IMPORTANT**: Pass position with z = picked_object_height / 2 (pick_cz/2) to release at middle height
+  - is_table=True: place on table (z=0), is_table=False: place on another object
+  - **ALWAYS use `gripper_open_ratio=0.7`** to open gripper 70%
+  - **target_name**: Pass the target name for subgoal labeling (e.g., "table", "original position")
+  - **NOTE**: `execute_place_object` does NOT have `object_name` parameter. Use `target_name` instead.
   - Pitch is automatically restored from pick time
+
+**Gripper Offset**: Use `gripper_offset=current_positions["object"]["gripper_offset"]` for asymmetric gripper collision avoidance.
+**skill_description (REQUIRED)**: A natural language sentence describing the semantic intent of each skill call.
+  - This is recorded as `skill.natural_language` in the dataset for robot policy learning.
+  - Describe WHY the robot is performing this action in context of the reset task.
+  - Use "initial position" (not "home position") and "free position" (not "parking position") to match skill names.
 
 ### **Code Template**:
 
@@ -302,19 +313,15 @@ def execute_reset_task():
 {current_str}
         }}
 
-        skills.move_to_initial_state()
+        skills.move_to_initial_state(skill_description="move to initial position to start the reset task")
 
         # === RESET: Move objects to target positions ===
         # Extract actual [x,y,z] values and hardcode them below
-        # Example:
-        #   obj_current = [0.20, -0.05, 0.05]  # from current_positions
-        #   obj_target = [0.15, 0.05, 0.02]    # from target_positions
-        #   offset = 0.02
 
         # ... (your reset logic with hardcoded values) ...
 
-        skills.move_to_initial_state()
-        skills.move_to_free_state()
+        skills.move_to_initial_state(skill_description="return to initial position after completing the reset")
+        skills.move_to_free_state(skill_description="move to free position for safe parking")
 
     finally:
         skills.disconnect()
@@ -331,7 +338,7 @@ if __name__ == "__main__":
 - Initial: red cup at [0.15, 0.05, 0.02], blue box at [0.20, -0.05, 0.03]
 - Current: red cup at [0.20, -0.05, 0.05] (on blue box), blue box at [0.20, -0.05, 0.03]
 
-**Reset Code** (moves red cup to target position on table):
+**Reset Code** (moves red cup back to its original position on table):
 ```python
 from skills.skills_lerobot import LeRobotSkills
 
@@ -354,21 +361,21 @@ def execute_reset_task():
         # Target position (where to place) - original position on table
         target_pos = [0.15, 0.05, 0.02]
 
-        skills.move_to_initial_state()
+        skills.move_to_initial_state(skill_description="move to initial position to start the reset task")
 
         # === PICK red cup from current position ===
-        skills.gripper_open()
-        skills.move_to_position([current_pos[0], current_pos[1], current_pos[2] + approach_height], gripper_offset=offset)
-        skills.execute_pick_object(current_pos, gripper_offset=offset)
-        skills.move_to_position([current_pos[0], current_pos[1], current_pos[2] + approach_height])
+        skills.gripper_open(skill_description="open gripper to prepare for picking the red cup")
+        skills.move_to_position([current_pos[0], current_pos[1], approach_height], gripper_offset=offset, target_name="red cup", skill_description="approach above the red cup for grasping")
+        skills.execute_pick_object([current_pos[0], current_pos[1], current_pos[2]/2], gripper_offset=offset, object_name="red cup", skill_description="descend and grasp the red cup at its center")
+        skills.move_to_position([current_pos[0], current_pos[1], approach_height], gripper_offset=offset, target_name="red cup", skill_description="lift the red cup to safe height after grasping")
 
         # === PLACE red cup at target position (on table) ===
-        skills.move_to_position([target_pos[0], target_pos[1], approach_height], gripper_offset=offset)
-        skills.execute_place_object(target_pos, gripper_offset=offset, is_table=True)
-        skills.move_to_position([target_pos[0], target_pos[1], approach_height], gripper_offset=offset)
+        skills.move_to_position([target_pos[0], target_pos[1], approach_height], gripper_offset=offset, target_name="original position", skill_description="move above the original position to place the red cup back")
+        skills.execute_place_object([target_pos[0], target_pos[1], current_pos[2]/2], gripper_offset=offset, is_table=True, gripper_open_ratio=0.7, target_name="original position", skill_description="lower the red cup onto its original position on the table")
+        skills.move_to_position([target_pos[0], target_pos[1], approach_height], gripper_offset=offset, target_name="original position", skill_description="retreat upward after placing the red cup")
 
-        skills.move_to_initial_state()
-        skills.move_to_free_state()
+        skills.move_to_initial_state(skill_description="return to initial position after completing the reset")
+        skills.move_to_free_state(skill_description="move to free position for safe parking")
 
     finally:
         skills.disconnect()
@@ -381,13 +388,16 @@ if __name__ == "__main__":
 
 1. Analyze the forward spec and code to understand what was moved
 2. Generate code that moves each object from current to target position
-3. Use `execute_pick_object` and `execute_place_object` for pick/place operations
-4. **Hardcode actual coordinate values** from current_positions and target_positions directly in the code
-5. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
-6. Use `is_table=True` when placing on table
-7. Always include try/finally for proper cleanup
-8. Always start with `move_to_initial_state()`
-9. Always end with `move_to_initial_state()` and `move_to_free_state()`
+3. Use `execute_pick_object` (with `object_name=`) and `execute_place_object` (with `target_name=`) for pick/place operations
+4. **NEVER pass `object_name` to `execute_place_object`** — it only accepts `target_name`
+5. **Hardcode actual coordinate values** from current_positions and target_positions directly in the code
+6. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
+7. **ALWAYS use z = object_height / 2 (cz/2) for both execute_pick_object and execute_place_object**
+8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
+9. Use `is_table=True` when placing on table
+10. Always include try/finally for proper cleanup
+11. Always start with `move_to_initial_state()`, end with `move_to_initial_state()` and `move_to_free_state()`
+12. **ALWAYS pass `skill_description`** for EVERY skill call
 
 ### **Output Format**
 - Provide complete executable Python code

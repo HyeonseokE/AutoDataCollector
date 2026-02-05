@@ -281,7 +281,7 @@ class DatasetRecorder:
         # Skill-level subgoal info (RecordingContext에서 가져옴)
         try:
             from .context import RecordingContext
-            skill_info = RecordingContext.get_skill_info()
+            skill_info = RecordingContext.get_skill_info(current_state=observation)
             frame["skill.natural_language"] = skill_info["label"]
             frame["skill.type"] = skill_info["type"]
             frame["skill.progress"] = np.array([skill_info["progress"]], dtype=np.float32)

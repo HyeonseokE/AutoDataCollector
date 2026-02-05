@@ -171,7 +171,7 @@ def generate_skill_visualizations(
     ax.plot(frames, progress, linewidth=1.2, color="tab:green")
     ax.set_ylabel("Progress")
     ax.set_ylim(-0.05, 1.1)
-    ax.set_title("skill.progress (0→1 per skill)", fontsize=10)
+    ax.set_title("skill.progress (0→1 per skill, state-based)", fontsize=10)
 
     # 1d: Goal joint[0] vs observation.state[0]
     ax = fig.add_subplot(gs[3], sharex=fig.axes[0])

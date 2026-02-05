@@ -60,8 +60,9 @@ def test_recording_context():
     RecordingContext._is_active = True
     RecordingContext._recorder = True  # Mock recorder
 
-    # set_skill_info 테스트
-    goal_joint = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=np.float32)
+    # set_skill_info 테스트 (with start_state for state-based progress)
+    start_state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    goal_joint = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0], dtype=np.float32)
     goal_world = np.array([0.2, 0.1, 0.15, 0.0, -0.5, 0.0], dtype=np.float32)
     goal_robot = np.array([0.15, 0.05, 0.12, 0.0, -0.5, 0.0], dtype=np.float32)
     goal_gripper = 85.0
@@ -74,10 +75,11 @@ def test_recording_context():
         goal_world_xyzrpy=goal_world,
         goal_robot_xyzrpy=goal_robot,
         goal_gripper=goal_gripper,
+        start_state=start_state,
     )
 
-    # get_skill_info 테스트
-    info = RecordingContext.get_skill_info()
+    # get_skill_info 테스트 (with current_state for state-based progress)
+    info = RecordingContext.get_skill_info(current_state=start_state)
 
     assert info["label"] == "move to blue dish", f"label mismatch: {info['label']}"
     assert info["type"] == "move", f"type mismatch: {info['type']}"
@@ -93,12 +95,21 @@ def test_recording_context():
     print(f"  ✓ goal_robot_xyzrpy: {info['goal_robot_xyzrpy']}")
     print(f"  ✓ goal_gripper: {info['goal_gripper']}")
 
-    # progress 테스트
-    time.sleep(0.5)  # 0.5초 대기
-    progress = RecordingContext.get_skill_progress()
-    expected_progress = 0.5 / 3.0  # ~0.167
-    print(f"  ✓ progress after 0.5s: {progress:.3f} (expected ~{expected_progress:.3f})")
-    assert 0.1 < progress < 0.3, f"progress out of range: {progress}"
+    # State-based progress: at start → ~0.0
+    progress_start = RecordingContext.get_skill_progress(current_state=start_state)
+    print(f"  ✓ progress at start: {progress_start:.3f} (expected ~0.0)")
+    assert abs(progress_start - 0.0) < 0.01, f"progress at start should be ~0.0, got {progress_start}"
+
+    # State-based progress: at midpoint → ~0.5
+    midpoint = (start_state + goal_joint) / 2.0
+    progress_mid = RecordingContext.get_skill_progress(current_state=midpoint)
+    print(f"  ✓ progress at midpoint: {progress_mid:.3f} (expected ~0.5)")
+    assert abs(progress_mid - 0.5) < 0.01, f"progress at midpoint should be ~0.5, got {progress_mid}"
+
+    # State-based progress: at goal → ~1.0
+    progress_goal = RecordingContext.get_skill_progress(current_state=goal_joint)
+    print(f"  ✓ progress at goal: {progress_goal:.3f} (expected ~1.0)")
+    assert abs(progress_goal - 1.0) < 0.01, f"progress at goal should be ~1.0, got {progress_goal}"
 
     # clear_skill_info 테스트
     RecordingContext.clear_skill_info()
@@ -107,6 +118,7 @@ def test_recording_context():
     assert info_after_clear["label"] == "", "label not cleared"
     assert info_after_clear["type"] == "", "type not cleared"
     assert info_after_clear["progress"] == 0.0, "progress not cleared"
+    assert RecordingContext._skill_start_state is None, "start_state not cleared"
     print("  ✓ clear_skill_info works")
 
     # Reset mock
@@ -117,9 +129,86 @@ def test_recording_context():
     return True
 
 
+def test_state_based_progress_edge_cases():
+    """State-based progress edge case 테스트"""
+    print("\n=== Test 3: State-Based Progress Edge Cases ===")
+
+    RecordingContext._is_active = True
+    RecordingContext._recorder = True
+
+    # Edge case 1: start == goal (zero distance) → 1.0
+    same_state = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0], dtype=np.float32)
+    RecordingContext.set_skill_info(
+        label="already at goal",
+        skill_type="move",
+        duration=3.0,
+        goal_joint=same_state,
+        goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
+        goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),
+        goal_gripper=85.0,
+        start_state=same_state,
+    )
+    progress = RecordingContext.get_skill_progress(current_state=same_state)
+    print(f"  ✓ zero distance (start==goal): {progress:.3f} (expected 1.0)")
+    assert progress == 1.0, f"zero distance should return 1.0, got {progress}"
+    RecordingContext.clear_skill_info()
+
+    # Edge case 2: time-based fallback (start_state=None)
+    RecordingContext.set_skill_info(
+        label="time-based fallback",
+        skill_type="move",
+        duration=2.0,
+        goal_joint=np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0], dtype=np.float32),
+        goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
+        goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),
+        goal_gripper=85.0,
+        start_state=None,  # No start_state → time-based fallback
+    )
+    time.sleep(0.5)
+    progress_time = RecordingContext.get_skill_progress()  # No current_state → time-based
+    expected_time = 0.5 / 2.0  # ~0.25
+    print(f"  ✓ time-based fallback (no start_state): {progress_time:.3f} (expected ~{expected_time:.3f})")
+    assert 0.15 < progress_time < 0.45, f"time-based progress out of range: {progress_time}"
+
+    # Also verify: even with current_state, if start_state is None → time-based
+    progress_time2 = RecordingContext.get_skill_progress(
+        current_state=np.zeros(6, dtype=np.float32)
+    )
+    print(f"  ✓ time-based (start_state=None, current_state given): {progress_time2:.3f}")
+    assert progress_time2 > 0.15, f"should still use time-based, got {progress_time2}"
+    RecordingContext.clear_skill_info()
+
+    # Edge case 3: overshoot (current past goal)
+    # L2 distance 특성: 목표를 지나치면 goal과의 거리가 다시 증가 → progress 감소
+    # ||goal - current|| = 5, ||goal - start|| = 10, progress = 1 - 5/10 = 0.5
+    start = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    goal = np.array([10.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    overshoot = np.array([15.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    RecordingContext.set_skill_info(
+        label="overshoot",
+        skill_type="move",
+        duration=3.0,
+        goal_joint=goal,
+        goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
+        goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),
+        goal_gripper=85.0,
+        start_state=start,
+    )
+    progress_over = RecordingContext.get_skill_progress(current_state=overshoot)
+    print(f"  ✓ overshoot: {progress_over:.3f} (expected 0.5, L2 distance reflects distance from goal)")
+    assert abs(progress_over - 0.5) < 0.01, f"overshoot case unexpected: {progress_over}"
+    RecordingContext.clear_skill_info()
+
+    RecordingContext._is_active = False
+    RecordingContext._recorder = None
+
+    print("  → State-based progress edge cases PASSED")
+    return True
+
+
 def test_skill_types():
     """각 스킬 타입이 올바르게 정의되었는지 테스트"""
-    print("\n=== Test 3: Skill Types ===")
+    print("\n=== Test 4: Skill Types ===")
 
     expected_types = [
         "move",           # move_to_position
@@ -139,7 +228,7 @@ def test_skill_types():
 
 def test_frame_data_structure():
     """레코딩될 프레임 데이터 구조 테스트"""
-    print("\n=== Test 4: Frame Data Structure ===")
+    print("\n=== Test 5: Frame Data Structure ===")
 
     # Mock frame data (recorder.py에서 생성되는 구조)
     frame = {
@@ -172,6 +261,7 @@ def main():
     tests = [
         ("Feature Schema", test_config_features),
         ("RecordingContext", test_recording_context),
+        ("State-Based Progress Edge Cases", test_state_based_progress_edge_cases),
         ("Skill Types", test_skill_types),
         ("Frame Data Structure", test_frame_data_structure),
     ]

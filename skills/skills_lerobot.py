@@ -461,6 +461,9 @@ class LeRobotSkills:
         if not HAS_RECORDING_CONTEXT or not RecordingContext.is_active():
             return
 
+        # Capture start_state (6 joints, normalized) for state-based progress
+        start_state = self.robot.read_positions(normalize=True).copy()
+
         # arm joints: radians → normalized (observation.state/action과 동일 단위)
         goal_arm_normalized = self._radians_to_normalized(goal_joint_5)
         goal_joint_6 = np.concatenate([goal_arm_normalized, [goal_gripper]])
@@ -474,6 +477,7 @@ class LeRobotSkills:
             goal_world_xyzrpy=world_xyzrpy,
             goal_robot_xyzrpy=robot_xyzrpy,
             goal_gripper=goal_gripper,
+            start_state=start_state,
         )
 
     def _clear_skill_recording(self) -> None:

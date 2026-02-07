@@ -528,7 +528,7 @@ def run_realtime_detection(
     detector.load_model()
 
     print("[System] Loading calibration...")
-    calibration_file = PROJECT_ROOT / "object_detection" / "calibration" / "pix2world_transform_data.npz"
+    calibration_file = PROJECT_ROOT / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
     transformer = CoordinateTransformer()
     if calibration_file.exists():
         transformer.load_calibration(str(calibration_file))

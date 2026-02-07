@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from camera import RealSenseD435
-from calibration import GridCalibrator
+from pix2world_extrinsic import GridCalibrator
 from detection import GroundingDINODetector, Detection
 from localization import CoordinateTransformer, ObjectLocalizer
 
@@ -40,7 +40,7 @@ class ObjectLocalizationSystem:
         self.calibrator: Optional[GridCalibrator] = None
         self.transformer: Optional[CoordinateTransformer] = None
 
-        self.calibration_file = Path(__file__).parent / self.config['calibration']['save_path']
+        self.calibration_file = Path(__file__).parent.parent / self.config['calibration']['save_path']
 
     def _load_config(self, config_path: str) -> dict:
         """설정 파일 로드"""
@@ -52,7 +52,7 @@ class ObjectLocalizationSystem:
             # 기본 설정
             return {
                 'camera': {'width': 640, 'height': 480, 'fps': 30},
-                'calibration': {'grid_size_cm': 1.0, 'save_path': 'calibration/pix2world_transform_data.npz'},
+                'calibration': {'grid_size_cm': 1.0, 'save_path': 'robot_configs/pix2world_matrices/pix2world_transform_data.npz'},
                 'detection': {'box_threshold': 0.25, 'text_threshold': 0.25, 'device': 'cuda'}
             }
 

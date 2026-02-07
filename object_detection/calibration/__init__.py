@@ -1,3 +1,3 @@
-from .grid_calibrator import GridCalibrator, DepthCalibrator
+from pix2world_extrinsic import GridCalibrator, DepthCalibrator
 
 __all__ = ['GridCalibrator', 'DepthCalibrator']

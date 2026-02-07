@@ -16,7 +16,7 @@ calibration:
   min_points: 4
   recommended_points: 9
   # 저장 경로
-  save_path: "calibration/pix2world_transform_data.npz"
+  save_path: "robot_configs/pix2world_matrices/pix2world_transform_data.npz"
 
 # Detection Settings
 detection:

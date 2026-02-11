@@ -59,6 +59,7 @@ cloud_inference2/
 lerobot/
 
 # Model checkpoints and artifacts
+models
 models/checkpoints/
 models/**/*.pt
 models/**/*.pth

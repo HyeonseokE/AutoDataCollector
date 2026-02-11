@@ -447,7 +447,6 @@ class LeRobotSkills:
         self,
         label: str,
         skill_type: str,
-        duration: float,
         goal_joint_5: np.ndarray,
         goal_gripper: float,
         kinematics=None,
@@ -472,7 +471,6 @@ class LeRobotSkills:
         RecordingContext.set_skill_info(
             label=label,
             skill_type=skill_type,
-            duration=duration,
             goal_joint=goal_joint_6,
             goal_world_xyzrpy=world_xyzrpy,
             goal_robot_xyzrpy=robot_xyzrpy,
@@ -842,7 +840,7 @@ class LeRobotSkills:
         )
         self._print_error(self.last_error, description)
 
-        return target_reached or position_error < POSITION_TOLERANCE * 2
+        return target_reached or position_error < POSITION_TOLERANCE * 3
     
     # ========== Robot Tool skills ==========
 
@@ -963,7 +961,6 @@ class LeRobotSkills:
         self._set_skill_recording(
             label=skill_description or "move to initial state",
             skill_type="move_initial",
-            duration=duration,
             goal_joint_5=goal_joint_rad,
             goal_gripper=self.initial_state_gripper,
         )
@@ -1178,7 +1175,6 @@ class LeRobotSkills:
         self._set_skill_recording(
             label=label,
             skill_type="move",
-            duration=duration,
             goal_joint_5=goal_joint_rad,
             goal_gripper=self.current_gripper_pos,
             kinematics=active_planner.kinematics,
@@ -1209,7 +1205,6 @@ class LeRobotSkills:
         self._set_skill_recording(
             label=skill_description or "open gripper",
             skill_type="gripper_open",
-            duration=duration,
             goal_joint_5=current_arm_rad,
             goal_gripper=target_pos,
         )
@@ -1233,7 +1228,6 @@ class LeRobotSkills:
         self._set_skill_recording(
             label=skill_description or "close gripper",
             skill_type="gripper_close",
-            duration=duration,
             goal_joint_5=current_arm_rad,
             goal_gripper=self.gripper_close_pos,
         )
@@ -1286,7 +1280,6 @@ class LeRobotSkills:
         self._set_skill_recording(
             label=skill_description or f"rotate gripper {dir_str}",
             skill_type="rotate",
-            duration=duration,
             goal_joint_5=target_joints,
             goal_gripper=self.current_gripper_pos,
         )
@@ -1345,7 +1338,6 @@ class LeRobotSkills:
         self._set_skill_recording(
             label=skill_description or "move to free state",
             skill_type="move_free",
-            duration=duration,
             goal_joint_5=goal_joint_rad,
             goal_gripper=self.free_state_gripper,
         )

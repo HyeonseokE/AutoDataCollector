@@ -57,3 +57,8 @@ claude_document/branch_guidelines.md
 # Cloud inference (local development)
 cloud_inference2/
 lerobot/
+
+# Model checkpoints and artifacts
+models/checkpoints/
+models/**/*.pt
+models/**/*.pth

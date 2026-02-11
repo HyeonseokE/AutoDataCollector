@@ -7,7 +7,6 @@ skill.* feature들이 정상적으로 기록되는지 테스트합니다.
 """
 
 import sys
-import time
 import numpy as np
 from pathlib import Path
 
@@ -70,7 +69,6 @@ def test_recording_context():
     RecordingContext.set_skill_info(
         label="move to blue dish",
         skill_type="move",
-        duration=3.0,
         goal_joint=goal_joint,
         goal_world_xyzrpy=goal_world,
         goal_robot_xyzrpy=goal_robot,
@@ -141,7 +139,6 @@ def test_state_based_progress_edge_cases():
     RecordingContext.set_skill_info(
         label="already at goal",
         skill_type="move",
-        duration=3.0,
         goal_joint=same_state,
         goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
         goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),
@@ -153,32 +150,7 @@ def test_state_based_progress_edge_cases():
     assert progress == 1.0, f"zero distance should return 1.0, got {progress}"
     RecordingContext.clear_skill_info()
 
-    # Edge case 2: time-based fallback (start_state=None)
-    RecordingContext.set_skill_info(
-        label="time-based fallback",
-        skill_type="move",
-        duration=2.0,
-        goal_joint=np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0], dtype=np.float32),
-        goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
-        goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),
-        goal_gripper=85.0,
-        start_state=None,  # No start_state → time-based fallback
-    )
-    time.sleep(0.5)
-    progress_time = RecordingContext.get_skill_progress()  # No current_state → time-based
-    expected_time = 0.5 / 2.0  # ~0.25
-    print(f"  ✓ time-based fallback (no start_state): {progress_time:.3f} (expected ~{expected_time:.3f})")
-    assert 0.15 < progress_time < 0.45, f"time-based progress out of range: {progress_time}"
-
-    # Also verify: even with current_state, if start_state is None → time-based
-    progress_time2 = RecordingContext.get_skill_progress(
-        current_state=np.zeros(6, dtype=np.float32)
-    )
-    print(f"  ✓ time-based (start_state=None, current_state given): {progress_time2:.3f}")
-    assert progress_time2 > 0.15, f"should still use time-based, got {progress_time2}"
-    RecordingContext.clear_skill_info()
-
-    # Edge case 3: overshoot (current past goal)
+    # Edge case 2: overshoot (current past goal)
     # L2 distance 특성: 목표를 지나치면 goal과의 거리가 다시 증가 → progress 감소
     # ||goal - current|| = 5, ||goal - start|| = 10, progress = 1 - 5/10 = 0.5
     start = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -187,7 +159,6 @@ def test_state_based_progress_edge_cases():
     RecordingContext.set_skill_info(
         label="overshoot",
         skill_type="move",
-        duration=3.0,
         goal_joint=goal,
         goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
         goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),

@@ -27,7 +27,7 @@ INSTRUCTION="pick up the red block and place it on the blue dish"
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=30
+NUM_EPISODES=20
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false
@@ -35,26 +35,24 @@ USE_SERVER=false
 # ============================================================
 # Reset execution 설정
 # ============================================================
-
-# Reset 실행 여부 (false면 Forward + Judge만 실행)
-EXECUTE_RESET=true
-
-# Reset 모드 ("original": 원래 위치로 복귀, "random": 랜덤 위치로 배치)
-RESET_MODE="original"
+EXECUTE_RESET=true # Reset 실행 여부
+RESET_MODE="original" # Reset_mode:("original": 원래 위치로 복귀, "random": 랜덤 위치로 배치)
 
 # ============================================================
 # Judge execution 설정
 # ============================================================
-
-# Judge 실행 여부 (true면 Judge 단계 건너뛰기)
 SKIP_JUDGE=true
 
 # ============================================================
 # Dataset Recording 설정
 # ============================================================
-
-# LeRobot 데이터셋 레코딩 활성화
 RECORD_DATASET=true
+
+
+
+
+
+
 
 # ============================================================
 # Config 파일 로드 함수

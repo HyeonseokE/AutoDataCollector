@@ -4,16 +4,16 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/pick_and_place_30epis"
+dataset_repo_id: "local/pick_and_place_20epis7"
 recording_fps: 30
 robot_type: "so101"
 
 # =============================================================================
 # Camera Configuration
 # =============================================================================
+## Intel RealSense D435
+## pyrealsense2 SDK가 자동 감지 (serial_number로 특정 카메라 지정 가능)
 cameras:
-  ## Intel RealSense D435
-  ## pyrealsense2 SDK가 자동 감지 (serial_number로 특정 카메라 지정 가능)
   - name: "realsense"
     type: "realsense"
     serial_number: "335622072328"
@@ -46,4 +46,19 @@ cameras:
   #   fps: 30
   #   fourcc: "MJPG"
 
-  
+
+# =============================================================================
+# Skill Features Configuration
+# =============================================================================
+## skill.* feature 개별 on/off 설정
+## false로 설정하면 해당 feature가 dataset에 기록되지 않음
+skill_features:
+  natural_language: true   # skill.natural_language (자연어 스킬 설명)
+  type: true               # skill.type (move_to, pick, place 등)
+  progress: true           # skill.progress (0.0~1.0 진행률)
+  goal_position:
+    joint: true            # skill.goal_position.joint (목표 joint 위치)
+    world_xyzrpy: true     # skill.goal_position.world_xyzrpy (world 좌표계)
+    robot_xyzrpy: true     # skill.goal_position.robot_xyzrpy (robot 좌표계)
+    gripper: true          # skill.goal_position.gripper (gripper 상태)
+

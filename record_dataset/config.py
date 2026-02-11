@@ -120,6 +120,74 @@ def get_enabled_cameras() -> List[CameraConfigRecord]:
     return [cam for cam in DEFAULT_CAMERAS if cam.enabled]
 
 
+# =============================================================================
+# Skill Features Configuration
+# =============================================================================
+
+# Skill feature keys
+SKILL_FEATURE_KEYS = [
+    "skill.natural_language",
+    "skill.type",
+    "skill.progress",
+    "skill.goal_position.joint",
+    "skill.goal_position.world_xyzrpy",
+    "skill.goal_position.robot_xyzrpy",
+    "skill.goal_position.gripper",
+]
+
+
+def load_skill_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
+    """
+    YAML에서 skill feature enabled 설정 로드.
+
+    Args:
+        yaml_path: recording_config.yaml 경로 (None이면 기본 경로)
+
+    Returns:
+        Dict[str, bool]: 각 skill feature의 enabled 여부
+                         없으면 전부 True (기본값)
+    """
+    import yaml
+    from pathlib import Path
+
+    if yaml_path is None:
+        yaml_path = Path(__file__).parent.parent / "pipeline_config" / "recording_config.yaml"
+    else:
+        yaml_path = Path(yaml_path)
+
+    # 기본값: 전부 True
+    defaults = {key: True for key in SKILL_FEATURE_KEYS}
+
+    if not yaml_path.exists():
+        return defaults
+
+    try:
+        with open(yaml_path, 'r') as f:
+            data = yaml.safe_load(f)
+
+        sf = data.get("skill_features")
+        if not sf:
+            return defaults
+
+        gp = sf.get("goal_position", {})
+        # goal_position이 bool이면 하위 전체에 적용
+        if isinstance(gp, bool):
+            gp = {"joint": gp, "world_xyzrpy": gp, "robot_xyzrpy": gp, "gripper": gp}
+
+        return {
+            "skill.natural_language": sf.get("natural_language", True),
+            "skill.type": sf.get("type", True),
+            "skill.progress": sf.get("progress", True),
+            "skill.goal_position.joint": gp.get("joint", True),
+            "skill.goal_position.world_xyzrpy": gp.get("world_xyzrpy", True),
+            "skill.goal_position.robot_xyzrpy": gp.get("robot_xyzrpy", True),
+            "skill.goal_position.gripper": gp.get("gripper", True),
+        }
+    except Exception as e:
+        print(f"[Config] Warning: Failed to load skill_features from {yaml_path}: {e}")
+        return defaults
+
+
 def get_camera_feature_keys() -> List[str]:
     """활성화된 카메라 feature 키 목록"""
     return [cam.to_feature_key() for cam in get_enabled_cameras()]
@@ -129,18 +197,25 @@ def get_camera_feature_keys() -> List[str]:
 # Dataset Features Schema (LeRobot v3.0 format)
 # =============================================================================
 
-def build_dataset_features(cameras: List[CameraConfigRecord] = None) -> Dict[str, Any]:
+def build_dataset_features(
+    cameras: List[CameraConfigRecord] = None,
+    skill_enabled: Dict[str, bool] = None,
+) -> Dict[str, Any]:
     """
     데이터셋 features 스키마 빌드
 
     Args:
         cameras: 카메라 설정 리스트 (None이면 DEFAULT_CAMERAS 사용)
+        skill_enabled: skill feature별 enabled 여부 (None이면 전부 True)
 
     Returns:
         LeRobot 데이터셋 features 딕셔너리
     """
     if cameras is None:
         cameras = get_enabled_cameras()
+
+    if skill_enabled is None:
+        skill_enabled = {key: True for key in SKILL_FEATURE_KEYS}
 
     features = {
         # Robot state: current joint positions (normalized -100 to +100)
@@ -162,14 +237,20 @@ def build_dataset_features(cameras: List[CameraConfigRecord] = None) -> Dict[str
     for cam in cameras:
         features[cam.to_feature_key()] = cam.to_feature_schema()
 
-    # Skill-level subgoal labels
-    features["skill.natural_language"] = {"dtype": "string", "shape": (1,), "names": None}
-    features["skill.type"] = {"dtype": "string", "shape": (1,), "names": None}
-    features["skill.progress"] = {"dtype": "float32", "shape": (1,), "names": None}
-    features["skill.goal_position.joint"] = {"dtype": "float32", "shape": (NUM_JOINTS,), "names": JOINT_NAMES}
-    features["skill.goal_position.world_xyzrpy"] = {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]}
-    features["skill.goal_position.robot_xyzrpy"] = {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]}
-    features["skill.goal_position.gripper"] = {"dtype": "float32", "shape": (1,), "names": ["gripper.pos"]}
+    # Skill-level subgoal labels (enabled인 것만 추가)
+    skill_schemas = {
+        "skill.natural_language": {"dtype": "string", "shape": (1,), "names": None},
+        "skill.type": {"dtype": "string", "shape": (1,), "names": None},
+        "skill.progress": {"dtype": "float32", "shape": (1,), "names": None},
+        "skill.goal_position.joint": {"dtype": "float32", "shape": (NUM_JOINTS,), "names": JOINT_NAMES},
+        "skill.goal_position.world_xyzrpy": {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]},
+        "skill.goal_position.robot_xyzrpy": {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]},
+        "skill.goal_position.gripper": {"dtype": "float32", "shape": (1,), "names": ["gripper.pos"]},
+    }
+
+    for key, schema in skill_schemas.items():
+        if skill_enabled.get(key, True):
+            features[key] = schema
 
     return features
 
@@ -394,7 +475,8 @@ def build_features_from_yaml(yaml_path: str = None) -> Dict[str, Any]:
     """
     cameras = load_cameras_from_yaml(yaml_path)
     enabled_cameras = [cam for cam in cameras if cam.enabled]
-    return build_dataset_features(enabled_cameras)
+    skill_enabled = load_skill_features_from_yaml(yaml_path)
+    return build_dataset_features(enabled_cameras, skill_enabled)
 
 
 # =============================================================================

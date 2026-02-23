@@ -133,6 +133,10 @@ class ForwardAndResetPipeline:
         record_dataset: bool = False,
         dataset_repo_id: Optional[str] = None,
         recording_fps: int = 30,
+        # Multi-turn options
+        multi_turn: bool = False,
+        cad_image_dirs: List[str] = None,
+        side_view_image: str = None,
     ):
         """
         초기화
@@ -147,6 +151,8 @@ class ForwardAndResetPipeline:
             record_dataset: LeRobot 데이터셋 레코딩 활성화
             dataset_repo_id: 데이터셋 저장 경로 (예: "user/my_dataset")
             recording_fps: 레코딩 FPS (기본: 30)
+            multi_turn: True면 crop-then-point 멀티턴 LLM 코드 생성 사용
+            cad_image_dirs: CAD 참조 이미지 디렉토리 리스트 (옵션)
         """
         self.robot_id = robot_id
         self.llm_model = llm_model
@@ -154,6 +160,12 @@ class ForwardAndResetPipeline:
         self.judge_timeout_ms = judge_timeout_ms
         self.reset_mode = reset_mode
         self.verbose = verbose
+
+        # Multi-turn options
+        self.multi_turn = multi_turn
+        self.cad_image_dirs = cad_image_dirs or []
+        self.side_view_image = side_view_image
+        self.multi_turn_info: Dict = {}
 
         # Recording options
         self.record_dataset = record_dataset
@@ -240,6 +252,9 @@ class ForwardAndResetPipeline:
 
             self.camera = RealSenseD435(width=640, height=480, fps=30)
             self.camera.start()
+            # Warm-up: AWB/AE 안정화를 위해 초기 프레임 버리기
+            for _ in range(30):
+                self.camera.get_frames()
             if self.verbose:
                 print("[Pipeline] Camera initialized")
             return True
@@ -421,13 +436,29 @@ class ForwardAndResetPipeline:
         # This includes gripper_offset calculated from bbox size
         return extended_results
 
-    def generate_forward_code(self, instruction: str, positions: Dict) -> str:
+    def generate_forward_code(
+        self,
+        instruction: str,
+        positions: Dict,
+        image_path: str = None,
+    ) -> str:
         """Forward 코드 생성
 
         Args:
             instruction: 자연어 목표
             positions: Extended format {name: {"position": [x,y,z], "gripper_offset": float, ...}}
+            image_path: 초기 이미지 경로 (multi-turn 모드에서 필수)
+
+        Returns:
+            생성된 Python 코드 문자열
         """
+        if self.multi_turn:
+            return self._generate_forward_code_multi_turn(instruction, positions, image_path)
+        else:
+            return self._generate_forward_code_single(instruction, positions)
+
+    def _generate_forward_code_single(self, instruction: str, positions: Dict) -> str:
+        """Single-turn 코드 생성 (기존 방식)"""
         from code_gen_lerobot.code_gen_with_skill import lerobot_code_gen
 
         not_found = [name for name, info in positions.items() if info is None]
@@ -446,11 +477,69 @@ class ForwardAndResetPipeline:
 
         return code
 
+    def _generate_forward_code_multi_turn(
+        self,
+        instruction: str,
+        positions: Dict,
+        image_path: str = None,
+    ) -> str:
+        """Multi-turn 코드 생성 (4-turn LLM 대화)
+
+        LLM이 직접 이미지를 보고 장면 이해 → bbox 검출 → grasp point → 코드 생성.
+        positions는 fallback으로 사용 (LLM pixel→world 변환 실패 시).
+        """
+        from code_gen_lerobot.code_gen_with_skill import lerobot_code_gen_multi_turn
+
+        if image_path is None:
+            print("[MultiTurn] WARNING: No image_path provided, falling back to single-turn")
+            return self._generate_forward_code_single(instruction, positions)
+
+        # depth 기반 3D 좌표 변환을 위해 카메라 전달
+        active_camera = None
+        if self.camera_manager and self.camera_manager.is_connected:
+            try:
+                active_camera = self.camera_manager.get_camera("realsense")
+            except KeyError:
+                pass
+        if active_camera is None:
+            active_camera = self.camera
+
+        code, mt_positions, mt_info = lerobot_code_gen_multi_turn(
+            instruction=instruction,
+            image_path=image_path,
+            llm_model=self.llm_model,
+            robot_id=self.robot_id,
+            current_episode=self.current_episode,
+            total_episodes=self.total_episodes,
+            fallback_positions=positions,
+            camera=active_camera,
+            cad_image_dirs=self.cad_image_dirs,
+            side_view_image=self.side_view_image,
+        )
+
+        # multi-turn 정보 저장
+        self.multi_turn_info = mt_info
+
+        # multi-turn으로 생성된 positions로 업데이트
+        # (world 좌표 변환 성공한 것만)
+        for name, info in mt_positions.items():
+            if not info.get("_needs_world_coords", False):
+                self.detected_positions[name] = info
+
+        return code
+
     def execute_code(self, code: str, positions: Dict) -> bool:
-        """생성된 코드 실행 (레코딩 모드 지원)"""
+        """생성된 코드 실행 (레코딩 모드 지원)
+
+        NOTE: __name__을 "__generated__"로 설정하여 LLM 생성 코드의
+        if __name__ == "__main__": 블록이 실행되지 않도록 합니다.
+        이 블록에는 LLM이 하드코딩한 가짜 positions가 포함되어 있어,
+        실행 시 올바른 pix2world 좌표를 덮어쓰는 버그가 발생합니다.
+        대신 exec 후 execute_task()를 수동으로 호출합니다.
+        """
         try:
             exec_globals = {
-                "__name__": "__main__",
+                "__name__": "__generated__",
                 "positions": positions,
             }
 
@@ -460,6 +549,8 @@ class ForwardAndResetPipeline:
                 return self._execute_code_with_recording(code, exec_globals)
             else:
                 exec(code, exec_globals)
+                if "execute_task" in exec_globals:
+                    exec_globals["execute_task"]()
                 return True
 
         except AssertionError as e:
@@ -511,6 +602,8 @@ class ForwardAndResetPipeline:
 
             # 코드 실행 - LeRobotSkills가 자동으로 콜백 획득
             exec(code, exec_globals)
+            if "execute_task" in exec_globals:
+                exec_globals["execute_task"]()
 
             # 레코딩 통계 출력
             stats = RecordingContext.get_stats()
@@ -524,6 +617,8 @@ class ForwardAndResetPipeline:
             print(f"[Recording] Warning: RecordingContext not available: {e}")
             print(f"[Recording] Falling back to non-recording execution")
             exec(code, exec_globals)
+            if "execute_task" in exec_globals:
+                exec_globals["execute_task"]()
             return True
 
         except AssertionError as e:
@@ -876,116 +971,239 @@ class ForwardAndResetPipeline:
             print(f"\n{GREEN}{BOLD}" + self._log("FORWARD EXECUTION") + f"{RESET}")
             print(GREEN + "-" * 70 + RESET)
 
-            # Step 1: 객체 검출
-            # Note: Recording 카메라가 있으면 run_detection에서 자동 공유
-            print(f"\n{YELLOW}" + self._log(f"Detecting objects: {objects}", step="Step 1/5") + f"{RESET}")
-            if visualize_detection:
-                print("  (Visualization mode)")
-            else:
-                if not self.initialize_camera():
-                    print(f"{RED}[Error] Camera initialization failed{RESET}")
+            if self.multi_turn:
+                # ============================================================
+                # Multi-turn: Detection 스킵, 이미지만 캡처하여 VLM에 전달
+                # VLM이 Turn 1에서 직접 물체를 식별함
+                # ============================================================
+
+                # Step 1: 이미지 캡처 (Detection 없이)
+                print(f"\n{YELLOW}" + self._log("Capturing image for VLM (no detection)...", step="Step 1/5") + f"{RESET}")
+
+                # 카메라 초기화 (기존 capture_frame 활용: camera_manager → self.camera 순)
+                if not self.camera and not (self.camera_manager and self.camera_manager.is_connected):
+                    if not self.initialize_camera():
+                        print(f"{RED}[Error] Camera initialization failed{RESET}")
+                        return result
+
+                self.initial_image = self.capture_frame()
+                if self.initial_image is None:
+                    print(f"{RED}[Error] Failed to capture image{RESET}")
                     return result
 
-            self.detected_positions = self.run_detection(
-                queries=objects,
-                timeout=detection_timeout,
-                visualize=visualize_detection,
-            )
-            result['forward']['positions'] = self.detected_positions
-
-            # [즉시 저장] Detection 이미지
-            if self.detection_image is not None:
-                detection_path = Path(forward_dir) / "detection_result.jpg"
-                cv2.imwrite(str(detection_path), self.detection_image)  # Already BGR
-                print(f"  Detection image saved: {detection_path}")
-
-            # 검출 결과 검증 1: 객체 미발견 체크
-            not_found = [k for k, v in self.detected_positions.items() if v is None]
-            if not_found:
-                print(f"{RED}[Error] Objects not detected: {not_found}{RESET}")
-                return result
-
-            # 첫 에피소드의 검출 위치 저장 (original reset mode용)
-            if self.first_episode_positions is None:
-                import copy
-                self.first_episode_positions = copy.deepcopy(self.detected_positions)
-                print(f"  {GREEN}[First Episode] Initial positions saved for 'original' reset mode{RESET}")
-
-            # 검출 결과 검증 2: Workspace 범위 체크
-            print(f"\n{YELLOW}" + self._log("Checking workspace bounds...", tag="Validation") + f"{RESET}")
-            sys.path.insert(0, str(PROJECT_ROOT / "src"))
-            from lerobot_cap.workspace import BaseWorkspace
-            from lerobot_cap.transforms import FrameTransformer
-
-            # FrameTransformer 생성 (robot_id에 맞는 config 로드)
-            frame_config_path = PROJECT_ROOT / f"robot_configs/world2robot_matrices/robot{self.robot_id}_matrix.json"
-            if frame_config_path.exists():
-                frame_transformer = FrameTransformer(str(frame_config_path))
-            else:
-                frame_transformer = None
-                print(f"  {YELLOW}[Warning] Frame config not found: {frame_config_path}{RESET}")
-
-            workspace = BaseWorkspace(frame_transformer=frame_transformer)
-            print(f"  Workspace: x_min_world={workspace.x_min_world:.2f}m, reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
-
-            # 경계값 정의
-            X_WORKSPACE_MIN = workspace.x_min_world  # workspace 최소값 (기본 0.12m)
-            X_WARNING_MAX = 0.14  # 이 값 미만이면 경고 (경계 근처)
-
-            critical_error = False
-            for obj_name, obj_info in self.detected_positions.items():
-                if obj_info is None:
-                    continue
-                pos = obj_info.get("position") if isinstance(obj_info, dict) else obj_info
-                if pos is None:
-                    continue
-                position_m = np.array([pos[0], pos[1], pos[2]])
-                x_pos = pos[0]
-
-                # Case 1: x < x_min_world (12cm) → workspace 밖, 파이프라인 종료
-                if x_pos < X_WORKSPACE_MIN:
-                    print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
-                    print(f"{RED}  x={x_pos:.3f}m < {X_WORKSPACE_MIN}m (workspace limit) - OUTSIDE WORKSPACE!{RESET}")
-                    print(f"{RED}  Pipeline will be terminated.{RESET}")
-                    critical_error = True
-                # Case 2: 12cm <= x < 14cm → 경계 근처, 경고만 출력
-                elif x_pos < X_WARNING_MAX:
-                    print(f"{YELLOW}[WARNING] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
-                    print(f"{YELLOW}  x={x_pos:.3f}m is near workspace boundary ({X_WORKSPACE_MIN}m), continuing...{RESET}")
-                # Case 3: 기타 workspace 검사 (reach limits 등)
-                elif not workspace.is_reachable(position_m):
-                    print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
-                    print(f"{RED}  Outside reach limits: [{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m{RESET}")
-                    critical_error = True
-                else:
-                    print(f"  {GREEN}✓ '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m - OK{RESET}")
-
-            if critical_error:
-                print(f"\n{RED}[Error] Critical workspace violation detected. Terminating pipeline.{RESET}")
-                return result
-
-            # Step 2: Initial 이미지 캡처
-            print(f"\n{YELLOW}" + self._log("Capturing initial state...", step="Step 2/5") + f"{RESET}")
-            if self.initial_image is None:
-                self.initial_image = self.capture_frame()
-            if self.initial_image is not None:
-                # 해상도 저장 (Judge용)
                 self.initial_image_resolution = (self.initial_image.shape[1], self.initial_image.shape[0])
-                print(f"  Initial image captured ({self.initial_image_resolution[0]}x{self.initial_image_resolution[1]})")
+                print(f"  Image captured ({self.initial_image_resolution[0]}x{self.initial_image_resolution[1]})")
+
                 # [즉시 저장] Initial 이미지
                 initial_path = Path(forward_dir) / "initial_state.jpg"
-                cv2.imwrite(str(initial_path), self.initial_image)  # Already BGR
-                print(f"  Initial image saved: {initial_path}")
+                cv2.imwrite(str(initial_path), self.initial_image)
+                print(f"  Image saved: {initial_path}")
 
-            # Step 3: Forward 코드 생성
-            print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model})...", step="Step 3/5") + f"{RESET}")
-            self.generated_code = self.generate_forward_code(instruction, self.detected_positions)
+                # Detection 없이 빈 positions
+                self.detected_positions = {}
+                result['forward']['positions'] = self.detected_positions
+
+                # Step 2: (스킵 — Step 1에서 이미 캡처됨)
+
+                # Step 3: Forward 코드 생성 (multi-turn)
+                print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, multi-turn)...", step="Step 3/5") + f"{RESET}")
+
+                self.generated_code = self.generate_forward_code(
+                    instruction,
+                    self.detected_positions,
+                    image_path=str(initial_path),
+                )
+
+            else:
+                # ============================================================
+                # Single-turn: 기존 Grounding DINO Detection → 코드 생성
+                # ============================================================
+
+                # Step 1: 객체 검출
+                # Note: Recording 카메라가 있으면 run_detection에서 자동 공유
+                print(f"\n{YELLOW}" + self._log(f"Detecting objects: {objects}", step="Step 1/5") + f"{RESET}")
+                if visualize_detection:
+                    print("  (Visualization mode)")
+                else:
+                    if not self.initialize_camera():
+                        print(f"{RED}[Error] Camera initialization failed{RESET}")
+                        return result
+
+                self.detected_positions = self.run_detection(
+                    queries=objects,
+                    timeout=detection_timeout,
+                    visualize=visualize_detection,
+                )
+                result['forward']['positions'] = self.detected_positions
+
+                # [즉시 저장] Detection 이미지
+                if self.detection_image is not None:
+                    detection_path = Path(forward_dir) / "detection_result.jpg"
+                    cv2.imwrite(str(detection_path), self.detection_image)  # Already BGR
+                    print(f"  Detection image saved: {detection_path}")
+
+                # 검출 결과 검증 1: 객체 미발견 체크
+                not_found = [k for k, v in self.detected_positions.items() if v is None]
+                if not_found:
+                    print(f"{RED}[Error] Objects not detected: {not_found}{RESET}")
+                    return result
+
+                # 첫 에피소드의 검출 위치 저장 (original reset mode용)
+                if self.first_episode_positions is None:
+                    import copy
+                    self.first_episode_positions = copy.deepcopy(self.detected_positions)
+                    print(f"  {GREEN}[First Episode] Initial positions saved for 'original' reset mode{RESET}")
+
+                # 검출 결과 검증 2: Workspace 범위 체크
+                print(f"\n{YELLOW}" + self._log("Checking workspace bounds...", tag="Validation") + f"{RESET}")
+                sys.path.insert(0, str(PROJECT_ROOT / "src"))
+                from lerobot_cap.workspace import BaseWorkspace
+                from lerobot_cap.transforms import FrameTransformer
+
+                # FrameTransformer 생성 (robot_id에 맞는 config 로드)
+                frame_config_path = PROJECT_ROOT / f"robot_configs/world2robot_matrices/robot{self.robot_id}_matrix.json"
+                if frame_config_path.exists():
+                    frame_transformer = FrameTransformer(str(frame_config_path))
+                else:
+                    frame_transformer = None
+                    print(f"  {YELLOW}[Warning] Frame config not found: {frame_config_path}{RESET}")
+
+                workspace = BaseWorkspace(frame_transformer=frame_transformer)
+                print(f"  Workspace: x_min_world={workspace.x_min_world:.2f}m, reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
+
+                # 경계값 정의
+                X_WORKSPACE_MIN = workspace.x_min_world  # workspace 최소값 (기본 0.12m)
+                X_WARNING_MAX = 0.14  # 이 값 미만이면 경고 (경계 근처)
+
+                critical_error = False
+                for obj_name, obj_info in self.detected_positions.items():
+                    if obj_info is None:
+                        continue
+                    pos = obj_info.get("position") if isinstance(obj_info, dict) else obj_info
+                    if pos is None:
+                        continue
+                    position_m = np.array([pos[0], pos[1], pos[2]])
+                    x_pos = pos[0]
+
+                    # Case 1: x < x_min_world (12cm) → workspace 밖, 파이프라인 종료
+                    if x_pos < X_WORKSPACE_MIN:
+                        print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
+                        print(f"{RED}  x={x_pos:.3f}m < {X_WORKSPACE_MIN}m (workspace limit) - OUTSIDE WORKSPACE!{RESET}")
+                        print(f"{RED}  Pipeline will be terminated.{RESET}")
+                        critical_error = True
+                    # Case 2: 12cm <= x < 14cm → 경계 근처, 경고만 출력
+                    elif x_pos < X_WARNING_MAX:
+                        print(f"{YELLOW}[WARNING] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
+                        print(f"{YELLOW}  x={x_pos:.3f}m is near workspace boundary ({X_WORKSPACE_MIN}m), continuing...{RESET}")
+                    # Case 3: 기타 workspace 검사 (reach limits 등)
+                    elif not workspace.is_reachable(position_m):
+                        print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
+                        print(f"{RED}  Outside reach limits: [{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m{RESET}")
+                        critical_error = True
+                    else:
+                        print(f"  {GREEN}✓ '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m - OK{RESET}")
+
+                if critical_error:
+                    print(f"\n{RED}[Error] Critical workspace violation detected. Terminating pipeline.{RESET}")
+                    return result
+
+                # Step 2: Initial 이미지 캡처
+                print(f"\n{YELLOW}" + self._log("Capturing initial state...", step="Step 2/5") + f"{RESET}")
+                if self.initial_image is None:
+                    self.initial_image = self.capture_frame()
+                if self.initial_image is not None:
+                    # 해상도 저장 (Judge용)
+                    self.initial_image_resolution = (self.initial_image.shape[1], self.initial_image.shape[0])
+                    print(f"  Initial image captured ({self.initial_image_resolution[0]}x{self.initial_image_resolution[1]})")
+                    # [즉시 저장] Initial 이미지
+                    initial_path = Path(forward_dir) / "initial_state.jpg"
+                    cv2.imwrite(str(initial_path), self.initial_image)  # Already BGR
+                    print(f"  Initial image saved: {initial_path}")
+
+                # Step 3: Forward 코드 생성
+                print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, single-turn)...", step="Step 3/5") + f"{RESET}")
+
+                self.generated_code = self.generate_forward_code(
+                    instruction,
+                    self.detected_positions,
+                )
             result['forward']['code'] = self.generated_code
 
             # [즉시 저장] Generated code
             code_path = Path(forward_dir) / "generated_code.py"
             code_path.write_text(self.generated_code)
             print(f"  Generated code saved: {code_path}")
+
+            # [즉시 저장] Multi-turn info (if available)
+            if self.multi_turn and self.multi_turn_info:
+                mt_info_path = Path(forward_dir) / "multi_turn_info.json"
+                mt_save = {
+                    "turn0_response": self.multi_turn_info.get("turn0_response", ""),
+                    "turn1_response": self.multi_turn_info.get("turn1_response", ""),
+                    "turn2_response": self.multi_turn_info.get("turn2_response", ""),
+                    "turn3_response": self.multi_turn_info.get("turn3_response", ""),
+                    "turn1_parsed": self.multi_turn_info.get("turn1_parsed"),
+                    "turn2_parsed": self.multi_turn_info.get("turn2_parsed"),
+                    "detected_objects": self.multi_turn_info.get("detected_objects"),
+                    "all_points": self.multi_turn_info.get("all_points"),
+                    "crop_responses": self.multi_turn_info.get("crop_responses"),
+                    "turn_test_response": self.multi_turn_info.get("turn_test_response", ""),
+                    "turn_test_overhead_waypoints": self.multi_turn_info.get("turn_test_overhead_waypoints"),
+                    "turn_test_sideview_waypoints": self.multi_turn_info.get("turn_test_sideview_waypoints"),
+                }
+                import json as _json
+                with open(mt_info_path, 'w', encoding='utf-8') as f:
+                    _json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
+                print(f"  Multi-turn info saved: {mt_info_path}")
+
+                # [신규] Turn 시각화 이미지 저장
+                if self.initial_image is not None:
+                    t1_parsed = self.multi_turn_info.get("turn1_parsed")
+                    t2_parsed = self.multi_turn_info.get("turn2_parsed")
+
+                    if t1_parsed:
+                        self._visualize_turn1(
+                            self.initial_image.copy(), t1_parsed,
+                            str(Path(forward_dir) / "turn1_detection.jpg"),
+                            turn1_raw=self.multi_turn_info.get("turn0_response", ""),
+                        )
+                    if t2_parsed:
+                        self._visualize_turn2(
+                            self.initial_image.copy(), t1_parsed, t2_parsed,
+                            str(Path(forward_dir) / "turn2_grasp_points.jpg")
+                        )
+
+                    oh_waypoints = self.multi_turn_info.get("turn_test_overhead_waypoints")
+                    if oh_waypoints:
+                        self._visualize_turn_test(
+                            self.initial_image.copy(), t2_parsed, oh_waypoints,
+                            str(Path(forward_dir) / "turn_test_overhead_waypoints.jpg")
+                        )
+
+                    sv_waypoints = self.multi_turn_info.get("turn_test_sideview_waypoints")
+                    sv_image_path = self.multi_turn_info.get("side_view_image")
+                    if sv_waypoints and sv_image_path and os.path.isfile(sv_image_path):
+                        sv_img = cv2.imread(sv_image_path)
+                        if sv_img is not None:
+                            sv_img = cv2.resize(sv_img, (640, 480))
+                            self._visualize_turn_test(
+                                sv_img, None, sv_waypoints,
+                                str(Path(forward_dir) / "turn_test_sideview_waypoints.jpg")
+                            )
+
+                # [신규] Turn 2 crop 이미지 저장
+                crop_dir = self.multi_turn_info.get("crop_dir")
+                if crop_dir and os.path.isdir(crop_dir):
+                    import shutil
+                    for fname in sorted(os.listdir(crop_dir)):
+                        if fname.endswith(('.jpg', '.png')):
+                            src = os.path.join(crop_dir, fname)
+                            dst = os.path.join(forward_dir, fname)
+                            shutil.copy2(src, dst)
+                    print(f"  Crop images saved to: {forward_dir}")
+
+                # [신규] Turn description 로그 저장
+                self._save_turn_logs(forward_dir, self.multi_turn_info)
 
             print("\n" + "-" * 40)
             print("Generated Forward Code (preview):")
@@ -1309,6 +1527,288 @@ class ForwardAndResetPipeline:
 
         finally:
             self.shutdown_camera()
+
+    def _visualize_turn1(
+        self,
+        image: np.ndarray,
+        turn1_parsed,
+        save_path: str,
+        turn1_raw: str = "",
+    ) -> None:
+        """Turn 1 bbox 시각화 — test6 스타일 (녹색 bbox + 라벨)"""
+        obj_list = None
+        if isinstance(turn1_parsed, list):
+            obj_list = turn1_parsed
+        elif isinstance(turn1_parsed, dict) and "objects" in turn1_parsed:
+            obj_list = turn1_parsed["objects"]
+
+        if not obj_list:
+            print(f"  [Visualize] Turn 1: No objects to draw")
+            return
+
+        img_h, img_w = image.shape[:2]
+
+        for obj in obj_list:
+            label = obj.get("label") or obj.get("name", "?")
+            box = obj.get("box_2d") or obj.get("bbox_pixel")
+            if box and len(box) == 4:
+                ymin, xmin, ymax, xmax = box
+                x1 = int(xmin * img_w / 1000)
+                y1 = int(ymin * img_h / 1000)
+                x2 = int(xmax * img_w / 1000)
+                y2 = int(ymax * img_h / 1000)
+                cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                (tw, th), _ = cv2.getTextSize(label, font, 0.5, 1)
+                cv2.rectangle(image, (x1, y1 - th - 8), (x1 + tw + 4, y1), (0, 255, 0), -1)
+                cv2.putText(image, label, (x1 + 2, y1 - 4), font, 0.5, (0, 0, 0), 1)
+
+        cv2.imwrite(save_path, image)
+        print(f"  Turn 1 visualization saved: {save_path}")
+
+    def _visualize_turn2(
+        self,
+        image: np.ndarray,
+        turn1_parsed,
+        turn2_parsed,
+        save_path: str,
+    ) -> None:
+        """Turn 2 결과 시각화: bbox + grasp/interaction 포인트 (test6 스타일)
+
+        Args:
+            image: BGR 이미지 (copy)
+            turn1_parsed: Turn 1 parsed 데이터 (bbox 리스트)
+            turn2_parsed: Turn 2 parsed 데이터 ({"grasp_points": [...]})
+            save_path: 저장 경로
+        """
+        img_h, img_w = image.shape[:2]
+
+        # Turn 1 bbox 그리기
+        obj_list = None
+        if isinstance(turn1_parsed, list):
+            obj_list = turn1_parsed
+        elif isinstance(turn1_parsed, dict) and "objects" in turn1_parsed:
+            obj_list = turn1_parsed["objects"]
+
+        if obj_list:
+            for obj in obj_list:
+                box = obj.get("box_2d") or obj.get("bbox_pixel")
+                label = obj.get("label", "")
+                if box and len(box) == 4:
+                    ymin, xmin, ymax, xmax = box
+                    x1 = int(xmin * img_w / 1000)
+                    y1 = int(ymin * img_h / 1000)
+                    x2 = int(xmax * img_w / 1000)
+                    y2 = int(ymax * img_h / 1000)
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(image, label, (x1, y1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+        # Critical points 그리기 (grasp: 녹색 원, interaction: 빨간 X)
+        ROLE_COLORS = {
+            "grasp": (0, 255, 0),       # green
+            "pick": (0, 255, 0),         # green (하위호환)
+            "interaction": (0, 0, 255),  # red
+            "place": (255, 0, 0),        # blue (하위호환)
+        }
+
+        grasp_points = []
+        if isinstance(turn2_parsed, dict) and "grasp_points" in turn2_parsed:
+            grasp_points = turn2_parsed["grasp_points"]
+
+        if not grasp_points:
+            print(f"  [Visualize] Turn 2: No points to draw")
+            return
+
+        for i, gp in enumerate(grasp_points):
+            name = gp.get("object_name", "unknown")
+            sub_label = gp.get("label", "")
+            role = gp.get("role", "grasp")
+            pixel = gp.get("point_pixel")
+
+            if not pixel or len(pixel) != 2:
+                continue
+
+            px = int(pixel[1] * img_w / 1000)
+            py = int(pixel[0] * img_h / 1000)
+            color = ROLE_COLORS.get(role, (255, 255, 255))
+
+            # 마커: grasp → green dot, interaction → red dot
+            cv2.circle(image, (px, py), 3, color, -1)
+            cv2.circle(image, (px, py), 3, (0, 0, 0), 1)
+
+            # 라벨
+            marker_label = f"{name}: {sub_label}" if sub_label else name
+            (tw, th), _ = cv2.getTextSize(marker_label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+            # 짝수/홀수로 텍스트 위치 교차 (겹침 방지)
+            if i % 2 == 0:
+                text_x = min(px + 15, img_w - tw - 5)
+                text_y = max(py - 8, th + 5)
+            else:
+                text_x = max(px - tw - 15, 2)
+                text_y = min(py + 12, img_h - 5)
+
+            cv2.rectangle(image, (text_x - 2, text_y - th - 4),
+                          (text_x + tw + 2, text_y + 4), color, -1)
+            cv2.putText(image, marker_label, (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+        cv2.imwrite(save_path, image)
+        print(f"  Turn 2 visualization saved: {save_path}")
+
+    def _visualize_turn_test(
+        self,
+        image: np.ndarray,
+        turn2_parsed,
+        waypoints: list,
+        save_path: str,
+    ) -> None:
+        """Turn Test 결과 시각화: interaction points + waypoint trajectory
+
+        Args:
+            image: BGR 이미지 (copy)
+            turn2_parsed: Turn 2 parsed 데이터 (interaction point 표시용)
+            waypoints: turn_test_waypoints 리스트 [{"py", "px", "label", ...}, ...]
+            save_path: 저장 경로
+        """
+        img_h, img_w = image.shape[:2]
+
+        WAYPOINT_COLOR = (255, 165, 0)  # orange (BGR)
+        LINE_COLOR = (255, 200, 100)    # light blue-ish line
+        INTERACTION_COLOR = (0, 0, 255) # red
+
+        # Draw interaction points from Turn 2 (for reference)
+        if isinstance(turn2_parsed, dict) and "grasp_points" in turn2_parsed:
+            for gp in turn2_parsed["grasp_points"]:
+                if gp.get("role") != "interaction":
+                    continue
+                pixel = gp.get("point_pixel")
+                if not pixel or len(pixel) != 2:
+                    continue
+                ipx = int(pixel[1] * img_w / 1000)
+                ipy = int(pixel[0] * img_h / 1000)
+                cv2.circle(image, (ipx, ipy), 5, INTERACTION_COLOR, -1)
+                cv2.circle(image, (ipx, ipy), 5, (0, 0, 0), 1)
+
+        if not waypoints:
+            print(f"  [Visualize] Turn Test: No waypoints to draw")
+            return
+
+        # Collect pixel coords for line drawing
+        wp_pixels = []
+        for wp in waypoints:
+            wy = wp.get("py", 0)
+            wx = wp.get("px", 0)
+            wp_pixels.append((wx, wy))
+
+        # Draw lines between consecutive waypoints
+        for i in range(len(wp_pixels) - 1):
+            cv2.line(image, wp_pixels[i], wp_pixels[i + 1], LINE_COLOR, 2)
+
+        # Draw waypoint dots and labels
+        for i, (wp, (wx, wy)) in enumerate(zip(waypoints, wp_pixels)):
+            label = wp.get("label", f"wp{i}")
+
+            cv2.circle(image, (wx, wy), 4, WAYPOINT_COLOR, -1)
+            cv2.circle(image, (wx, wy), 4, (0, 0, 0), 1)
+
+            # Label
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+            text_x = min(wx + 8, img_w - tw - 5)
+            text_y = max(wy - 6, th + 5)
+            cv2.rectangle(image, (text_x - 2, text_y - th - 2),
+                          (text_x + tw + 2, text_y + 2), WAYPOINT_COLOR, -1)
+            cv2.putText(image, label, (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+
+        cv2.imwrite(save_path, image)
+        print(f"  Turn Test visualization saved: {save_path}")
+
+    def _save_turn_logs(self, forward_dir: str, multi_turn_info: Dict) -> None:
+        """턴별 description 로그를 텍스트 파일로 저장
+
+        Args:
+            forward_dir: forward 결과 저장 디렉토리
+            multi_turn_info: multi-turn 정보 dict
+        """
+        if not multi_turn_info:
+            return
+
+        forward_path = Path(forward_dir)
+
+        # Turn 0 로그 (Scene Understanding)
+        turn0_raw = multi_turn_info.get("turn0_response", "")
+        if turn0_raw:
+            lines = ["=" * 60, "Turn 0: Scene Understanding", "=" * 60, ""]
+            lines.append("[Raw Response]")
+            lines.append(turn0_raw)
+
+            (forward_path / "turn0_log.txt").write_text("\n".join(lines), encoding="utf-8")
+            print(f"  Turn 0 log saved: {forward_path / 'turn0_log.txt'}")
+
+        # Turn 1 로그 (Bounding Box Detection)
+        turn1_raw = multi_turn_info.get("turn1_response", "")
+        turn1_parsed = multi_turn_info.get("turn1_parsed")
+        if turn1_raw:
+            lines = ["=" * 60, "Turn 1: Bounding Box Detection", "=" * 60, ""]
+            lines.append("[Raw Response]")
+            lines.append(turn1_raw)
+            lines.append("")
+
+            if turn1_parsed:
+                lines.append("[Parsed Summary]")
+                obj_list = None
+                if isinstance(turn1_parsed, list):
+                    obj_list = turn1_parsed
+                elif isinstance(turn1_parsed, dict) and "objects" in turn1_parsed:
+                    obj_list = turn1_parsed["objects"]
+
+                if obj_list:
+                    for obj in obj_list:
+                        name = obj.get("label") or obj.get("name", "?")
+                        box = obj.get("box_2d") or obj.get("bbox_pixel", "N/A")
+                        size = obj.get("estimated_size_cm", "N/A")
+                        lines.append(f"  - {name}: bbox={box}, size_cm={size}")
+
+            (forward_path / "turn1_log.txt").write_text("\n".join(lines), encoding="utf-8")
+            print(f"  Turn 1 log saved: {forward_path / 'turn1_log.txt'}")
+
+        # Turn 2+ 로그 (Crop-then-Point)
+        all_points = multi_turn_info.get("all_points", [])
+        crop_responses = multi_turn_info.get("crop_responses", [])
+        if all_points or crop_responses:
+            lines = ["=" * 60, "Turn 2+: Crop-then-Point", "=" * 60, ""]
+
+            # Crop별 응답
+            for cr in crop_responses:
+                lines.append(f"--- Crop: {cr.get('label', '?')} ---")
+                lines.append(cr.get("response", ""))
+                lines.append("")
+
+            # Parsed 포인트 요약
+            lines.append("[Parsed Points Summary]")
+            for pt in all_points:
+                obj = pt.get("object_label", "?")
+                label = pt.get("label", "?")
+                role = pt.get("role", "?")
+                px, py = pt.get("px", 0), pt.get("py", 0)
+                reasoning = pt.get("reasoning", "")
+                lines.append(f"  - {obj}: {label} ({role}) pixel=({px},{py})")
+                if reasoning:
+                    lines.append(f"    reasoning: {reasoning}")
+
+            (forward_path / "turn2_log.txt").write_text("\n".join(lines), encoding="utf-8")
+            print(f"  Turn 2+ log saved: {forward_path / 'turn2_log.txt'}")
+
+        # Turn 3 로그 (Code Generation)
+        turn3_raw = multi_turn_info.get("turn3_response", "")
+        if turn3_raw:
+            lines = ["=" * 60, "Turn 3: Code Generation", "=" * 60, ""]
+            lines.append("[Raw Response]")
+            lines.append(turn3_raw)
+
+            (forward_path / "turn3_log.txt").write_text("\n".join(lines), encoding="utf-8")
+            print(f"  Turn 3 log saved: {forward_path / 'turn3_log.txt'}")
 
     def _print_summary(self, result: Dict, skip_reset: bool, skip_judge: bool = False) -> None:
         """결과 요약 출력"""
@@ -1726,6 +2226,28 @@ def main():
         help="Recording FPS for LeRobot dataset (default: 30)"
     )
 
+    # Multi-turn 옵션
+    parser.add_argument(
+        "--multi-turn",
+        action="store_true",
+        help="Use crop-then-point multi-turn LLM code generation (requires Gemini model)"
+    )
+
+    parser.add_argument(
+        "--cad-image-dirs",
+        type=str,
+        nargs="*",
+        default=None,
+        help="CAD reference image directories for Turn 0 scene understanding"
+    )
+
+    parser.add_argument(
+        "--side-view-image",
+        type=str,
+        default=None,
+        help="Side-view image path for Turn Test waypoint trajectory prediction"
+    )
+
     args = parser.parse_args()
 
     # 서버 모드 설정 (환경변수로 전달)
@@ -1751,6 +2273,10 @@ def main():
         # LeRobot 데이터셋 레코딩 옵션
         record_dataset=args.record,
         dataset_repo_id=args.dataset_repo_id,
+        # Multi-turn 옵션
+        multi_turn=args.multi_turn,
+        cad_image_dirs=args.cad_image_dirs,
+        side_view_image=args.side_view_image,
         recording_fps=args.recording_fps,
     )
 

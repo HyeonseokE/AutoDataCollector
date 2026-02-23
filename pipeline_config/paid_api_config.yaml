@@ -4,7 +4,7 @@
 
 # 코드 생성용 LLM 모델
 # 예: gpt-4o-mini, gpt-4o, gemini-1.5-flash, deepseek-chat
-codegen_llm_model: "gemini-2.0-flash"
+codegen_llm_model: "gemini-3-flash-preview"
 
 # Judge VLM 모델
 # 예: gpt-4o, gpt-4o-mini

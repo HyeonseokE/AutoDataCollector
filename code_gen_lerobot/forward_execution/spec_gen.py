@@ -10,7 +10,7 @@ import re
 from typing import Dict, List, Optional
 
 from ..llm import llm_response
-from .prompt import lerobot_spec_gen_prompt
+from .user_prompt import lerobot_spec_gen_prompt
 
 
 def lerobot_spec_gen(

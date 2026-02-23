@@ -96,8 +96,6 @@ class RecordingContext:
     # Skill-level subgoal info
     _current_skill_label: Optional[str] = None
     _current_skill_type: Optional[str] = None
-    _skill_start_time: Optional[float] = None
-    _skill_duration: Optional[float] = None
     _current_goal_joint: Optional[np.ndarray] = None
     _current_goal_world_xyzrpy: Optional[np.ndarray] = None
     _current_goal_robot_xyzrpy: Optional[np.ndarray] = None
@@ -244,24 +242,21 @@ class RecordingContext:
         cls,
         label: str,
         skill_type: str,
-        duration: float,
         goal_joint: np.ndarray,
         goal_world_xyzrpy: np.ndarray,
         goal_robot_xyzrpy: np.ndarray,
         goal_gripper: float,
-        start_state: Optional[np.ndarray] = None,
+        start_state: np.ndarray,
     ) -> None:
         """스킬 정보 설정 (스킬 시작 시 호출)"""
         with cls._lock:
             cls._current_skill_label = label
             cls._current_skill_type = skill_type
-            cls._skill_start_time = time.time()
-            cls._skill_duration = duration
             cls._current_goal_joint = np.asarray(goal_joint, dtype=np.float32)
             cls._current_goal_world_xyzrpy = np.asarray(goal_world_xyzrpy, dtype=np.float32)
             cls._current_goal_robot_xyzrpy = np.asarray(goal_robot_xyzrpy, dtype=np.float32)
             cls._current_goal_gripper = float(goal_gripper)
-            cls._skill_start_state = np.asarray(start_state, dtype=np.float32) if start_state is not None else None
+            cls._skill_start_state = np.asarray(start_state, dtype=np.float32)
             if cls._is_active:
                 print(f"[RecordingContext] Skill: {skill_type} - {label}")
 
@@ -271,8 +266,6 @@ class RecordingContext:
         with cls._lock:
             cls._current_skill_label = None
             cls._current_skill_type = None
-            cls._skill_start_time = None
-            cls._skill_duration = None
             cls._current_goal_joint = None
             cls._current_goal_world_xyzrpy = None
             cls._current_goal_robot_xyzrpy = None
@@ -281,12 +274,10 @@ class RecordingContext:
 
     @classmethod
     def get_skill_progress(cls, current_state: Optional[np.ndarray] = None) -> float:
-        """스킬 진행률 반환 (0.0 ~ 1.0, state-based with time-based fallback)
+        """스킬 진행률 반환 (0.0 ~ 1.0, state-based)
 
         State-based: progress = 1.0 - (||goal - current|| / ||goal - start||)
-        Fallback to time-based (elapsed / duration) when start_state is None.
         """
-        # State-based progress (primary)
         if (
             current_state is not None
             and cls._skill_start_state is not None
@@ -302,11 +293,7 @@ class RecordingContext:
             progress = 1.0 - (current_to_goal / start_to_goal)
             return float(np.clip(progress, 0.0, 1.0))
 
-        # Time-based fallback
-        if cls._skill_start_time is None or cls._skill_duration is None:
-            return 0.0
-        elapsed = time.time() - cls._skill_start_time
-        return min(elapsed / cls._skill_duration, 1.0)
+        return 0.0
 
     @classmethod
     def get_skill_info(cls, current_state: Optional[np.ndarray] = None) -> dict:

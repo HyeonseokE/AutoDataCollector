@@ -32,6 +32,7 @@ from .config import (
     ROBOT_TYPE,
     NUM_JOINTS,
     load_cameras_from_yaml,
+    load_skill_features_from_yaml,
     build_features_from_yaml,
     CameraConfigRecord,
 )
@@ -93,7 +94,12 @@ class DatasetRecorder:
         else:
             self.features = build_features_from_yaml(config_yaml)
 
+        # Skill feature enabled 설정 로드
+        self._skill_enabled = load_skill_features_from_yaml(config_yaml)
+
         print(f"[DatasetRecorder] Camera features: {[cam.to_feature_key() for cam in self.enabled_cameras]}")
+        enabled_skills = [k for k, v in self._skill_enabled.items() if v]
+        print(f"[DatasetRecorder] Skill features: {enabled_skills}")
 
         # State tracking
         self._dataset = None
@@ -278,25 +284,34 @@ class DatasetRecorder:
             "task": self._current_task,
         }
 
-        # Skill-level subgoal info (RecordingContext에서 가져옴)
+        # Skill-level subgoal info (RecordingContext에서 가져옴, enabled인 것만 추가)
         try:
             from .context import RecordingContext
             skill_info = RecordingContext.get_skill_info(current_state=observation)
-            frame["skill.natural_language"] = skill_info["label"]
-            frame["skill.type"] = skill_info["type"]
-            frame["skill.progress"] = np.array([skill_info["progress"]], dtype=np.float32)
-            frame["skill.goal_position.joint"] = skill_info["goal_joint"]
-            frame["skill.goal_position.world_xyzrpy"] = skill_info["goal_world_xyzrpy"]
-            frame["skill.goal_position.robot_xyzrpy"] = skill_info["goal_robot_xyzrpy"]
-            frame["skill.goal_position.gripper"] = np.array([skill_info["goal_gripper"]], dtype=np.float32)
+            skill_data = {
+                "skill.natural_language": skill_info["label"],
+                "skill.type": skill_info["type"],
+                "skill.progress": np.array([skill_info["progress"]], dtype=np.float32),
+                "skill.goal_position.joint": skill_info["goal_joint"],
+                "skill.goal_position.world_xyzrpy": skill_info["goal_world_xyzrpy"],
+                "skill.goal_position.robot_xyzrpy": skill_info["goal_robot_xyzrpy"],
+                "skill.goal_position.gripper": np.array([skill_info["goal_gripper"]], dtype=np.float32),
+            }
         except ImportError:
-            frame["skill.natural_language"] = skill_label if skill_label else ""
-            frame["skill.type"] = ""
-            frame["skill.progress"] = np.array([0.0], dtype=np.float32)
-            frame["skill.goal_position.joint"] = np.zeros(6, dtype=np.float32)
-            frame["skill.goal_position.world_xyzrpy"] = np.zeros(6, dtype=np.float32)
-            frame["skill.goal_position.robot_xyzrpy"] = np.zeros(6, dtype=np.float32)
-            frame["skill.goal_position.gripper"] = np.array([0.0], dtype=np.float32)
+            skill_data = {
+                "skill.natural_language": skill_label if skill_label else "",
+                "skill.type": "",
+                "skill.progress": np.array([0.0], dtype=np.float32),
+                "skill.goal_position.joint": np.zeros(6, dtype=np.float32),
+                "skill.goal_position.world_xyzrpy": np.zeros(6, dtype=np.float32),
+                "skill.goal_position.robot_xyzrpy": np.zeros(6, dtype=np.float32),
+                "skill.goal_position.gripper": np.array([0.0], dtype=np.float32),
+            }
+
+        # enabled인 skill feature만 frame에 추가
+        for key, value in skill_data.items():
+            if self._skill_enabled.get(key, True):
+                frame[key] = value
 
         # 각 카메라 이미지 추가
         for cam in self.enabled_cameras:

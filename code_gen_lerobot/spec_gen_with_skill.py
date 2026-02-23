@@ -6,7 +6,7 @@ LeRobot SO-101 Specification Generation Module
 """
 
 from .llm import llm_response
-from .forward_execution.prompt import lerobot_spec_gen_prompt
+from .forward_execution.user_prompt import lerobot_spec_gen_prompt
 
 import json
 import os

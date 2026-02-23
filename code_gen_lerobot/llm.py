@@ -21,7 +21,7 @@ vLLM 서버 추론 모드:
 
 import os
 import time
-from typing import Optional
+from typing import Dict, List, Optional
 
 
 # vLLM 서버 설정 (환경변수로 override 가능)
@@ -165,16 +165,20 @@ def llm_response(
     stop_sequences: list = None,
     check_time: bool = True,
     use_server: bool = None,
+    system_prompt: str = None,
+    image_path: str = None,
 ) -> Optional[str]:
     """
     LLM 응답 생성
 
     Args:
         model: 모델 이름 (예: "gpt-4o-mini", "gemini-1.5-flash")
-        prompt: 프롬프트
+        prompt: 프롬프트 (user prompt)
         stop_sequences: 정지 시퀀스
         check_time: 시간 출력 여부
         use_server: True면 SSH 서버로 추론, None이면 환경변수 USE_LLM_SERVER 확인
+        system_prompt: 시스템 프롬프트 (Gemini system_instruction 등)
+        image_path: 이미지 파일 경로 (멀티모달 입력용)
 
     Returns:
         LLM 응답 문자열
@@ -225,6 +229,8 @@ def llm_response(
             model=model,
             stop_sequences=stop_sequences,
             check_time=check_time,
+            system_prompt=system_prompt,
+            image_path=image_path,
         )
 
     elif provider == "llama":
@@ -238,3 +244,48 @@ def llm_response(
 
     else:
         raise ValueError(f"지원하지 않는 모델: {model} (provider: {provider})")
+
+
+def llm_chat(
+    model: str,
+    system_prompt: str,
+    turns: List[Dict],
+    temperature: float = 0.0,
+    check_time: bool = True,
+) -> List[str]:
+    """
+    멀티턴 LLM chat session
+
+    provider를 자동 감지하여 해당 provider의 chat 함수를 호출합니다.
+    현재 Gemini만 지원, 추후 OpenAI 등 확장 가능.
+
+    Args:
+        model: 모델 이름 (예: "gemini-2.0-flash")
+        system_prompt: 시스템 프롬프트 (전체 session에 고정)
+        turns: 턴 리스트, 각 턴은 {"text": str, "image_path": str|None}
+        temperature: 샘플링 온도
+        check_time: 시간 출력 여부
+
+    Returns:
+        각 턴별 LLM 응답 문자열 리스트
+
+    Raises:
+        ValueError: 지원하지 않는 provider인 경우
+    """
+    provider = detect_provider(model)
+
+    if provider == "gemini":
+        from .llm_utils.gemini import gemini_chat
+        return gemini_chat(
+            model=model,
+            system_prompt=system_prompt,
+            turns=turns,
+            temperature=temperature,
+            check_time=check_time,
+        )
+
+    else:
+        raise ValueError(
+            f"llm_chat does not yet support provider '{provider}' (model: {model}). "
+            f"Currently only Gemini models are supported for multi-turn chat."
+        )

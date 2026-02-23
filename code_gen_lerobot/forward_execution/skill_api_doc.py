@@ -1,0 +1,164 @@
+"""
+Robot API Skills Documentation (Gemini Robotics class definition style)
+
+LeRobotSkills 클래스의 API 문서를 LLM 프롬프트용으로 제공합니다.
+실제 구현은 skills/skills_lerobot.py에 있으며,
+이 파일은 LLM이 코드 생성 시 참조할 API 명세만 포함합니다.
+"""
+
+ROBOT_API_DOC = '''class LeRobotSkills:
+    """Interface for controlling the LeRobot SO-101 single robot arm.
+    The robot has a 5-DOF arm (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll)
+    with an asymmetric two-finger gripper (left finger is fixed, right finger is actuated).
+    The gripper can open up to 0.07m (7cm) and approaches objects from directly above (top-down grasp).
+    All positions are specified in the world coordinate frame in meters.
+    """
+
+    def connect(self) -> bool:
+        """Connects to robot hardware and initializes kinematics. Returns True if successful."""
+
+    def disconnect(self):
+        """Disconnects from robot hardware. Must be called in a finally block for cleanup."""
+
+    def gripper_open(self, duration: float = 1.5, ratio: float = 1.0,
+                     skill_description: str = None):
+        """Opens the gripper to the specified ratio.
+
+        Args:
+            duration: Movement duration in seconds.
+            ratio: Open ratio where 0.0 = fully closed and 1.0 = fully open.
+                Use 0.7 for partial open during place operations for controlled release.
+            skill_description: A natural language sentence describing the semantic intent
+                of this action for dataset recording. Must be unique and descriptive.
+                Example: "open gripper to prepare for picking the red block"
+        """
+
+    def gripper_close(self, duration: float = 1.5, skill_description: str = None):
+        """Closes the gripper to grasp an object.
+        The gripper closes with sufficient force to hold objects up to ~500g.
+
+        Args:
+            duration: Movement duration in seconds.
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "close gripper to grasp the yellow dice"
+        """
+
+    def move_to_initial_state(self, skill_description: str = None) -> bool:
+        """Moves the arm to its home position. Call at the start and end of every task.
+
+        Args:
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "move to initial position to start the task"
+        """
+
+    def move_to_free_state(self, skill_description: str = None) -> bool:
+        """Moves the arm to a safe parking position. Call as the very last skill after task completion.
+
+        Args:
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "move to free position for safe parking"
+        """
+
+    def move_to_position(self, position: list[float], duration: float = None,
+                         gripper_offset: float = 0.0, target_name: str = None,
+                         skill_description: str = None) -> bool:
+        """Moves the end-effector to the given XYZ position in world coordinates.
+        Use this for approach movements (moving above an object before pick/place),
+        retreat movements (lifting after pick/place), and transit movements between objects.
+
+        The world coordinate frame origin is at the rear-center of the workspace table
+        on the table surface:
+            Positive x: towards front of the table
+            Negative x: towards back of the table
+            Positive y: towards right
+            Negative y: towards left
+            Positive z: up, towards ceiling (z=0 is table surface)
+
+        Args:
+            position: Target position [x, y, z] in meters in world frame.
+            duration: Movement duration in seconds. Uses default if None.
+            gripper_offset: Asymmetric gripper collision avoidance offset in meters.
+                When > 0, uses TCP frame for IK computation, positioning the gripper
+                body higher so the fingertip reaches the target position.
+                Always use the detection value: positions["object"]["gripper_offset"].
+            target_name: Name of the target object for subgoal labeling in dataset recording.
+                Example: "yellow dice", "blue dish".
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "approach above the red block for grasping"
+
+        Returns:
+            True if movement successful, False if position is outside reachable workspace.
+        """
+
+    def rotate_90degree(self, direction: int = 1, duration: float = 2.0,
+                        skill_description: str = None) -> bool:
+        """Rotates the gripper (wrist_roll joint) by 90 degrees in place.
+        The arm position remains the same; only the gripper orientation changes.
+        Use this when an object needs to be reoriented after picking.
+
+        Args:
+            direction: 1 for clockwise rotation, -1 for counter-clockwise rotation.
+            duration: Movement duration in seconds.
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "rotate gripper clockwise to reorient the object"
+
+        Returns:
+            True if rotation successful.
+        """
+
+    def execute_pick_object(self, object_position: list[float],
+                            gripper_offset: float = 0.0, object_name: str = None,
+                            skill_description: str = None) -> bool:
+        """Executes a pick (grasp) action at the given object position.
+        Must be called AFTER moving to the approach position above the object.
+        The robot descends to the grasp height (3cm offset from object top),
+        closes the gripper to grasp the object, and internally saves the current
+        pitch angle for the subsequent place operation.
+
+        IMPORTANT: Pass position with z = object_height - 0.02 (2cm below object top) to grasp
+        near the top of the object: [pick_pos[0], pick_pos[1], pick_pos[2] - 0.02].
+
+        Args:
+            object_position: Grasp position [x, y, z] in meters where z should be
+                the object's height minus 2cm (pick_pos[2] - 0.02) for near-top grasp.
+            gripper_offset: Asymmetric gripper offset in meters.
+                Use positions["object"]["gripper_offset"] from detection results.
+            object_name: Name of the object being picked for subgoal labeling.
+                Example: "yellow dice", "red cup".
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "descend and grasp the red block at its center"
+
+        Returns:
+            True if pick successful (gripper closed around object).
+        """
+
+    def execute_place_object(self, place_position: list[float],
+                             gripper_offset: float = 0.0, is_table: bool = True,
+                             gripper_open_ratio: float = 1.0, target_name: str = None,
+                             skill_description: str = None) -> bool:
+        """Executes a place (release) action at the given target position.
+        Must be called AFTER moving to the approach position above the target.
+        The robot descends to the place height with the pitch angle saved during
+        the pick operation automatically restored, then opens the gripper to
+        release the object.
+
+        IMPORTANT: Pass position with z = picked_object_height - 0.02 (pick_pos[2] - 0.02)
+        to release at the middle height of the picked object.
+        ALWAYS use gripper_open_ratio=0.7 for controlled release.
+
+        Args:
+            place_position: Target position [x, y, z] in meters where z should be
+                the picked object's height minus 2cm (pick_pos[2] - 0.02).
+            gripper_offset: Asymmetric gripper offset in meters.
+            is_table: True if placing directly on the table surface (z=0),
+                False if placing on top of another object.
+            gripper_open_ratio: How much to open the gripper for release (0.0 to 1.0).
+                ALWAYS use 0.7 (70% open) for controlled object release.
+            target_name: Name of the placement target for subgoal labeling.
+                Example: "blue dish", "table".
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "lower the red block onto the blue dish"
+
+        Returns:
+            True if place successful (object released at target position).
+        """'''

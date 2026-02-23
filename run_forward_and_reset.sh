@@ -15,19 +15,28 @@ cd "$SCRIPT_DIR"
 # 핵심 설정 (Essential Configuration)
 # ============================================================
 
+## [필수] 태스크 명령어
+# INSTRUCTION="pick up the red block and place it on the blue dish"
+# INSTRUCTION="fold the green towel"
+INSTRUCTION="pick up the brown peg and insert it into the hole of the gray structure"
+# INSTRUCTION = "Pick up the banana and place it in the bowl. 
+# You may need to handover the banana from one arm to the other if the initial arm picking the banana cannot reach the bowl. 
+# After picking the banana with one arm, you can handover the banana by first placing it carefully on the table surface and then using the other arm to pick it up. 
+# The placing position must be on the table, as far as possible from other objects but absolutely within the reachable table area of the other arm. 
+# Make sure to move the picking arm out of the way before the receiving arm moves towards grasping the object."
+
+# INSTRUCTION="Assemble the green hinge and red hinge.
+# You need to carefully assemble the green hinge's male part to red hinge's hole part.
+# since the green hinge's male part is upward, you need to rotate it downward first before assembling."
+
 # [필수] 로봇 번호 (2 또는 3)
 ROBOT_ID=3
-
-## [필수] 태스크 명령어
-INSTRUCTION="pick up the red block and place it on the blue dish"
-# INSTRUCTION="fold the green towel"
-# INSTRUCTION="pick up the toy and place it on the blue dish"
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=30
+NUM_EPISODES=1
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false
@@ -35,26 +44,36 @@ USE_SERVER=false
 # ============================================================
 # Reset execution 설정
 # ============================================================
-
-# Reset 실행 여부 (false면 Forward + Judge만 실행)
-EXECUTE_RESET=true
-
-# Reset 모드 ("original": 원래 위치로 복귀, "random": 랜덤 위치로 배치)
-RESET_MODE="original"
+EXECUTE_RESET=false # Reset 실행 여부
+RESET_MODE="original" # Reset_mode:("original": 원래 위치로 복귀, "random": 랜덤 위치로 배치)
 
 # ============================================================
 # Judge execution 설정
 # ============================================================
-
-# Judge 실행 여부 (true면 Judge 단계 건너뛰기)
 SKIP_JUDGE=true
 
 # ============================================================
 # Dataset Recording 설정
 # ============================================================
+RECORD_DATASET=false
 
-# LeRobot 데이터셋 레코딩 활성화
-RECORD_DATASET=true
+# ============================================================
+# Multi-turn LLM 코드 생성 설정
+# ============================================================
+# true: crop-then-point 멀티턴 (LLM이 이미지 보고 검출→crop pointing→코드 생성)
+# false: single-turn (Grounding DINO 검출 후 LLM 코드 생성)
+MULTI_TURN=true
+
+# CAD 참조 이미지 디렉토리 (비어있으면 CAD 없이 실행)
+# 예: CAD_IMAGE_DIRS=("/path/to/cad_male" "/path/to/cad_female")
+CAD_IMAGE_DIRS=("pipeline_config/cad_images/brown_peg", "pipeline_config/cad_images/gray_structure_with_hole")
+
+# Side-view 이미지 경로 (Turn Test waypoint trajectory 예측용, 비어있으면 overhead만 사용)
+SIDE_VIEW_IMAGE="pipeline_config/side_view_images/side_view.jpg"
+
+
+
+
 
 # ============================================================
 # Config 파일 로드 함수
@@ -245,6 +264,7 @@ echo "Reset Mode: $RESET_MODE"
 echo "Skip Judge: $SKIP_JUDGE"
 echo "Use Server: $USE_SERVER"
 echo "Record Dataset: $RECORD_DATASET"
+echo "Multi-Turn: $MULTI_TURN"
 echo ""
 echo "--- Model Settings ---"
 echo "LLM Model: $LLM_MODEL"
@@ -299,6 +319,18 @@ if [ "$RECORD_DATASET" = true ]; then
         EXTRA_ARGS="$EXTRA_ARGS --dataset-repo-id $DATASET_REPO_ID"
     fi
     EXTRA_ARGS="$EXTRA_ARGS --recording-fps $RECORDING_FPS"
+fi
+
+if [ "$MULTI_TURN" = true ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --multi-turn"
+fi
+
+if [ ${#CAD_IMAGE_DIRS[@]} -gt 0 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --cad-image-dirs ${CAD_IMAGE_DIRS[@]}"
+fi
+
+if [ -n "$SIDE_VIEW_IMAGE" ] && [ -f "$SIDE_VIEW_IMAGE" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --side-view-image $SIDE_VIEW_IMAGE"
 fi
 
 # ============================================================

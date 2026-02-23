@@ -1,9 +1,12 @@
-from .llm import llm_response, llm_chat
+from .llm import llm_response
 from .forward_execution.user_prompt import lerobot_code_gen_prompt, turn3_code_gen_prompt
-from .forward_execution.turn1_prompt import turn1_detect_objects_prompt
-from .forward_execution.turn2_prompt import turn2_grasp_point_prompt
+from .forward_execution.turn0_prompt import turn0_scene_understanding_prompt
+from .forward_execution.turn1_prompt import turn1_detect_task_relevant_objects_prompt
+from .forward_execution.turn2_prompt import turn2_crop_pointing_prompt
+from .forward_execution.turn_test_prompt import turn_test_waypoint_trajectory_prompt
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -73,7 +76,7 @@ def lerobot_code_gen(
         code = lerobot_code_gen(
             instruction="빨간 컵을 파란 상자에 놓아라",
             object_positions={
-                "red cup": {"position": [0.15, 0.05, 0.02], "gripper_offset": 0.025},
+                "red cup": {"position": [0.15, 0.05, 0.02], "gripper_offset": 0.015},
                 "blue box": {"position": [0.20, -0.05, 0.03], "gripper_offset": 0.0},
             },
             use_detection=False,
@@ -131,7 +134,7 @@ def lerobot_code_gen(
         positions = object_positions
 
     # Normalize to extended format if legacy format is used
-    # Legacy: {"name": [x,y,z]} → Extended: {"name": {"position": [x,y,z], "gripper_offset": 0.02}}
+    # Legacy: {"name": [x,y,z]} → Extended: {"name": {"position": [x,y,z], "gripper_offset": 0.01}}
     normalized_positions = {}
     for name, info in positions.items():
         if info is None:
@@ -143,7 +146,7 @@ def lerobot_code_gen(
             # Legacy format - convert to extended with default gripper_offset
             normalized_positions[name] = {
                 "position": list(info[:3]),
-                "gripper_offset": 0.02,  # default 2cm
+                "gripper_offset": 0.01,  # default 2cm
             }
         else:
             normalized_positions[name] = None
@@ -282,142 +285,93 @@ def _parse_json_from_response(response: str) -> Optional[Dict]:
     return None
 
 
-def _build_positions_from_grasp_points(
-    turn1_response: str,
-    turn2_response: str,
-    image_path: str,
+def _points_to_positions(
+    all_points: list,
     robot_id: int = 3,
+    camera=None,
 ) -> Dict:
     """
-    Turn 1-2 응답에서 pixel 좌표를 추출하고 world 좌표로 변환하여 positions dict를 구성
+    Crop-then-point 결과에서 object별 grasp point를 선택하고 pixel→world 변환.
 
-    CoordinateTransformer가 사용 가능하면 pixel→world 변환을 수행하고,
-    사용 불가능하면 Turn 2 응답에서 추출한 pixel 좌표만 반환합니다.
+    각 object에서 "grasp" role 포인트를 우선 선택, 없으면 첫 번째 포인트 사용.
 
     Args:
-        turn1_response: Turn 1 LLM 응답 (물체 리스트)
-        turn2_response: Turn 2 LLM 응답 (grasp point 좌표)
-        image_path: 초기 이미지 경로 (pixel→world 변환에 필요)
+        all_points: [{"object_label", "label", "role", "px", "py"}, ...]
         robot_id: 로봇 번호
+        camera: depth 카메라 (3D 변환용)
 
     Returns:
-        Extended format positions dict:
-        {"object_name": {"position": [x,y,z], "gripper_offset": float}}
+        {object_label: {"position": [x,y,z], "gripper_offset": float, "pixel": [px,py]}}
     """
-    import cv2
+    # Object별로 grasp point 선택
+    grasp_by_object = {}
+    for pt in all_points:
+        obj = pt["object_label"]
+        if obj not in grasp_by_object:
+            grasp_by_object[obj] = pt  # 첫 번째 point (fallback)
+        elif pt.get("role") == "grasp" and grasp_by_object[obj].get("role") != "grasp":
+            grasp_by_object[obj] = pt  # grasp 우선
 
-    # 이미지 해상도 로드 (Gemini 0-1000 좌표 → 실제 pixel 변환용)
-    img = cv2.imread(image_path)
-    if img is not None:
-        img_h, img_w = img.shape[:2]
-    else:
-        img_w, img_h = 640, 480
-    print(f"  [MultiTurn] Image resolution: {img_w}x{img_h}")
+    if not grasp_by_object:
+        return {}
 
-    # Turn 1에서 물체 정보 파싱
-    # LLM 응답 형식: list [{"label": "...", "estimated_size_cm": [...]}]
-    # 또는 dict {"objects": [{"name": "...", ...}]}
-    turn1_data = _parse_json_from_response(turn1_response)
-    objects_info = {}
-    if turn1_data:
-        obj_list = None
-        if isinstance(turn1_data, list):
-            obj_list = turn1_data
-        elif isinstance(turn1_data, dict) and "objects" in turn1_data:
-            obj_list = turn1_data["objects"]
-
-        if obj_list:
-            for obj in obj_list:
-                name = obj.get("label") or obj.get("name", "")
-                size = obj.get("estimated_size_cm", [5, 5])
-                objects_info[name] = {
-                    "estimated_size_cm": size,
-                    "bbox": obj.get("box_2d") or obj.get("bbox_pixel"),
-                }
-    print(f"  [MultiTurn] Turn 1 objects: {list(objects_info.keys())}")
-
-    # Turn 2에서 grasp point 파싱
-    turn2_data = _parse_json_from_response(turn2_response)
-    grasp_points = {}
-    if turn2_data and "grasp_points" in turn2_data:
-        for gp in turn2_data["grasp_points"]:
-            name = gp.get("object_name", "")
-            role = gp.get("role", "pick")
-            pixel = gp.get("point_pixel")
-            if pixel and len(pixel) == 2:
-                # Gemini 0-1000 정규화 좌표 → 실제 pixel 좌표 변환
-                px, py = pixel[0], pixel[1]
-                if px > img_w or py > img_h:
-                    # 0-1000 스케일로 판단, 실제 pixel로 변환
-                    px = int(px * img_w / 1000)
-                    py = int(py * img_h / 1000)
-                    print(f"  [MultiTurn] Rescaled '{name}' point: {pixel} → [{px}, {py}] (0-1000 → pixel)")
-                else:
-                    px, py = int(px), int(py)
-                grasp_points[name] = {
-                    "role": role,
-                    "pixel": [px, py],
-                }
-
-    # Pixel→World 변환 시도
+    # CoordinateTransformer 로드
     transformer = None
+    use_3d = False
     try:
         from object_detection.localization.coordinate_transform import CoordinateTransformer
         calib_path = Path(__file__).parent.parent / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
         if calib_path.exists():
             transformer = CoordinateTransformer(str(calib_path))
             if not transformer.is_ready:
-                print(f"  [MultiTurn] CoordinateTransformer loaded but not ready")
                 transformer = None
             else:
-                print(f"  [MultiTurn] CoordinateTransformer loaded from {calib_path}")
-        else:
-            print(f"  [MultiTurn] Calibration file not found: {calib_path}")
-    except (ImportError, Exception) as e:
-        print(f"  [MultiTurn] CoordinateTransformer not available: {e}")
+                use_3d = (transformer.transform_matrix_3d is not None
+                          and transformer.camera_intrinsics is not None
+                          and camera is not None)
+                mode = "3D" if use_3d else "2D"
+                print(f"  [CropPoint] CoordinateTransformer [{mode}]")
+    except Exception as e:
+        print(f"  [CropPoint] CoordinateTransformer not available: {e}")
 
-    # positions dict 구성
+    # Depth 프레임 (3D 변환용)
+    depth_frame = None
+    if use_3d and camera is not None:
+        try:
+            _, depth_frame = camera.get_frames()
+            if depth_frame is None:
+                use_3d = False
+        except Exception:
+            use_3d = False
+
+    # positions 구성
     positions = {}
-    for name, gp_info in grasp_points.items():
-        pixel = gp_info["pixel"]
-        obj_info = objects_info.get(name, {})
-
-        # 물체 크기에서 gripper_offset 추정 (cm → m)
-        size_cm = obj_info.get("estimated_size_cm", [5, 5])
-        if isinstance(size_cm, (list, tuple)) and len(size_cm) >= 2:
-            width_m = size_cm[0] / 100.0
-        else:
-            width_m = 0.05
-        # gripper_offset: 물체 폭이 gripper opening(7cm)보다 크면 offset 필요
-        gripper_offset = max(0.0, (width_m - 0.07) / 2.0) if width_m > 0.07 else 0.02
+    for obj_label, pt in grasp_by_object.items():
+        px, py = pt["px"], pt["py"]
 
         if transformer:
-            # pixel→world 변환 (2D homography, 평면 가정)
             try:
-                wx, wy, wz = transformer.pixel_to_world_2d(int(pixel[0]), int(pixel[1]))
-                # 단위 변환: CoordinateTransformer는 cm 단위, 시스템은 m 단위
-                wx_m = wx / 100.0
-                wy_m = wy / 100.0
-                # z는 물체 높이 추정 (cm→m)
-                height_cm = size_cm[1] if isinstance(size_cm, (list, tuple)) and len(size_cm) >= 2 else 3.0
-                wz_m = height_cm / 100.0
+                if use_3d and depth_frame is not None:
+                    depth_m = camera.get_depth_at_pixel(px, py, depth_frame)
+                    wx, wy, wz = transformer.pixel_depth_to_world(px, py, depth_m)
+                else:
+                    wx, wy, wz = transformer.pixel_to_world_2d(px, py)
 
-                positions[name] = {
-                    "position": [wx_m, wy_m, wz_m],
-                    "gripper_offset": gripper_offset,
-                    "pixel": pixel,
+                positions[obj_label] = {
+                    "position": [wx / 100.0, wy / 100.0, wz / 100.0],
+                    "gripper_offset": 0.01,
+                    "pixel": [px, py],
                 }
-                print(f"  [MultiTurn] '{name}': pixel={pixel} → world=[{wx_m:.4f}, {wy_m:.4f}, {wz_m:.4f}]m")
+                print(f"    {obj_label}: pixel=({px},{py}) → world={positions[obj_label]['position']}")
                 continue
             except Exception as e:
-                print(f"  [MultiTurn] pixel→world failed for '{name}': {e}")
+                print(f"    {obj_label}: pixel→world failed: {e}")
 
-        # Fallback: pixel 좌표만 저장 (world 변환 실패)
-        height_cm = size_cm[1] if isinstance(size_cm, (list, tuple)) and len(size_cm) >= 2 else 3.0
-        positions[name] = {
-            "position": [0.0, 0.0, height_cm / 100.0],
-            "gripper_offset": gripper_offset,
-            "pixel": pixel,
+        # Fallback
+        positions[obj_label] = {
+            "position": [0.0, 0.0, 0.03],
+            "gripper_offset": 0.01,
+            "pixel": [px, py],
             "_needs_world_coords": True,
         }
 
@@ -432,13 +386,17 @@ def lerobot_code_gen_multi_turn(
     current_episode: int = 1,
     total_episodes: int = 1,
     fallback_positions: Dict = None,
+    camera=None,
+    cad_image_dirs: List[str] = None,
+    side_view_image: str = None,
 ) -> Tuple[str, Dict, Dict]:
     """
-    3-Turn 멀티턴 LLM 코드 생성 파이프라인
+    Crop-then-Point 멀티턴 LLM 코드 생성 파이프라인
 
-    Turn 1: 이미지 + instruction → 물체 검출
-    Turn 2: grasp point pointing
-    Turn 3: 코드 생성
+    Turn 0: 이미지 (+ CAD) + instruction → 장면 이해 (reasoning only)
+    Turn 1: bbox 검출 (JSON)
+    Turn 2~N: 물체별 crop → critical point pointing
+    Turn N+1: 코드 생성
 
     Args:
         instruction: 자연어 태스크 명령
@@ -448,18 +406,22 @@ def lerobot_code_gen_multi_turn(
         current_episode: 현재 에피소드 번호
         total_episodes: 총 에피소드 수
         fallback_positions: Grounding DINO fallback 용 positions
-            (LLM 검출 실패 시 사용)
+        camera: RealSenseD435 카메라 (depth 기반 3D 좌표 변환용)
+        cad_image_dirs: CAD 참조 이미지 디렉토리 리스트 (옵션)
 
     Returns:
         Tuple[str, Dict, Dict]:
             - 실행 가능한 Python 코드
             - positions dict (extended format)
             - multi_turn_info: 각 턴별 응답 등 메타 정보
-
-    Raises:
-        AssertionError: LLM 응답이 None이거나 코드 추출 실패 시
     """
-    # ANSI 색상 코드
+    import cv2
+    import glob as glob_mod
+    import tempfile
+    from .llm_utils.gemini import gemini_chat_start, gemini_chat_send
+
+    CROP_PADDING = 25  # bbox 패딩 (0-1000 스케일)
+
     GRAY = "\033[90m"
     CYAN = "\033[96m"
     LIGHT_GREEN = "\033[92m"
@@ -469,118 +431,283 @@ def lerobot_code_gen_multi_turn(
 
     ep_str = f"{current_episode:02d}/{total_episodes:02d}"
 
-    def _log(msg: str, step: str = None) -> str:
-        prefix = f"[Forward][{ep_str}][MultiTurn]"
+    def _log(msg, step=None):
+        prefix = f"[Forward][{ep_str}][CropPoint]"
         if step:
             prefix += f"[{step}]"
         return f"{prefix} {msg}"
 
     print(GRAY + "=" * line_width + RESET)
-    print(CYAN + "LeRobot Multi-Turn Code Generation".center(line_width) + RESET)
+    print(CYAN + "LeRobot Crop-then-Point Code Generation".center(line_width) + RESET)
     print(GRAY + "=" * line_width + RESET)
-
-    # System prompt 로드
-    system_prompt = _get_system_prompt()
-
-    # 3-Turn 구성
-    print(f"\n{YELLOW}" + _log("Building 3-turn chat...", step="Setup") + f"{RESET}")
     print(f"  Model: {llm_model}")
     print(f"  Image: {image_path}")
 
-    # Turn 1: Object Detection
-    turn1_text = turn1_detect_objects_prompt(instruction)
+    # CAD 이미지 수집 (Step 6)
+    cad_paths = []
+    if cad_image_dirs:
+        for d in cad_image_dirs:
+            cad_paths.extend(sorted(glob_mod.glob(f"{d}/*.jpg")))
+            cad_paths.extend(sorted(glob_mod.glob(f"{d}/*.png")))
+        print(f"  CAD images: {len(cad_paths)} files from {len(cad_image_dirs)} dirs")
 
-    # Turn 2: Grasp Point Pointing
-    turn2_text = turn2_grasp_point_prompt()
+    # Chat session 시작
+    system_prompt = _get_system_prompt()
+    chat, gen_config = gemini_chat_start(llm_model, system_prompt=system_prompt)
 
-    # Turn 3: Code Generation
-    turn3_text = turn3_code_gen_prompt(instruction=instruction, robot_id=robot_id)
+    has_cad = bool(cad_paths)
 
-    turns = [
-        {"text": turn1_text, "image_path": image_path},
-        {"text": turn2_text, "image_path": None},
-        {"text": turn3_text, "image_path": None},
-    ]
+    # ── Turn 0: Scene Understanding (이미지 + CAD) — test6 방식 ──
+    print(f"\n{YELLOW}" + _log("Turn 0 — Scene Understanding", step="Turn0") + f"{RESET}")
+    turn0_resp = gemini_chat_send(chat, gen_config,
+        {
+            "text": turn0_scene_understanding_prompt(instruction, has_cad=has_cad),
+            "image_path": image_path,
+            "image_paths": cad_paths,
+        },
+        turn_label="Turn 0")
+    print(f"  {turn0_resp[:300]}{'...' if len(turn0_resp) > 300 else ''}")
 
-    # LLM 멀티턴 호출
-    print(f"\n{YELLOW}" + _log(f"Calling LLM chat ({llm_model}, 3 turns)...", step="Chat") + f"{RESET}")
-    responses = llm_chat(
-        model=llm_model,
-        system_prompt=system_prompt,
-        turns=turns,
-        temperature=0.0,
-        check_time=True,
-    )
+    # ── Turn 1: BBox Detection (이미지 재전송) — test6 방식 ──
+    print(f"\n{YELLOW}" + _log("Turn 1 — BBox Detection", step="Turn1") + f"{RESET}")
+    turn1_resp = gemini_chat_send(chat, gen_config,
+        {
+            "text": turn1_detect_task_relevant_objects_prompt(),
+            "image_path": image_path,
+        },
+        turn_label="Turn 1")
+    print(f"  {turn1_resp[:300]}{'...' if len(turn1_resp) > 300 else ''}")
 
-    assert len(responses) == 3, f"Expected 3 responses, got {len(responses)}"
+    # Parse bboxes
+    turn1_data = _parse_json_from_response(turn1_resp)
+    if isinstance(turn1_data, list):
+        obj_list = turn1_data
+    elif isinstance(turn1_data, dict):
+        obj_list = turn1_data.get("objects", turn1_data.get("detected_objects", []))
+    else:
+        obj_list = []
 
-    turn1_resp, turn2_resp, turn3_resp = responses
+    valid_objects = []
+    for obj in obj_list:
+        box = obj.get("box_2d") or obj.get("bbox") or []
+        if len(box) == 4 and obj.get("label"):
+            obj["box_2d"] = box
+            valid_objects.append(obj)
+            print(f"    [{obj['label']}] bbox={box}")
 
-    # Turn 1 결과 출력
-    print(f"\n{YELLOW}" + _log("Turn 1 — Object Detection result:", step="Turn1") + f"{RESET}")
-    turn1_preview = turn1_resp[:300]
-    if len(turn1_resp) > 300:
-        turn1_preview += "\n... (truncated)"
-    print(f"  {turn1_preview}")
+    assert valid_objects, "No valid bboxes detected from Turn 1"
 
-    # Turn 2 결과 출력
-    print(f"\n{YELLOW}" + _log("Turn 2 — Grasp Point result:", step="Turn2") + f"{RESET}")
-    turn2_preview = turn2_resp[:300]
-    if len(turn2_resp) > 300:
-        turn2_preview += "\n... (truncated)"
-    print(f"  {turn2_preview}")
+    # 이미지 로드
+    full_img = cv2.imread(image_path)
+    assert full_img is not None, f"Cannot read image: {image_path}"
+    img_h, img_w = full_img.shape[:2]
 
-    # Turn 2 응답에서 positions 구성
-    print(f"\n{YELLOW}" + _log("Building positions from grasp points...", step="Positions") + f"{RESET}")
-    positions = _build_positions_from_grasp_points(
-        turn1_response=turn1_resp,
-        turn2_response=turn2_resp,
-        image_path=image_path,
-        robot_id=robot_id,
-    )
+    # ── Turn 2+: Crop-then-Point ──
+    all_points = []
+    crop_responses = []
+    crop_dir = tempfile.mkdtemp(prefix="crop_")
 
-    # world 좌표 변환 실패한 물체가 있으면 fallback 시도
-    needs_fallback = any(
-        info.get("_needs_world_coords", False)
-        for info in positions.values()
-    )
-    if needs_fallback and fallback_positions:
-        print(f"  {YELLOW}Some objects need world coords — using fallback positions{RESET}")
+    for i, obj in enumerate(valid_objects):
+        label = obj["label"]
+        ymin, xmin, ymax, xmax = obj["box_2d"]
+
+        print(f"\n{YELLOW}" + _log(f"Crop — {label}", step=f"Crop{i}") + f"{RESET}")
+
+        # Padding + clamp (0-1000 스케일)
+        ymin_p = max(0, ymin - CROP_PADDING)
+        xmin_p = max(0, xmin - CROP_PADDING)
+        ymax_p = min(1000, ymax + CROP_PADDING)
+        xmax_p = min(1000, xmax + CROP_PADDING)
+
+        # 0-1000 → pixel
+        crop_x1 = int(xmin_p * img_w / 1000)
+        crop_y1 = int(ymin_p * img_h / 1000)
+        crop_x2 = int(xmax_p * img_w / 1000)
+        crop_y2 = int(ymax_p * img_h / 1000)
+
+        crop_img = full_img[crop_y1:crop_y2, crop_x1:crop_x2]
+        crop_h, crop_w = crop_img.shape[:2]
+        print(f"    bbox=[{ymin},{xmin},{ymax},{xmax}] → crop ({crop_w}x{crop_h})")
+
+        # Save crop
+        safe_label = label.replace(" ", "_").replace("/", "_")
+        crop_path = f"{crop_dir}/crop_{safe_label}.jpg"
+        cv2.imwrite(crop_path, crop_img)
+
+        # Send crop + pointing prompt
+        resp = gemini_chat_send(chat, gen_config,
+            {"text": turn2_crop_pointing_prompt(label), "image_path": crop_path},
+            turn_label=f"Crop: {label}")
+        crop_responses.append({"label": label, "response": resp})
+        print(f"    {resp[:200]}{'...' if len(resp) > 200 else ''}")
+
+        # Parse critical_points
+        parsed = _parse_json_from_response(resp)
+        if not parsed or "critical_points" not in parsed:
+            print(f"    [Warning] Failed to parse points for '{label}'")
+            continue
+
+        for pt in parsed["critical_points"]:
+            point_2d = pt.get("point_2d", [])
+            if len(point_2d) != 2:
+                continue
+            norm_y, norm_x = point_2d
+            crop_px = int(norm_x * crop_w / 1000)
+            crop_py = int(norm_y * crop_h / 1000)
+            px = crop_x1 + crop_px
+            py = crop_y1 + crop_py
+            all_points.append({
+                "object_label": label,
+                "label": pt.get("label", ""),
+                "role": pt.get("role", "interaction"),
+                "reasoning": pt.get("reasoning", ""),
+                "point_2d": point_2d,
+                "px": px, "py": py,
+                "crop_px": crop_px, "crop_py": crop_py,
+            })
+            print(f"    [{pt.get('role','?')}] ({norm_y},{norm_x}) "
+                  f"→ crop({crop_px},{crop_py}) → full({px},{py})")
+
+    print(f"\n  Total: {len(all_points)} points across {len(valid_objects)} objects")
+
+    # Positions 구성 (pixel → world)
+    print(f"\n{YELLOW}" + _log("Building positions...", step="Positions") + f"{RESET}")
+    positions = _points_to_positions(all_points, robot_id=robot_id, camera=camera)
+
+    # Fallback
+    if fallback_positions:
         for name, info in positions.items():
             if info.get("_needs_world_coords") and name in fallback_positions:
                 fb = fallback_positions[name]
                 if fb is not None:
                     fb_pos = fb["position"] if isinstance(fb, dict) and "position" in fb else fb
                     info["position"] = list(fb_pos[:3])
-                    info["gripper_offset"] = fb.get("gripper_offset", 0.02) if isinstance(fb, dict) else 0.02
+                    info["gripper_offset"] = fb.get("gripper_offset", 0.01) if isinstance(fb, dict) else 0.01
                     info.pop("_needs_world_coords", None)
-                    print(f"    ✓ '{name}' fallback: pos={info['position']}")
 
-    # positions 결과 출력
     for name, info in positions.items():
         pos = info["position"]
-        offset = info.get("gripper_offset", 0.0)
-        pixel = info.get("pixel", "N/A")
-        needs_world = info.get("_needs_world_coords", False)
-        status = "⚠ NO WORLD COORDS" if needs_world else "OK"
-        print(f"    {name}: pos=[{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], offset={offset:.3f}, pixel={pixel} [{status}]")
+        status = "NEED WORLD" if info.get("_needs_world_coords") else "OK"
+        print(f"    {name}: pos=[{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] [{status}]")
 
-    # Turn 3 코드 추출
-    print(f"\n{YELLOW}" + _log("Turn 3 — Extracting code...", step="Turn3") + f"{RESET}")
-    code = extract_code_from_response(turn3_resp)
-    assert code, "Failed to extract code from Turn 3 response"
+    # ── Turn Test: Waypoint Trajectory Prediction ──
+    turn_test_overhead_waypoints = []
+    turn_test_sideview_waypoints = []
+    turn_test_resp = ""
+    has_side_view = side_view_image and os.path.isfile(side_view_image)
 
-    # Multi-turn info (디버깅/로깅용)
-    multi_turn_info = {
-        "turn1_response": turn1_resp,
-        "turn2_response": turn2_resp,
-        "turn3_response": turn3_resp,
-        "turn1_parsed": _parse_json_from_response(turn1_resp),
-        "turn2_parsed": _parse_json_from_response(turn2_resp),
+    if len(all_points) >= 2:
+        print(f"\n{YELLOW}" + _log("Waypoint Trajectory", step="TurnTest") + f"{RESET}")
+        print(f"    All detected points: {len(all_points)}")
+        for pt in all_points:
+            print(f"      - [{pt['role']}] {pt['object_label']}: {pt['label']} @ ({pt['py']}, {pt['px']})")
+        print(f"    Phase (from instruction): {instruction}")
+        if has_side_view:
+            print(f"    Side-view image: {side_view_image}")
+
+        turn_msg = {
+            "text": turn_test_waypoint_trajectory_prompt(
+                instruction=instruction,
+                phase=instruction,
+                all_points=all_points,
+                has_side_view=has_side_view,
+            ),
+        }
+        if has_side_view:
+            turn_msg["image_path"] = side_view_image
+
+        turn_test_resp = gemini_chat_send(chat, gen_config, turn_msg,
+            turn_label="Waypoint Trajectory")
+        print(f"    {turn_test_resp[:300]}{'...' if len(turn_test_resp) > 300 else ''}")
+
+        parsed_test = _parse_json_from_response(turn_test_resp)
+        if parsed_test:
+            # Log selected points
+            selected = parsed_test.get("selected_points", [])
+            if selected:
+                print(f"    Selected points: {selected}")
+
+            # Parse overhead waypoints
+            oh_wps = parsed_test.get("overhead_waypoints", [])
+            for wp in oh_wps:
+                point_2d = wp.get("point_2d", [])
+                if len(point_2d) != 2:
+                    continue
+                wy, wx = point_2d
+                turn_test_overhead_waypoints.append({
+                    "label": wp.get("label", ""),
+                    "reasoning": wp.get("reasoning", ""),
+                    "point_2d": point_2d,
+                    "py": wy, "px": wx,
+                })
+                print(f"    [overhead] ({wy}, {wx}) — {wp.get('label', '')}")
+            print(f"    Overhead waypoints: {len(turn_test_overhead_waypoints)}")
+
+            # Parse side-view waypoints
+            sv_wps = parsed_test.get("sideview_waypoints", [])
+            for wp in sv_wps:
+                point_2d = wp.get("point_2d", [])
+                if len(point_2d) != 2:
+                    continue
+                wy, wx = point_2d
+                turn_test_sideview_waypoints.append({
+                    "label": wp.get("label", ""),
+                    "reasoning": wp.get("reasoning", ""),
+                    "point_2d": point_2d,
+                    "py": wy, "px": wx,
+                })
+                print(f"    [sideview] ({wy}, {wx}) — {wp.get('label', '')}")
+            print(f"    Side-view waypoints: {len(turn_test_sideview_waypoints)}")
+        else:
+            print(f"    [Warning] Failed to parse waypoints from response")
+    else:
+        print(f"\n{YELLOW}" + _log("Waypoint Trajectory — skipped (< 2 points)", step="TurnTest") + f"{RESET}")
+
+    # ── Code Generation Turn ──
+    print(f"\n{YELLOW}" + _log("Code Generation", step="CodeGen") + f"{RESET}")
+    codegen_resp = gemini_chat_send(chat, gen_config,
+        {"text": turn3_code_gen_prompt(instruction=instruction, robot_id=robot_id)},
+        turn_label="Code Gen")
+    code = extract_code_from_response(codegen_resp)
+    assert code, "Failed to extract code from Code Gen response"
+
+    # multi_turn_info (하위호환: execution_forward_and_reset.py가 사용하는 키 유지)
+    turn2_compat = {
+        "grasp_points": [
+            {
+                "object_name": pt["object_label"],
+                "label": pt.get("label", ""),
+                "role": pt["role"],
+                "point_pixel": [
+                    int(pt["py"] * 1000 / img_h),
+                    int(pt["px"] * 1000 / img_w),
+                ],
+            }
+            for pt in all_points
+        ]
     }
 
+    multi_turn_info = {
+        "turn0_response": turn0_resp,
+        "turn1_response": turn1_resp,
+        "turn2_response": "\n".join(cr["response"] for cr in crop_responses),
+        "turn3_response": codegen_resp,
+        "turn1_parsed": valid_objects,
+        "turn2_parsed": turn2_compat,
+        # 신규 필드
+        "detected_objects": valid_objects,
+        "crop_responses": crop_responses,
+        "all_points": all_points,
+        "crop_dir": crop_dir,
+        "turn_test_response": turn_test_resp,
+        "turn_test_overhead_waypoints": turn_test_overhead_waypoints,
+        "turn_test_sideview_waypoints": turn_test_sideview_waypoints,
+        "side_view_image": side_view_image if has_side_view else None,
+    }
+
+    n_turns = 2 + len(valid_objects) + 1
     print(GRAY + "=" * line_width + RESET)
-    print(LIGHT_GREEN + "Multi-turn code generation completed.".center(line_width) + RESET)
+    print(LIGHT_GREEN + f"Crop-then-Point completed ({n_turns} turns).".center(line_width) + RESET)
     print(GRAY + "=" * line_width + RESET)
 
     return code, positions, multi_turn_info

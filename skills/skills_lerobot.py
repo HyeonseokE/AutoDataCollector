@@ -98,7 +98,7 @@ class LeRobotSkills:
         use_compensation: bool = True,
         use_deceleration: bool = True,
         verbose: bool = True,
-        pick_offset: float = 0.03,  # Pick/place offset from object top (meters, 3cm)
+        pick_offset: float = 0.025,  # Pick/place offset from object top (meters, 2.5cm)
         tcp_offset: list = None,  # TCP offset [x, y, z] in meters (default: [-0.04, 0, 0])
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
@@ -1405,7 +1405,7 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.01
+        MIN_PICK_Z = 0.0
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
@@ -1499,6 +1499,98 @@ class LeRobotSkills:
 
         self._log("[Execute Place Object] Complete")
         return True
+
+    def execute_press(
+        self,
+        position: Union[List[float], np.ndarray],
+        press_depth: float = 0.01,
+        contact_height: float = 0.02,
+        press_duration: float = 0.5,
+        hold_time: float = 0.3,
+        max_press_torque: int = 400,
+        duration: Optional[float] = None,
+        gripper_offset: float = 0.0,
+        target_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
+    ) -> bool:
+        """
+        Press a target (button, switch) with 2-phase descent and torque limiting.
+
+        Call after moving to approach position with gripper closed.
+        Phase 1: descend to contact_height at normal speed.
+        Phase 2: press down press_depth with limited torque (slow).
+        Hold, then retract to contact_height.
+
+        Args:
+            position: target [x, y, z] in current frame (meters)
+            press_depth: extra depth below contact surface (meters, default 1cm)
+            contact_height: estimated surface height (meters, default 2cm)
+            press_duration: time for pressing phase (seconds, default 0.5)
+            hold_time: time to hold pressed state (seconds, default 0.3)
+            max_press_torque: torque limit during press (0-1000, default 400)
+            duration: descent/retract movement time (seconds, None=default)
+            gripper_offset: TCP offset (meters, 0.0=no offset)
+            target_name: target label for recording
+            skill_description: skill label for recording
+        """
+        from skills.press import press
+        return press(
+            self,
+            position=position,
+            press_depth=press_depth,
+            contact_height=contact_height,
+            press_duration=press_duration,
+            hold_time=hold_time,
+            max_press_torque=max_press_torque,
+            duration=duration,
+            gripper_offset=gripper_offset,
+            target_name=target_name,
+            skill_description=skill_description,
+        )
+
+    def execute_push(
+        self,
+        start_position: Union[List[float], np.ndarray],
+        end_position: Union[List[float], np.ndarray],
+        push_height: float = 0.01,
+        run_up_distance: float = 0.03,
+        approach_height: float = 0.20,
+        duration: Optional[float] = None,
+        gripper_offset: float = 0.0,
+        object_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
+    ) -> bool:
+        """
+        Push an object in a straight line (Cartesian linear path).
+
+        Call after closing gripper and moving to approach position above start.
+        Internally: descends to pre-contact (run-up offset behind start),
+        moves linearly through start to end, then retreats to approach_height.
+
+        Args:
+            start_position: contact point [x, y, z] (interaction point, e.g. object edge)
+            end_position: push end [x, y, z] in current frame (meters)
+            push_height: EE height during push (meters, default 1cm)
+            run_up_distance: pre-contact offset behind start (meters, default 3cm)
+            approach_height: retreat height after push (meters, default 20cm)
+            duration: push movement time (seconds, None=auto based on distance)
+            gripper_offset: TCP offset (meters, 0.0=no offset)
+            object_name: object label for recording
+            skill_description: skill label for recording
+        """
+        from skills.push_object import push_object
+        return push_object(
+            self,
+            start_position=start_position,
+            end_position=end_position,
+            push_height=push_height,
+            run_up_distance=run_up_distance,
+            approach_height=approach_height,
+            duration=duration,
+            gripper_offset=gripper_offset,
+            object_name=object_name,
+            skill_description=skill_description,
+        )
 
     # ========== High-Level Skills: Each high-level skill is composed of primitive skills ==========
     # def execute_pick(

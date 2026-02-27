@@ -111,7 +111,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                             skill_description: str = None) -> bool:
         """Executes a pick (grasp) action at the given object position.
         Must be called AFTER moving to the approach position above the object.
-        The robot descends to the grasp height (3cm offset from object top),
+        The robot descends to the grasp height (2.5cm offset from object top),
         closes the gripper to grasp the object, and internally saves the current
         pitch angle for the subsequent place operation.
 
@@ -161,4 +161,64 @@ ROBOT_API_DOC = '''class LeRobotSkills:
 
         Returns:
             True if place successful (object released at target position).
+        """
+
+    def execute_press(self, position: list[float], press_depth: float = 0.01,
+                      contact_height: float = 0.02, press_duration: float = 0.5,
+                      hold_time: float = 0.3, max_press_torque: int = 400,
+                      duration: float = None, gripper_offset: float = 0.0,
+                      target_name: str = None, skill_description: str = None) -> bool:
+        """Executes a 2-phase press action (normal descent + torque-limited press).
+        Must be called AFTER closing the gripper and moving to approach position above target.
+        Phase 1: Descend to contact surface at normal speed.
+        Phase 2: Press below contact with torque limit for safe force application.
+
+        Args:
+            position: Target position [x, y, z] in meters (center of press target).
+            press_depth: How far to press below the contact surface in meters (default 0.01 = 1cm).
+            contact_height: Height of the contact surface in meters (use object's z value).
+            press_duration: Duration for the pressing phase in seconds.
+            hold_time: How long to hold at pressed position in seconds (default 0.3).
+            max_press_torque: Torque limit during press phase (0-1000, default 400).
+            duration: Duration for the descent phase. Uses default if None.
+            gripper_offset: Asymmetric gripper offset in meters.
+            target_name: Name of the target for subgoal labeling.
+                Example: "power button", "microphone".
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "press the power button on the device"
+
+        Returns:
+            True if press action completed successfully.
+        """
+
+    def execute_push(self, start_position: list[float], end_position: list[float],
+                     push_height: float = 0.01, duration: float = None,
+                     gripper_offset: float = 0.0, object_name: str = None,
+                     skill_description: str = None) -> bool:
+        """Pushes an object in a straight line using Cartesian linear motion.
+        Must be called AFTER closing the gripper and moving to approach position above start.
+        Internally handles everything after approach:
+          1. Descends to pre-contact position (3cm behind start in opposite push direction)
+          2. Moves linearly through start to end (run-up + push in one straight line)
+          3. Retreats to approach_height (20cm) after push
+        No need for a separate retreat move after calling this method.
+
+        Args:
+            start_position: Contact point [x, y, z] in meters — the interaction point
+                where the gripper first touches the object (e.g., object's left edge
+                for a left-to-right push). The z value is used as reference for object height.
+            end_position: Push end position [x, y, z] in meters.
+                Determines push direction and distance in the xy plane.
+            push_height: Height of the end-effector during the push in meters (default 0.01).
+                Set to approximately 1/3 of the object height for good contact.
+                Too low risks table collision; too high misses the object.
+            duration: Push movement duration in seconds. None for auto-calculation based on distance.
+            gripper_offset: Asymmetric gripper offset in meters.
+            object_name: Name of the object being pushed for subgoal labeling.
+                Example: "bread", "red block".
+            skill_description: A natural language sentence describing the semantic intent.
+                Example: "push the bread 15cm to the right in a straight line"
+
+        Returns:
+            True if push completed successfully.
         """'''

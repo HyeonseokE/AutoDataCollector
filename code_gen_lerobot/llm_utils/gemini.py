@@ -12,9 +12,19 @@ LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 30  # seconds
+GEMINI3_DEFAULT_THINKING_BUDGET = 15000  # Gemini 3 thinking 토큰 제한 (기본 15K)
 
 _initialized = False
 _initialized_location = None
+
+
+def _make_gen_config(model: str, temperature: float = 0.0, **kwargs) -> GenerationConfig:
+    """GenerationConfig 생성. Gemini 3 모델은 thinking budget 자동 적용."""
+    gen_config = GenerationConfig(temperature=temperature, **kwargs)
+    if "gemini-3" in model.lower():
+        budget = GEMINI3_DEFAULT_THINKING_BUDGET
+        gen_config._raw_generation_config.thinking_config.thinking_budget = budget
+    return gen_config
 
 
 def _get_location_for_model(model: str) -> str:
@@ -77,6 +87,7 @@ def gemini_chat_start(
     model: str,
     system_prompt: str = None,
     temperature: float = 0.0,
+    thinking_budget: int = None,
 ) -> Tuple:
     """Chat 세션 시작. (chat, gen_config) 튜플 반환.
 
@@ -86,6 +97,8 @@ def gemini_chat_start(
         model: Gemini 모델 이름
         system_prompt: 시스템 프롬프트
         temperature: 샘플링 온도
+        thinking_budget: thinking 토큰 제한 (Gemini 3 전용).
+            None이면 Gemini 3 모델은 기본 15000 적용, 그 외 모델은 미적용.
 
     Returns:
         (chat_session, generation_config) 튜플
@@ -98,7 +111,16 @@ def gemini_chat_start(
         system_instruction=system_prompt if system_prompt else None,
     )
     chat = gemini_model.start_chat()
-    gen_config = GenerationConfig(temperature=temperature)
+
+    # Gemini 3: thinking_budget 파라미터 우선, 없으면 기본값 자동 적용
+    if "gemini-3" in model.lower() and thinking_budget is not None:
+        gen_config = _make_gen_config(model, temperature=temperature)
+        gen_config._raw_generation_config.thinking_config.thinking_budget = thinking_budget
+    else:
+        gen_config = _make_gen_config(model, temperature=temperature)
+
+    if "gemini-3" in model.lower():
+        print(f"[GEMINI] Thinking budget: {gen_config._raw_generation_config.thinking_config.thinking_budget} tokens")
 
     return chat, gen_config
 
@@ -164,12 +186,12 @@ def gemini_response(
     if image_path:
         contents.append(Part.from_image(Image.load_from_file(image_path)))
 
+    stop = [s for s in stop_sequences if s] or None if stop_sequences else None
+    gen_config = _make_gen_config(model, temperature=temperature, stop_sequences=stop)
+
     response = gemini_model.generate_content(
         contents,
-        generation_config=GenerationConfig(
-            temperature=temperature,
-            stop_sequences=[s for s in stop_sequences if s] or None if stop_sequences else None,
-        ),
+        generation_config=gen_config,
     )
 
     if check_time:
@@ -212,7 +234,7 @@ def gemini_chat(
     )
     chat = gemini_model.start_chat()
 
-    generation_config = GenerationConfig(temperature=temperature)
+    generation_config = _make_gen_config(model, temperature=temperature)
     responses = []
 
     for i, turn in enumerate(turns):

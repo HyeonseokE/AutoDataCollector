@@ -291,9 +291,10 @@ def _points_to_positions(
     camera=None,
 ) -> Dict:
     """
-    Crop-then-point 결과에서 object별 grasp point를 선택하고 pixel→world 변환.
+    Crop-then-point 결과에서 object별 모든 point를 pixel→world 변환.
 
-    각 object에서 "grasp" role 포인트를 우선 선택, 없으면 첫 번째 포인트 사용.
+    각 object에서 "grasp" role 포인트를 기본 position으로 선택하고,
+    모든 point를 "points" 딕셔너리에 포함시킴.
 
     Args:
         all_points: [{"object_label", "label", "role", "px", "py"}, ...]
@@ -301,12 +302,18 @@ def _points_to_positions(
         camera: depth 카메라 (3D 변환용)
 
     Returns:
-        {object_label: {"position": [x,y,z], "gripper_offset": float, "pixel": [px,py]}}
+        {object_label: {"position": [x,y,z], "gripper_offset": float, "pixel": [px,py],
+                         "points": {"label": [x,y,z], ...}}}
     """
-    # Object별로 grasp point 선택
-    grasp_by_object = {}
+    # Object별로 모든 point 수집 + grasp point 선택
+    points_by_object = {}  # {obj: [pt, ...]}
+    grasp_by_object = {}   # {obj: pt} — 기본 position용
     for pt in all_points:
         obj = pt["object_label"]
+        if obj not in points_by_object:
+            points_by_object[obj] = []
+        points_by_object[obj].append(pt)
+
         if obj not in grasp_by_object:
             grasp_by_object[obj] = pt  # 첫 번째 point (fallback)
         elif pt.get("role") == "grasp" and grasp_by_object[obj].get("role") != "grasp":
@@ -344,11 +351,11 @@ def _points_to_positions(
         except Exception:
             use_3d = False
 
-    # positions 구성
-    positions = {}
-    for obj_label, pt in grasp_by_object.items():
-        px, py = pt["px"], pt["py"]
+    # pixel→world 변환 헬퍼
+    Z_MAX = 0.15  # 15cm — 테이블 위 물체 최대 높이
+    Z_DEFAULT = 0.02  # z 이상 시 대체값 (2cm)
 
+    def _pixel_to_world(px, py):
         if transformer:
             try:
                 if use_3d and depth_frame is not None:
@@ -356,24 +363,47 @@ def _points_to_positions(
                     wx, wy, wz = transformer.pixel_depth_to_world(px, py, depth_m)
                 else:
                     wx, wy, wz = transformer.pixel_to_world_2d(px, py)
-
-                positions[obj_label] = {
-                    "position": [wx / 100.0, wy / 100.0, wz / 100.0],
-                    "gripper_offset": 0.01,
-                    "pixel": [px, py],
-                }
-                print(f"    {obj_label}: pixel=({px},{py}) → world={positions[obj_label]['position']}")
-                continue
+                pos = [wx / 100.0, wy / 100.0, wz / 100.0]
+                # z-값 이상치 보정: 테이블 위 물체는 15cm 이하
+                if pos[2] > Z_MAX or pos[2] < -0.02:
+                    print(f"    [Z-FIX] ({px},{py}) z={pos[2]*100:.1f}cm out of range, "
+                          f"clamping to {Z_DEFAULT*100:.0f}cm")
+                    pos[2] = Z_DEFAULT
+                return pos, True
             except Exception as e:
-                print(f"    {obj_label}: pixel→world failed: {e}")
+                print(f"    pixel→world failed ({px},{py}): {e}")
+        return [0.0, 0.0, 0.03], False
 
-        # Fallback
+    # positions 구성
+    positions = {}
+    for obj_label, grasp_pt in grasp_by_object.items():
+        # 기본 position (grasp point)
+        gpx, gpy = grasp_pt["px"], grasp_pt["py"]
+        world_pos, success = _pixel_to_world(gpx, gpy)
+
         positions[obj_label] = {
-            "position": [0.0, 0.0, 0.03],
+            "position": world_pos,
             "gripper_offset": 0.01,
-            "pixel": [px, py],
-            "_needs_world_coords": True,
+            "pixel": [gpx, gpy],
         }
+        if not success:
+            positions[obj_label]["_needs_world_coords"] = True
+
+        # 모든 point를 points 딕셔너리에 추가
+        obj_points = {}
+        for pt in points_by_object.get(obj_label, []):
+            pt_label = pt.get("label", "unknown")
+            pt_px, pt_py = pt["px"], pt["py"]
+            pt_world, pt_success = _pixel_to_world(pt_px, pt_py)
+            if pt_success:
+                obj_points[pt_label] = pt_world
+        if obj_points:
+            positions[obj_label]["points"] = obj_points
+
+        print(f"    {obj_label}: pos={world_pos} [OK]")
+        if obj_points:
+            for lbl, pos in obj_points.items():
+                print(f"      - {lbl}: {pos}")
 
     return positions
 
@@ -469,23 +499,48 @@ def lerobot_code_gen_multi_turn(
     print(f"  {turn0_resp[:300]}{'...' if len(turn0_resp) > 300 else ''}")
 
     # ── Turn 1: BBox Detection (이미지 재전송) — test6 방식 ──
+    has_side_view = side_view_image and os.path.isfile(side_view_image)
     print(f"\n{YELLOW}" + _log("Turn 1 — BBox Detection", step="Turn1") + f"{RESET}")
-    turn1_resp = gemini_chat_send(chat, gen_config,
-        {
-            "text": turn1_detect_task_relevant_objects_prompt(),
-            "image_path": image_path,
-        },
-        turn_label="Turn 1")
+    if has_side_view:
+        print(f"    Dual-view mode: overhead + side-view ({side_view_image})")
+
+    turn1_msg = {
+        "text": turn1_detect_task_relevant_objects_prompt(has_side_view=has_side_view),
+        "image_path": image_path,
+    }
+    if has_side_view:
+        turn1_msg["image_paths"] = [side_view_image]
+    turn1_resp = gemini_chat_send(chat, gen_config, turn1_msg, turn_label="Turn 1")
     print(f"  {turn1_resp[:300]}{'...' if len(turn1_resp) > 300 else ''}")
 
-    # Parse bboxes
+    # Parse bboxes (dual-view or single-view)
     turn1_data = _parse_json_from_response(turn1_resp)
-    if isinstance(turn1_data, list):
-        obj_list = turn1_data
-    elif isinstance(turn1_data, dict):
-        obj_list = turn1_data.get("objects", turn1_data.get("detected_objects", []))
+
+    sv_bbox_by_label = {}  # label → sideview bbox (for Turn 2 crop)
+    turn1_sideview_parsed = []  # for visualization
+
+    if has_side_view and isinstance(turn1_data, dict) and "overhead" in turn1_data:
+        # Dual-view response: {"overhead": [...], "sideview": [...]}
+        oh_list = turn1_data.get("overhead", [])
+        sv_list = turn1_data.get("sideview", [])
+        obj_list = oh_list  # overhead objects are the primary list
+
+        # Build sideview bbox lookup by label
+        for sv_obj in sv_list:
+            sv_box = sv_obj.get("box_2d") or sv_obj.get("bbox") or []
+            sv_label = sv_obj.get("label", "")
+            if len(sv_box) == 4 and sv_label:
+                sv_bbox_by_label[sv_label] = sv_box
+                turn1_sideview_parsed.append({"box_2d": sv_box, "label": sv_label})
+                print(f"    [sideview] [{sv_label}] bbox={sv_box}")
     else:
-        obj_list = []
+        # Single-view response: list or {"objects": [...]}
+        if isinstance(turn1_data, list):
+            obj_list = turn1_data
+        elif isinstance(turn1_data, dict):
+            obj_list = turn1_data.get("objects", turn1_data.get("detected_objects", []))
+        else:
+            obj_list = []
 
     valid_objects = []
     for obj in obj_list:
@@ -493,7 +548,7 @@ def lerobot_code_gen_multi_turn(
         if len(box) == 4 and obj.get("label"):
             obj["box_2d"] = box
             valid_objects.append(obj)
-            print(f"    [{obj['label']}] bbox={box}")
+            print(f"    [overhead] [{obj['label']}] bbox={box}")
 
     assert valid_objects, "No valid bboxes detected from Turn 1"
 
@@ -501,6 +556,18 @@ def lerobot_code_gen_multi_turn(
     full_img = cv2.imread(image_path)
     assert full_img is not None, f"Cannot read image: {image_path}"
     img_h, img_w = full_img.shape[:2]
+
+    # Side-view 이미지 로드 (for cropping in Turn 2)
+    sv_full_img = None
+    sv_img_h, sv_img_w = 0, 0
+    if has_side_view:
+        sv_full_img = cv2.imread(side_view_image)
+        if sv_full_img is not None:
+            sv_img_h, sv_img_w = sv_full_img.shape[:2]
+            print(f"    Side-view image loaded: {sv_img_w}x{sv_img_h}")
+        else:
+            print(f"    [Warning] Cannot read side-view image: {side_view_image}")
+            has_side_view = False
 
     # ── Turn 2+: Crop-then-Point ──
     all_points = []
@@ -513,6 +580,7 @@ def lerobot_code_gen_multi_turn(
 
         print(f"\n{YELLOW}" + _log(f"Crop — {label}", step=f"Crop{i}") + f"{RESET}")
 
+        # ── Overhead crop ──
         # Padding + clamp (0-1000 스케일)
         ymin_p = max(0, ymin - CROP_PADDING)
         xmin_p = max(0, xmin - CROP_PADDING)
@@ -527,27 +595,74 @@ def lerobot_code_gen_multi_turn(
 
         crop_img = full_img[crop_y1:crop_y2, crop_x1:crop_x2]
         crop_h, crop_w = crop_img.shape[:2]
-        print(f"    bbox=[{ymin},{xmin},{ymax},{xmax}] → crop ({crop_w}x{crop_h})")
+        print(f"    [overhead] bbox=[{ymin},{xmin},{ymax},{xmax}] → crop ({crop_w}x{crop_h})")
 
-        # Save crop
+        # Save overhead crop
         safe_label = label.replace(" ", "_").replace("/", "_")
         crop_path = f"{crop_dir}/crop_{safe_label}.jpg"
         cv2.imwrite(crop_path, crop_img)
 
-        # Send crop + pointing prompt
-        resp = gemini_chat_send(chat, gen_config,
-            {"text": turn2_crop_pointing_prompt(label), "image_path": crop_path},
+        # ── Side-view crop (if available) ──
+        obj_has_sv = has_side_view and label in sv_bbox_by_label and sv_full_img is not None
+        sv_crop_path = None
+        sv_crop_x1 = sv_crop_y1 = sv_crop_w = sv_crop_h = 0
+
+        if obj_has_sv:
+            sv_ymin, sv_xmin, sv_ymax, sv_xmax = sv_bbox_by_label[label]
+            sv_ymin_p = max(0, sv_ymin - CROP_PADDING)
+            sv_xmin_p = max(0, sv_xmin - CROP_PADDING)
+            sv_ymax_p = min(1000, sv_ymax + CROP_PADDING)
+            sv_xmax_p = min(1000, sv_xmax + CROP_PADDING)
+
+            sv_crop_x1 = int(sv_xmin_p * sv_img_w / 1000)
+            sv_crop_y1 = int(sv_ymin_p * sv_img_h / 1000)
+            sv_crop_x2 = int(sv_xmax_p * sv_img_w / 1000)
+            sv_crop_y2 = int(sv_ymax_p * sv_img_h / 1000)
+
+            sv_crop_img = sv_full_img[sv_crop_y1:sv_crop_y2, sv_crop_x1:sv_crop_x2]
+            sv_crop_h, sv_crop_w = sv_crop_img.shape[:2]
+            print(f"    [sideview] bbox=[{sv_ymin},{sv_xmin},{sv_ymax},{sv_xmax}] → crop ({sv_crop_w}x{sv_crop_h})")
+
+            sv_crop_path = f"{crop_dir}/crop_sv_{safe_label}.jpg"
+            cv2.imwrite(sv_crop_path, sv_crop_img)
+
+        # Send crop(s) + pointing prompt
+        turn2_msg = {
+            "text": turn2_crop_pointing_prompt(label, has_side_view=obj_has_sv),
+            "image_path": crop_path,
+        }
+        if obj_has_sv and sv_crop_path:
+            turn2_msg["image_paths"] = [sv_crop_path]
+
+        resp = gemini_chat_send(chat, gen_config, turn2_msg,
             turn_label=f"Crop: {label}")
         crop_responses.append({"label": label, "response": resp})
         print(f"    {resp[:200]}{'...' if len(resp) > 200 else ''}")
 
-        # Parse critical_points
+        # Parse critical_points (dual or single view)
         parsed = _parse_json_from_response(resp)
-        if not parsed or "critical_points" not in parsed:
+        if not parsed:
             print(f"    [Warning] Failed to parse points for '{label}'")
             continue
 
-        for pt in parsed["critical_points"]:
+        # Determine which key(s) hold the overhead points
+        if obj_has_sv and "overhead_critical_points" in parsed:
+            oh_points = parsed["overhead_critical_points"]
+            sv_points = parsed.get("sideview_critical_points", [])
+            # Build label→sv_point lookup for matching
+            sv_by_label = {}
+            for sv_pt in sv_points:
+                sv_lbl = sv_pt.get("label", "")
+                if sv_lbl:
+                    sv_by_label[sv_lbl] = sv_pt
+        elif "critical_points" in parsed:
+            oh_points = parsed["critical_points"]
+            sv_by_label = {}
+        else:
+            print(f"    [Warning] No recognized point keys for '{label}'")
+            continue
+
+        for pt in oh_points:
             point_2d = pt.get("point_2d", [])
             if len(point_2d) != 2:
                 continue
@@ -556,7 +671,8 @@ def lerobot_code_gen_multi_turn(
             crop_py = int(norm_y * crop_h / 1000)
             px = crop_x1 + crop_px
             py = crop_y1 + crop_py
-            all_points.append({
+
+            entry = {
                 "object_label": label,
                 "label": pt.get("label", ""),
                 "role": pt.get("role", "interaction"),
@@ -564,11 +680,38 @@ def lerobot_code_gen_multi_turn(
                 "point_2d": point_2d,
                 "px": px, "py": py,
                 "crop_px": crop_px, "crop_py": crop_py,
-            })
-            print(f"    [{pt.get('role','?')}] ({norm_y},{norm_x}) "
-                  f"→ crop({crop_px},{crop_py}) → full({px},{py})")
+            }
+
+            # Match side-view point by label
+            pt_label = pt.get("label", "")
+            sv_match = sv_by_label.get(pt_label)
+            if sv_match:
+                sv_pt_2d = sv_match.get("point_2d", [])
+                if len(sv_pt_2d) == 2:
+                    sv_norm_y, sv_norm_x = sv_pt_2d
+                    sv_cpx = int(sv_norm_x * sv_crop_w / 1000)
+                    sv_cpy = int(sv_norm_y * sv_crop_h / 1000)
+                    sv_px_full = sv_crop_x1 + sv_cpx
+                    sv_py_full = sv_crop_y1 + sv_cpy
+                    entry["sv_point_2d"] = sv_pt_2d
+                    entry["sv_crop_px"] = sv_cpx
+                    entry["sv_crop_py"] = sv_cpy
+                    entry["sv_px"] = sv_px_full
+                    entry["sv_py"] = sv_py_full
+                    print(f"    [{pt.get('role','?')}] OH({norm_y},{norm_x})→full({px},{py}) "
+                          f"| SV({sv_norm_y},{sv_norm_x})→full({sv_px_full},{sv_py_full})")
+                else:
+                    print(f"    [{pt.get('role','?')}] OH({norm_y},{norm_x})→full({px},{py}) | SV: invalid point_2d")
+            else:
+                print(f"    [{pt.get('role','?')}] ({norm_y},{norm_x}) "
+                      f"→ crop({crop_px},{crop_py}) → full({px},{py})")
+
+            all_points.append(entry)
 
     print(f"\n  Total: {len(all_points)} points across {len(valid_objects)} objects")
+    sv_count = sum(1 for pt in all_points if pt.get("sv_px") is not None)
+    if sv_count:
+        print(f"  Side-view points matched: {sv_count}/{len(all_points)}")
 
     # Positions 구성 (pixel → world)
     print(f"\n{YELLOW}" + _log("Building positions...", step="Positions") + f"{RESET}")
@@ -594,7 +737,6 @@ def lerobot_code_gen_multi_turn(
     turn_test_overhead_waypoints = []
     turn_test_sideview_waypoints = []
     turn_test_resp = ""
-    has_side_view = side_view_image and os.path.isfile(side_view_image)
 
     if len(all_points) >= 2:
         print(f"\n{YELLOW}" + _log("Waypoint Trajectory", step="TurnTest") + f"{RESET}")
@@ -666,7 +808,7 @@ def lerobot_code_gen_multi_turn(
     # ── Code Generation Turn ──
     print(f"\n{YELLOW}" + _log("Code Generation", step="CodeGen") + f"{RESET}")
     codegen_resp = gemini_chat_send(chat, gen_config,
-        {"text": turn3_code_gen_prompt(instruction=instruction, robot_id=robot_id)},
+        {"text": turn3_code_gen_prompt(instruction=instruction, robot_id=robot_id, all_points=all_points)},
         turn_label="Code Gen")
     code = extract_code_from_response(codegen_resp)
     assert code, "Failed to extract code from Code Gen response"
@@ -684,8 +826,24 @@ def lerobot_code_gen_multi_turn(
                 ],
             }
             for pt in all_points
-        ]
+        ],
     }
+
+    # Side-view grasp points (for visualization)
+    if has_side_view and sv_full_img is not None:
+        turn2_compat["sv_grasp_points"] = [
+            {
+                "object_name": pt["object_label"],
+                "label": pt.get("label", ""),
+                "role": pt["role"],
+                "point_pixel": [
+                    int(pt["sv_py"] * 1000 / sv_img_h),
+                    int(pt["sv_px"] * 1000 / sv_img_w),
+                ],
+            }
+            for pt in all_points
+            if pt.get("sv_px") is not None
+        ]
 
     multi_turn_info = {
         "turn0_response": turn0_resp,
@@ -694,6 +852,8 @@ def lerobot_code_gen_multi_turn(
         "turn3_response": codegen_resp,
         "turn1_parsed": valid_objects,
         "turn2_parsed": turn2_compat,
+        # Side-view Turn 1 data (for visualization)
+        "turn1_sideview_parsed": turn1_sideview_parsed if turn1_sideview_parsed else None,
         # 신규 필드
         "detected_objects": valid_objects,
         "crop_responses": crop_responses,

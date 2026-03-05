@@ -1143,6 +1143,7 @@ class ForwardAndResetPipeline:
                     "turn2_response": self.multi_turn_info.get("turn2_response", ""),
                     "turn3_response": self.multi_turn_info.get("turn3_response", ""),
                     "turn1_parsed": self.multi_turn_info.get("turn1_parsed"),
+                    "turn1_sideview_parsed": self.multi_turn_info.get("turn1_sideview_parsed"),
                     "turn2_parsed": self.multi_turn_info.get("turn2_parsed"),
                     "detected_objects": self.multi_turn_info.get("detected_objects"),
                     "all_points": self.multi_turn_info.get("all_points"),
@@ -1173,6 +1174,30 @@ class ForwardAndResetPipeline:
                             str(Path(forward_dir) / "turn2_grasp_points.jpg")
                         )
 
+                    # Side-view Turn 1 + Turn 2 시각화
+                    sv_image_path = self.multi_turn_info.get("side_view_image")
+                    if sv_image_path and os.path.isfile(sv_image_path):
+                        sv_img_base = cv2.imread(sv_image_path)
+                        if sv_img_base is not None:
+                            sv_img_base = cv2.resize(sv_img_base, (640, 480))
+
+                            # Turn 1 side-view bbox 시각화
+                            t1_sv_parsed = self.multi_turn_info.get("turn1_sideview_parsed")
+                            if t1_sv_parsed:
+                                self._visualize_turn1(
+                                    sv_img_base.copy(), t1_sv_parsed,
+                                    str(Path(forward_dir) / "turn1_sideview_detection.jpg"),
+                                )
+
+                            # Turn 2 side-view grasp points 시각화
+                            sv_grasp = t2_parsed.get("sv_grasp_points") if isinstance(t2_parsed, dict) else None
+                            if sv_grasp:
+                                sv_t2_compat = {"grasp_points": sv_grasp}
+                                self._visualize_turn2(
+                                    sv_img_base.copy(), t1_sv_parsed, sv_t2_compat,
+                                    str(Path(forward_dir) / "turn2_sideview_grasp_points.jpg")
+                                )
+
                     oh_waypoints = self.multi_turn_info.get("turn_test_overhead_waypoints")
                     if oh_waypoints:
                         self._visualize_turn_test(
@@ -1181,7 +1206,6 @@ class ForwardAndResetPipeline:
                         )
 
                     sv_waypoints = self.multi_turn_info.get("turn_test_sideview_waypoints")
-                    sv_image_path = self.multi_turn_info.get("side_view_image")
                     if sv_waypoints and sv_image_path and os.path.isfile(sv_image_path):
                         sv_img = cv2.imread(sv_image_path)
                         if sv_img is not None:

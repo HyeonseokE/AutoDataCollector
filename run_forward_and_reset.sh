@@ -12,13 +12,56 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ============================================================
-# 핵심 설정 (Essential Configuration)
+# 핵심 설정 (Essential Configuration) / 워크스페이스 명시 / 에피소드 갯수 명시
 # ============================================================
 
+# # Grasping:                                                                  
+# (1, 성공) pick up the red block and place it on the blue plate
+# (2, 성공) distribute chocolate pies to each plate                           
+# (3) clear the table after a meal
+
+# # Arrangement:                                                               
+# (1, 성공) place the red block between chocolate pies             
+# (2, 성공) arrange yellow, red, and green blocks from left to right
+# (3, 성공) stack the blocks in the order of red, green, and yellow
+
+# # Non-grasping:
+# (1, 성공) turn on the microphone by pressing the power button
+# (2, 성공) Push the bowl of cereal 5cm from left to right
+# (3, 성공) Open the trash can lid
+
+# # Deformable:
+# (1) fold the towel
+# (2) sweep the floor with a towel
+# (3, 성공) bend the microphone gooseneck leftward
+
+# # Articulated:
+# (1) open the drawers
+# (2) close the drawers
+# (3) beat the red block with a hammer
+
+# # Insertion/Assembly:
+# (1) assemble the battery pack
+# (2) peg-in-hole
+# (3) clean the desk
+
+# # Rotation:
+# (1) tighten the bolt
+# (2) open the bottle
+# (3) mix the tea
+
+# # Contact-rich:
+# (1) wipe the dish with a sponge
+# (2) sweep the floor with a brush
+# (3) shake the bottle
+
 ## [필수] 태스크 명령어
+INSTRUCTION="Open the trash can lid"
+
+# INSTRUCTION="make sandwich using the ingredients on the table"
 # INSTRUCTION="pick up the red block and place it on the blue dish"
 # INSTRUCTION="fold the green towel"
-INSTRUCTION="pick up the brown peg and insert it into the hole of the gray structure"
+# INSTRUCTION="pick up the brown peg and insert it into the hole of the gray structure"
 # INSTRUCTION = "Pick up the banana and place it in the bowl. 
 # You may need to handover the banana from one arm to the other if the initial arm picking the banana cannot reach the bowl. 
 # After picking the banana with one arm, you can handover the banana by first placing it carefully on the table surface and then using the other arm to pick it up. 
@@ -64,13 +107,14 @@ RECORD_DATASET=false
 # false: single-turn (Grounding DINO 검출 후 LLM 코드 생성)
 MULTI_TURN=true
 
-# CAD 참조 이미지 디렉토리 (비어있으면 CAD 없이 실행)
+## CAD 참조 이미지 디렉토리 (비어있으면 CAD 없이 실행)
 # 예: CAD_IMAGE_DIRS=("/path/to/cad_male" "/path/to/cad_female")
-CAD_IMAGE_DIRS=("pipeline_config/cad_images/brown_peg", "pipeline_config/cad_images/gray_structure_with_hole")
+CAD_IMAGE_DIRS=()
+# CAD_IMAGE_DIRS=("pipeline_config/cad_images/brown_peg", "pipeline_config/cad_images/gray_structure_with_hole")
 
-# Side-view 이미지 경로 (Turn Test waypoint trajectory 예측용, 비어있으면 overhead만 사용)
-SIDE_VIEW_IMAGE="pipeline_config/side_view_images/side_view.jpg"
-
+## Side-view 이미지 경로 (Turn Test waypoint trajectory 예측용, 비어있으면 overhead만 사용)
+SIDE_VIEW_IMAGE=""
+# SIDE_VIEW_IMAGE="pipeline_config/side_view_images/side_view.jpg"
 
 
 

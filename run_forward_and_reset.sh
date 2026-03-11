@@ -56,7 +56,7 @@ cd "$SCRIPT_DIR"
 # (3) shake the bottle
 
 ## [필수] 태스크 명령어
-INSTRUCTION="Open the trash can lid"
+INSTRUCTION="distribute chocolate pies to each plate"
 
 # INSTRUCTION="make sandwich using the ingredients on the table"
 # INSTRUCTION="pick up the red block and place it on the blue dish"
@@ -79,7 +79,7 @@ ROBOT_ID=3
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=1
+NUM_EPISODES=15
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false
@@ -87,7 +87,7 @@ USE_SERVER=false
 # ============================================================
 # Reset execution 설정
 # ============================================================
-EXECUTE_RESET=false # Reset 실행 여부
+EXECUTE_RESET=true # Reset 실행 여부
 RESET_MODE="original" # Reset_mode:("original": 원래 위치로 복귀, "random": 랜덤 위치로 배치)
 
 # ============================================================
@@ -98,7 +98,7 @@ SKIP_JUDGE=true
 # ============================================================
 # Dataset Recording 설정
 # ============================================================
-RECORD_DATASET=false
+RECORD_DATASET=true
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

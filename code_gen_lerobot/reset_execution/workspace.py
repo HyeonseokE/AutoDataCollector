@@ -6,6 +6,8 @@ BaseWorkspace를 상속하고 더 좁은 범위로 제한.
 주요 기능:
 1. Grippable 객체 분류 (그리퍼로 잡을 수 있는지 판단)
 2. 랜덤 타겟 위치 생성 (충돌 회피, 초기 위치와 다른 위치)
+3. 워크스페이스 자동 경계 계산 (IK 그리드 샘플링)
+4. 이미지 위 워크스페이스 시각화
 """
 
 import sys
@@ -45,8 +47,8 @@ class ResetWorkspace(BaseWorkspace):
         x_range_world: Tuple[float, float] = (0.14, 0.32),
         y_range_world: Tuple[float, float] = (-0.25, 0.08),
         z_fixed_world: float = 0.01,
-        min_object_distance: float = 0.05,
-        min_displacement_from_inital: float = 0.03,
+        min_object_distance: float = 0.07,
+        min_displacement_from_inital: float = 0.07,
         gripper_max_width: float = GRIPPER_MAX_OPEN_WIDTH,
     ):
         """
@@ -353,6 +355,190 @@ def generate_random_positions(
             target_positions[obj_name] = fallback_pos
 
     return target_positions
+
+
+# ============================================================
+# Workspace Bounds & Visualization
+# ============================================================
+
+def compute_workspace_bounds(
+    workspace: BaseWorkspace = None,
+    z_table: float = 0.01,
+    step: float = 0.01,
+    x_scan: Tuple[float, float] = (0.05, 0.45),
+    y_scan: Tuple[float, float] = (-0.35, 0.20),
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """
+    IK 그리드 샘플링으로 로봇별 도달 가능 workspace 경계를 자동 계산.
+
+    Args:
+        workspace: BaseWorkspace 인스턴스 (None이면 기본 생성)
+        z_table: 테이블 표면 Z 높이 (meters)
+        step: 스캔 간격 (meters)
+        x_scan: X 스캔 범위 (min, max)
+        y_scan: Y 스캔 범위 (min, max)
+
+    Returns:
+        ((x_min, x_max), (y_min, y_max)) in meters
+    """
+    if workspace is None:
+        workspace = BaseWorkspace()
+
+    valid_x, valid_y = [], []
+    for x in np.arange(x_scan[0], x_scan[1], step):
+        for y in np.arange(y_scan[0], y_scan[1], step):
+            if workspace.is_reachable(np.array([x, y, z_table])):
+                valid_x.append(x)
+                valid_y.append(y)
+
+    if not valid_x:
+        # Fallback to hardcoded defaults
+        return (0.14, 0.32), (-0.25, 0.08)
+
+    return (min(valid_x), max(valid_x)), (min(valid_y), max(valid_y))
+
+
+def draw_workspace_on_image(
+    image: np.ndarray,
+    workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]],
+    coord_transformer,
+    alpha: float = 0.3,
+    robot_id: int = 3,
+) -> np.ndarray:
+    """
+    로봇 워크스페이스를 원형(min/max reach) + x_min 제약으로 이미지에 시각화.
+
+    시각적 요소:
+    - 로봇 base 중심으로 min_reach / max_reach 시안 원호 경계
+    - x_min_world 시안 수직선
+    - convex hull 바깥 어둡게 마스킹
+
+    Args:
+        image: BGR 이미지 (numpy array)
+        workspace_bounds: ((x_min, x_max), (y_min, y_max)) in meters (프롬프트 전달용)
+        coord_transformer: CoordinateTransformer 인스턴스
+        alpha: 미사용 (호환성 유지)
+        robot_id: 로봇 ID (프레임 설정 로드용)
+
+    Returns:
+        시각화된 이미지 (numpy array, copy)
+    """
+    import cv2
+    import json
+
+    img_h, img_w = image.shape[:2]
+    result = image.copy()
+
+    # ── 로봇 base 위치 로드 (World frame, cm) ──
+    robot_x_cm, robot_y_cm = 5.1, -25.1  # defaults
+    base_rotation_matrix = None
+
+    try:
+        frame_config_path = (
+            Path(__file__).parent.parent.parent
+            / f"robot_configs/world2robot_matrices/robot{robot_id}_matrix.json"
+        )
+        if frame_config_path.exists():
+            with open(frame_config_path, 'r') as f:
+                frame_config = json.load(f)
+            frames_world = frame_config.get("frames", {}).get("world", {})
+            if "translation" in frames_world:
+                t = frames_world["translation"]
+                robot_x_cm = t[0] * 100
+                robot_y_cm = t[1] * 100
+            raw_transform = frame_config.get("_raw_transform", {})
+            base_rotation_matrix = raw_transform.get("rotation_matrix")
+    except Exception:
+        pass
+
+    robot_x_m = robot_x_cm / 100.0
+    robot_y_m = robot_y_cm / 100.0
+
+    # ── Workspace 파라미터 ──
+    ws = BaseWorkspace()
+    min_reach_cm = ws.min_reach * 100
+    max_reach_cm = ws.max_reach * 100
+    x_min_world_cm = ws.x_min_world * 100
+
+    # 그리드 스캔 범위 (로봇 base 중심)
+    grid_step_cm = 1.5
+    x_min_scan = max(x_min_world_cm, robot_x_cm - max_reach_cm)
+    x_max_scan = robot_x_cm + max_reach_cm
+    y_min_scan = robot_y_cm - max_reach_cm
+    y_max_scan = robot_y_cm + max_reach_cm
+
+    def is_reachable_from_base(x_m, y_m):
+        if x_m < ws.x_min_world:
+            return False
+        dx = x_m - robot_x_m
+        dy = y_m - robot_y_m
+        dist = np.sqrt(dx * dx + dy * dy)
+        margin = 0.01
+        return (ws.min_reach + margin) <= dist <= (ws.max_reach - margin)
+
+    # ── 도달 가능 픽셀 수집 (convex hull 마스킹용) ──
+    valid_pixels = []
+    for x_cm in np.arange(x_min_scan, x_max_scan, grid_step_cm):
+        for y_cm in np.arange(y_min_scan, y_max_scan, grid_step_cm):
+            try:
+                u, v = coord_transformer.world_to_pixel(x_cm, y_cm)
+                if not (0 <= u < img_w and 0 <= v < img_h):
+                    continue
+                if is_reachable_from_base(x_cm / 100.0, y_cm / 100.0):
+                    valid_pixels.append((u, v))
+            except Exception:
+                continue
+
+    # ── 바깥 영역 마스킹 (valid 영역 바깥 어둡게) ──
+    if valid_pixels:
+        ws_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+        hull = cv2.convexHull(np.array(valid_pixels))
+        cv2.fillConvexPoly(ws_mask, hull, 255)
+        # 마스크 바깥을 어둡게
+        result[ws_mask == 0] = (result[ws_mask == 0] * 0.5).astype(np.uint8)
+
+    COLOR_CYAN = (255, 255, 0)
+
+    # ── Min reach 원 ──
+    for angle in range(0, 360, 10):
+        rad = np.radians(angle)
+        px = robot_x_cm + min_reach_cm * np.cos(rad)
+        py = robot_y_cm + min_reach_cm * np.sin(rad)
+        try:
+            pu, pv = coord_transformer.world_to_pixel(px, py)
+            if 0 <= pu < img_w and 0 <= pv < img_h:
+                cv2.circle(result, (pu, pv), 2, COLOR_CYAN, -1)
+        except Exception:
+            pass
+
+    # ── Max reach 원 ──
+    for angle in range(0, 360, 3):
+        rad = np.radians(angle)
+        px = robot_x_cm + max_reach_cm * np.cos(rad)
+        py = robot_y_cm + max_reach_cm * np.sin(rad)
+        try:
+            pu, pv = coord_transformer.world_to_pixel(px, py)
+            if 0 <= pu < img_w and 0 <= pv < img_h:
+                cv2.circle(result, (pu, pv), 2, COLOR_CYAN, -1)
+        except Exception:
+            pass
+
+    # ── x_min_world 수직선 ──
+    for y_cm in np.arange(y_min_scan, y_max_scan, 2):
+        try:
+            pu, pv = coord_transformer.world_to_pixel(x_min_world_cm, y_cm)
+            if 0 <= pu < img_w and 0 <= pv < img_h:
+                cv2.circle(result, (pu, pv), 2, COLOR_CYAN, -1)
+        except Exception:
+            pass
+
+    # ── Workspace bounds 라벨 (프롬프트에 전달되는 값) ──
+    (x_min, x_max), (y_min, y_max) = workspace_bounds
+    label = f"WS: x=[{x_min:.2f},{x_max:.2f}] y=[{y_min:.2f},{y_max:.2f}]"
+    cv2.putText(result, label, (10, img_h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+    return result
 
 
 # ============================================================

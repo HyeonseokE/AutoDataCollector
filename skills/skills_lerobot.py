@@ -370,6 +370,14 @@ class LeRobotSkills:
         # Initialize current_gripper_pos with actual position (for correct action recording)
         self.current_gripper_pos = float(self.robot.read_positions(normalize=True)[5])
 
+        # Register kinematics with RecordingContext for FK-based observation features
+        if HAS_RECORDING_CONTEXT and RecordingContext.is_active():
+            RecordingContext.set_kinematics(
+                kinematics=self.kinematics,
+                calibration_limits=self.calibration_limits,
+                frame_transformer=self.frame_transformer,
+            )
+
         self.is_connected = True
         self._log(f"\n{'='*60}")
         self._log("LeRobotSkills: Ready")
@@ -1426,6 +1434,18 @@ class LeRobotSkills:
         # Store pick_z for place operation
         self._pick_z = pick_z
 
+        # Compute object-holding TCP offset from gripper opening
+        # Mapping: closed (gripper_close_pos) = 0mm, half-open (range/2) = 40mm, linear
+        actual_gripper = float(self.robot.read_positions(normalize=True)[5])
+        gripper_range = self.gripper_open_pos - self.gripper_close_pos  # 180
+        half_range = gripper_range / 2.0  # 90
+        opening_ratio = max(0.0, min(1.0, (actual_gripper - self.gripper_close_pos) / half_range))
+        object_tcp_offset_m = opening_ratio * 0.04  # 0 ~ 40mm
+        # TCP offset: object center is shifted in local -X (toward fingertip) from default TCP
+        self._object_tcp_offset = [-object_tcp_offset_m, 0.0, 0.0]
+        self._log(f"  Gripper actual pos: {actual_gripper:.1f} (opening ratio: {opening_ratio:.2f})")
+        self._log(f"  Object TCP offset: {[x*1000 for x in self._object_tcp_offset]}mm")
+
         # Store current pitch for place operation
         _, current_joints, _ = self._get_current_state()
         self._saved_pitch = self.kinematics.get_gripper_pitch(current_joints)
@@ -1471,6 +1491,7 @@ class LeRobotSkills:
         final_position = [place_position[0], place_position[1], place_z]
 
         saved_pitch = getattr(self, '_saved_pitch', None)
+        object_tcp_offset = getattr(self, '_object_tcp_offset', None)
 
         self._log(f"\n[Execute Place Object]")
         self._log(f"  Target surface: z={target_surface_height*100:.1f}cm")
@@ -1478,12 +1499,21 @@ class LeRobotSkills:
         if saved_pitch is not None:
             self._log(f"  Restoring pitch: {np.degrees(saved_pitch):.1f}°")
 
+        # Apply object-holding TCP offset if available (from execute_pick_object)
+        # This ensures the held object (not TCP) is positioned at the place target
+        effective_tcp_override = tcp_offset_override
+        effective_gripper_offset = gripper_offset
+        if object_tcp_offset is not None and tcp_offset_override is None:
+            effective_tcp_override = object_tcp_offset
+            effective_gripper_offset = gripper_offset if gripper_offset > 0 else 0.01  # TCP frame 필요
+            self._log(f"  Object TCP offset applied: {[x*1000 for x in object_tcp_offset]}mm")
+
         # Move to place position (skill recording handled inside)
         place_label = f"place on {target_name}" if target_name else None
         if not self.move_to_position(final_position,
-                                     gripper_offset=gripper_offset,
+                                     gripper_offset=effective_gripper_offset,
                                      target_pitch=saved_pitch,
-                                     tcp_offset_override=tcp_offset_override,
+                                     tcp_offset_override=effective_tcp_override,
                                      target_name=place_label,
                                      skill_description=skill_description):
             print("Error: Failed to reach place position")
@@ -1496,6 +1526,7 @@ class LeRobotSkills:
         # Clear saved state
         self._pick_z = None
         self._saved_pitch = None
+        self._object_tcp_offset = None
 
         self._log("[Execute Place Object] Complete")
         return True

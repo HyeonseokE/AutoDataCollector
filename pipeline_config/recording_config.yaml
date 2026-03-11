@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/pick_and_place_20epis4"
+dataset_repo_id: "local/distribute_chocolate_pies1"
 recording_fps: 30
 robot_type: "so101"
 
@@ -53,7 +53,7 @@ cameras:
 ## skill.* feature 개별 on/off 설정
 ## false로 설정하면 해당 feature가 dataset에 기록되지 않음
 skill_features:
-  natural_language: true   # skill.natural_language (자연어 스킬 설명)
+  natural_language: false   # skill.natural_language (자연어 스킬 설명)
   type: true               # skill.type (move_to, pick, place 등)
   progress: true           # skill.progress (0.0~1.0 진행률)
   goal_position:
@@ -61,4 +61,16 @@ skill_features:
     world_xyzrpy: true     # skill.goal_position.world_xyzrpy (world 좌표계)
     robot_xyzrpy: true     # skill.goal_position.robot_xyzrpy (robot 좌표계)
     gripper: true          # skill.goal_position.gripper (gripper 상태)
+
+# =============================================================================
+# Observation Features Configuration
+# =============================================================================
+## observation.* 추가 feature 개별 on/off 설정
+## 활성화 시 매 프레임마다 FK(순운동학)를 계산하여 EE 자세를 기록합니다
+## FK 계산 비용은 ~0.1ms로 50Hz 제어 루프에 영향 없음
+observation_features:
+  ee_pos:
+    robot_xyzrpy: true    # observation.ee_pos.robot_xyzrpy (robot base_link 좌표계 EE 자세 [x,y,z,r,p,y])
+    world_xyzrpy: false   # observation.ee_pos.world_xyzrpy (world 좌표계 EE 자세 [x,y,z,r,p,y])
+  gripper_binary: true    # observation.gripper_binary (그리퍼 열림=1.0 / 닫힘=0.0)
 

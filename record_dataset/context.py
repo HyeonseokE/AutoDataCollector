@@ -93,6 +93,12 @@ class RecordingContext:
     _skipped_frames: int = 0
     _camera_errors: int = 0
 
+    # Kinematics for FK-based observation features (EE pose)
+    _kinematics = None           # KinematicsEngine instance
+    _calibration_limits = None   # CalibrationLimits (normalized ↔ radians)
+    _frame_transformer = None    # FrameTransformer (robot ↔ world)
+    _obs_features_enabled: Optional[Dict[str, bool]] = None
+
     # Skill-level subgoal info
     _current_skill_label: Optional[str] = None
     _current_skill_type: Optional[str] = None
@@ -210,6 +216,10 @@ class RecordingContext:
 
             cls._recorder = None
             cls._camera_manager = None
+            cls._kinematics = None
+            cls._calibration_limits = None
+            cls._frame_transformer = None
+            cls._obs_features_enabled = None
             cls._is_active = False
             cls._step_counter = 0
             cls._last_record_step = -1
@@ -236,6 +246,113 @@ class RecordingContext:
     def get_skill_label(cls) -> Optional[str]:
         """현재 스킬 라벨 반환"""
         return cls._current_skill_label
+
+    @classmethod
+    def set_kinematics(
+        cls,
+        kinematics,
+        calibration_limits,
+        frame_transformer=None,
+    ) -> None:
+        """
+        FK 기반 observation feature 계산을 위한 kinematics 등록.
+
+        LeRobotSkills.connect() 후 호출하여 kinematics 객체를 등록합니다.
+        등록되면 매 레코딩 프레임마다 FK를 계산하여 EE 자세를 기록합니다.
+
+        Args:
+            kinematics: KinematicsEngine 인스턴스 (FK 계산용)
+            calibration_limits: CalibrationLimits (normalized ↔ radians 변환)
+            frame_transformer: FrameTransformer (robot ↔ world 변환, optional)
+        """
+        with cls._lock:
+            cls._kinematics = kinematics
+            cls._calibration_limits = calibration_limits
+            cls._frame_transformer = frame_transformer
+
+            # observation features 설정 로드
+            try:
+                from .config import load_observation_features_from_yaml
+                cls._obs_features_enabled = load_observation_features_from_yaml()
+            except Exception:
+                cls._obs_features_enabled = {}
+
+            enabled = [k for k, v in (cls._obs_features_enabled or {}).items() if v]
+            if enabled:
+                print(f"[RecordingContext] Kinematics registered for observation features: {enabled}")
+
+    @classmethod
+    def _compute_observation_extras(cls, state: np.ndarray) -> Dict[str, Any]:
+        """
+        현재 로봇 상태에서 observation extras 계산 (FK 기반 EE 자세 등).
+
+        Args:
+            state: 현재 로봇 상태 (6 joints, normalized -100~+100)
+
+        Returns:
+            Dict: enabled된 observation feature들의 {key: value} 딕셔너리
+        """
+        extras = {}
+        obs_enabled = cls._obs_features_enabled or {}
+
+        need_robot_ee = obs_enabled.get("observation.ee_pos.robot_xyzrpy", False)
+        need_world_ee = obs_enabled.get("observation.ee_pos.world_xyzrpy", False)
+        need_gripper = obs_enabled.get("observation.gripper_binary", False)
+
+        # FK 기반 EE 자세 계산
+        if (need_robot_ee or need_world_ee) and cls._kinematics is not None and cls._calibration_limits is not None:
+            try:
+                # normalized (5 arm joints) → radians
+                arm_norm = np.asarray(state[:5], dtype=np.float64)
+                arm_rad = cls._calibration_limits.normalized_to_radians(arm_norm)
+
+                # FK → position + rotation matrix
+                pos, R = cls._kinematics.forward_kinematics(arm_rad)
+
+                # Rotation matrix → euler (ZYX convention)
+                pitch = np.arcsin(-R[2, 0])
+                if np.abs(np.cos(pitch)) > 1e-6:
+                    roll = np.arctan2(R[2, 1], R[2, 2])
+                    yaw = np.arctan2(R[1, 0], R[0, 0])
+                else:
+                    roll = np.arctan2(-R[1, 2], R[1, 1])
+                    yaw = 0.0
+
+                robot_xyzrpy = np.array([pos[0], pos[1], pos[2], roll, pitch, yaw], dtype=np.float32)
+
+                if need_robot_ee:
+                    extras["observation.ee_pos.robot_xyzrpy"] = robot_xyzrpy
+
+                if need_world_ee and cls._frame_transformer is not None:
+                    # robot(base_link) → world 역변환 (position만)
+                    try:
+                        if cls._frame_transformer.has_frame("world"):
+                            T = cls._frame_transformer.frames["world"]["T_base_from_frame"]
+                            T_inv = np.linalg.inv(T)
+                            p_base = np.array([pos[0], pos[1], pos[2], 1.0])
+                            world_pos = (T_inv @ p_base)[:3]
+                            world_xyzrpy = np.array([
+                                world_pos[0], world_pos[1], world_pos[2],
+                                roll, pitch, yaw
+                            ], dtype=np.float32)
+                            extras["observation.ee_pos.world_xyzrpy"] = world_xyzrpy
+                    except Exception:
+                        extras["observation.ee_pos.world_xyzrpy"] = np.zeros(6, dtype=np.float32)
+            except Exception as e:
+                # FK 실패 시 zero 값 사용 (레코딩 중단하지 않음)
+                if need_robot_ee:
+                    extras["observation.ee_pos.robot_xyzrpy"] = np.zeros(6, dtype=np.float32)
+                if need_world_ee:
+                    extras["observation.ee_pos.world_xyzrpy"] = np.zeros(6, dtype=np.float32)
+
+        # Gripper binary (normalized 값 기반 threshold)
+        if need_gripper:
+            gripper_norm = float(state[5]) if len(state) > 5 else 0.0
+            extras["observation.gripper_binary"] = np.array(
+                [1.0 if gripper_norm > 0 else 0.0], dtype=np.float32
+            )
+
+        return extras
 
     @classmethod
     def set_skill_info(
@@ -388,12 +505,16 @@ class RecordingContext:
                 cls._camera_errors += 1
                 return False
 
-            # 멀티 카메라 레코딩 (통합) + 스킬 라벨
+            # FK 기반 observation extras 계산 (EE 자세, gripper binary)
+            obs_extras = cls._compute_observation_extras(state)
+
+            # 멀티 카메라 레코딩 (통합) + 스킬 라벨 + observation extras
             cls._recorder.record_frame_multi(
                 observation=state,
                 action=action,
                 images=images,
                 skill_label=cls._current_skill_label,
+                observation_extras=obs_extras,
             )
 
             # 상태 업데이트

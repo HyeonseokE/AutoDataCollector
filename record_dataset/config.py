@@ -124,6 +124,13 @@ def get_enabled_cameras() -> List[CameraConfigRecord]:
 # Skill Features Configuration
 # =============================================================================
 
+# Observation feature keys (FK 기반 EE 자세 등)
+OBSERVATION_FEATURE_KEYS = [
+    "observation.ee_pos.robot_xyzrpy",
+    "observation.ee_pos.world_xyzrpy",
+    "observation.gripper_binary",
+]
+
 # Skill feature keys
 SKILL_FEATURE_KEYS = [
     "skill.natural_language",
@@ -188,6 +195,54 @@ def load_skill_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
         return defaults
 
 
+def load_observation_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
+    """
+    YAML에서 observation feature enabled 설정 로드.
+
+    Args:
+        yaml_path: recording_config.yaml 경로 (None이면 기본 경로)
+
+    Returns:
+        Dict[str, bool]: 각 observation feature의 enabled 여부
+                         없으면 전부 False (기본값 — 명시적 활성화 필요)
+    """
+    import yaml
+    from pathlib import Path
+
+    if yaml_path is None:
+        yaml_path = Path(__file__).parent.parent / "pipeline_config" / "recording_config.yaml"
+    else:
+        yaml_path = Path(yaml_path)
+
+    # 기본값: 전부 False (기존 동작과 호환 — 명시적으로 켜야 함)
+    defaults = {key: False for key in OBSERVATION_FEATURE_KEYS}
+
+    if not yaml_path.exists():
+        return defaults
+
+    try:
+        with open(yaml_path, 'r') as f:
+            data = yaml.safe_load(f)
+
+        of = data.get("observation_features")
+        if not of:
+            return defaults
+
+        ep = of.get("ee_pos", {})
+        # ee_pos가 bool이면 하위 전체에 적용
+        if isinstance(ep, bool):
+            ep = {"robot_xyzrpy": ep, "world_xyzrpy": ep}
+
+        return {
+            "observation.ee_pos.robot_xyzrpy": ep.get("robot_xyzrpy", False),
+            "observation.ee_pos.world_xyzrpy": ep.get("world_xyzrpy", False),
+            "observation.gripper_binary": of.get("gripper_binary", False),
+        }
+    except Exception as e:
+        print(f"[Config] Warning: Failed to load observation_features from {yaml_path}: {e}")
+        return defaults
+
+
 def get_camera_feature_keys() -> List[str]:
     """활성화된 카메라 feature 키 목록"""
     return [cam.to_feature_key() for cam in get_enabled_cameras()]
@@ -200,6 +255,7 @@ def get_camera_feature_keys() -> List[str]:
 def build_dataset_features(
     cameras: List[CameraConfigRecord] = None,
     skill_enabled: Dict[str, bool] = None,
+    obs_enabled: Dict[str, bool] = None,
 ) -> Dict[str, Any]:
     """
     데이터셋 features 스키마 빌드
@@ -207,6 +263,7 @@ def build_dataset_features(
     Args:
         cameras: 카메라 설정 리스트 (None이면 DEFAULT_CAMERAS 사용)
         skill_enabled: skill feature별 enabled 여부 (None이면 전부 True)
+        obs_enabled: observation feature별 enabled 여부 (None이면 전부 False)
 
     Returns:
         LeRobot 데이터셋 features 딕셔너리
@@ -216,6 +273,9 @@ def build_dataset_features(
 
     if skill_enabled is None:
         skill_enabled = {key: True for key in SKILL_FEATURE_KEYS}
+
+    if obs_enabled is None:
+        obs_enabled = {key: False for key in OBSERVATION_FEATURE_KEYS}
 
     features = {
         # Robot state: current joint positions (normalized -100 to +100)
@@ -236,6 +296,26 @@ def build_dataset_features(
     # 카메라별 이미지 feature 추가
     for cam in cameras:
         features[cam.to_feature_key()] = cam.to_feature_schema()
+
+    # Observation features (FK 기반 EE 자세 등, enabled인 것만 추가)
+    obs_schemas = {
+        "observation.ee_pos.robot_xyzrpy": {
+            "dtype": "float32", "shape": (6,),
+            "names": ["x", "y", "z", "roll", "pitch", "yaw"],
+        },
+        "observation.ee_pos.world_xyzrpy": {
+            "dtype": "float32", "shape": (6,),
+            "names": ["x", "y", "z", "roll", "pitch", "yaw"],
+        },
+        "observation.gripper_binary": {
+            "dtype": "float32", "shape": (1,),
+            "names": None,
+        },
+    }
+
+    for key, schema in obs_schemas.items():
+        if obs_enabled.get(key, False):
+            features[key] = schema
 
     # Skill-level subgoal labels (enabled인 것만 추가)
     skill_schemas = {
@@ -476,7 +556,8 @@ def build_features_from_yaml(yaml_path: str = None) -> Dict[str, Any]:
     cameras = load_cameras_from_yaml(yaml_path)
     enabled_cameras = [cam for cam in cameras if cam.enabled]
     skill_enabled = load_skill_features_from_yaml(yaml_path)
-    return build_dataset_features(enabled_cameras, skill_enabled)
+    obs_enabled = load_observation_features_from_yaml(yaml_path)
+    return build_dataset_features(enabled_cameras, skill_enabled, obs_enabled)
 
 
 # =============================================================================

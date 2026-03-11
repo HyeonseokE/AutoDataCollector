@@ -197,6 +197,9 @@ class ForwardAndResetPipeline:
         self.reset_final_resolution: Optional[Tuple[int, int]] = None
         self.reset_code: str = ""
 
+        # Forward initial image path (for reset multi-turn)
+        self.forward_initial_image_path: Optional[str] = None
+
         # Context 저장용
         self.execution_context: Dict = {}
 
@@ -551,6 +554,8 @@ class ForwardAndResetPipeline:
                 exec(code, exec_globals)
                 if "execute_task" in exec_globals:
                     exec_globals["execute_task"]()
+                elif "execute_reset_task" in exec_globals:
+                    exec_globals["execute_reset_task"]()
                 return True
 
         except AssertionError as e:
@@ -604,6 +609,8 @@ class ForwardAndResetPipeline:
             exec(code, exec_globals)
             if "execute_task" in exec_globals:
                 exec_globals["execute_task"]()
+            elif "execute_reset_task" in exec_globals:
+                exec_globals["execute_reset_task"]()
 
             # 레코딩 통계 출력
             stats = RecordingContext.get_stats()
@@ -619,6 +626,8 @@ class ForwardAndResetPipeline:
             exec(code, exec_globals)
             if "execute_task" in exec_globals:
                 exec_globals["execute_task"]()
+            elif "execute_reset_task" in exec_globals:
+                exec_globals["execute_reset_task"]()
             return True
 
         except AssertionError as e:
@@ -826,18 +835,49 @@ class ForwardAndResetPipeline:
         detection_timeout: float = 10.0,
         visualize_detection: bool = False,
         current_positions: Dict = None,
+        current_state_image_path: str = None,
     ) -> Tuple[str, Dict, Dict, Dict]:
         """Reset 코드 생성
 
-        Recording 카메라가 있으면 detection에 공유.
+        multi_turn=True일 때 VLM multi-turn 파이프라인 사용,
+        False일 때 기존 Grounding DINO + 단일 LLM 방식 사용.
 
         Args:
             current_positions: 미리 감지된 현재 위치 (multi-robot 공유 감지용)
                               제공되면 내부 detection을 건너뜀
+            current_state_image_path: 현재 상태 이미지 경로 (multi-turn 모드용)
 
         Returns:
             Tuple[str, Dict, Dict, Dict]: (코드, 원래 위치, 현재 위치, 타겟 위치)
         """
+        if self.multi_turn:
+            return self._generate_reset_code_multi_turn(
+                original_instruction=original_instruction,
+                original_positions=original_positions,
+                current_state_image_path=current_state_image_path,
+            )
+        else:
+            return self._generate_reset_code_single(
+                original_instruction=original_instruction,
+                original_positions=original_positions,
+                forward_spec=forward_spec,
+                forward_code=forward_code,
+                detection_timeout=detection_timeout,
+                visualize_detection=visualize_detection,
+                current_positions=current_positions,
+            )
+
+    def _generate_reset_code_single(
+        self,
+        original_instruction: str,
+        original_positions: Dict,
+        forward_spec: Dict = None,
+        forward_code: str = None,
+        detection_timeout: float = 10.0,
+        visualize_detection: bool = False,
+        current_positions: Dict = None,
+    ) -> Tuple[str, Dict, Dict, Dict]:
+        """기존 single-turn 방식 reset 코드 생성"""
         from code_gen_lerobot.reset_execution import lerobot_reset_code_gen
 
         # Recording용 카메라가 있으면 공유 (current_positions가 없을 때만)
@@ -866,6 +906,51 @@ class ForwardAndResetPipeline:
         )
 
         return reset_code, orig_pos, current_pos, target_pos
+
+    def _generate_reset_code_multi_turn(
+        self,
+        original_instruction: str,
+        original_positions: Dict,
+        current_state_image_path: str = None,
+    ) -> Tuple[str, Dict, Dict, Dict]:
+        """VLM multi-turn 방식 reset 코드 생성
+
+        Forward와 동일한 crop-then-point 파이프라인으로
+        현재 물체 위치를 VLM이 직접 검출하고 reset 코드 생성.
+        """
+        from code_gen_lerobot.reset_execution import lerobot_reset_code_gen_multi_turn
+
+        if current_state_image_path is None or self.forward_initial_image_path is None:
+            print("  [Reset MultiTurn] WARNING: Missing images, falling back to single-turn")
+            return self._generate_reset_code_single(
+                original_instruction=original_instruction,
+                original_positions=original_positions,
+            )
+
+        # depth 기반 3D 좌표 변환용 카메라
+        active_camera = None
+        if self.camera_manager and self.camera_manager.is_connected:
+            try:
+                active_camera = self.camera_manager.get_camera("realsense")
+            except KeyError:
+                pass
+        if active_camera is None:
+            active_camera = self.camera
+
+        reset_code, current_pos, target_pos, grippable, obstacles = lerobot_reset_code_gen_multi_turn(
+            original_instruction=original_instruction,
+            original_positions=original_positions,
+            current_state_image_path=current_state_image_path,
+            initial_state_image_path=self.forward_initial_image_path,
+            llm_model=self.llm_model,
+            robot_id=self.robot_id,
+            reset_mode=self.reset_mode,
+            camera=active_camera,
+            current_episode=self.current_episode,
+            total_episodes=self.total_episodes,
+        )
+
+        return reset_code, original_positions, current_pos, target_pos
 
     def run(
         self,
@@ -997,6 +1082,7 @@ class ForwardAndResetPipeline:
                 # [즉시 저장] Initial 이미지
                 initial_path = Path(forward_dir) / "initial_state.jpg"
                 cv2.imwrite(str(initial_path), self.initial_image)
+                self.forward_initial_image_path = str(initial_path)
                 print(f"  Image saved: {initial_path}")
 
                 # Detection 없이 빈 positions
@@ -1118,6 +1204,7 @@ class ForwardAndResetPipeline:
                     # [즉시 저장] Initial 이미지
                     initial_path = Path(forward_dir) / "initial_state.jpg"
                     cv2.imwrite(str(initial_path), self.initial_image)  # Already BGR
+                    self.forward_initial_image_path = str(initial_path)
                     print(f"  Initial image saved: {initial_path}")
 
                 # Step 3: Forward 코드 생성
@@ -1128,6 +1215,20 @@ class ForwardAndResetPipeline:
                     self.detected_positions,
                 )
             result['forward']['code'] = self.generated_code
+            result['forward']['positions'] = self.detected_positions
+
+            # 첫 에피소드의 검출 위치 저장 (original reset mode용)
+            # multi-turn에서도 detected_positions가 갱신된 후 저장
+            if self.first_episode_positions is None and self.detected_positions:
+                import copy
+                self.first_episode_positions = copy.deepcopy(self.detected_positions)
+                GREEN_TMP = "\033[92m"
+                RESET_TMP = "\033[0m"
+                print(f"  {GREEN_TMP}[First Episode] Initial positions saved for 'original' reset mode{RESET_TMP}")
+                for name, info in self.detected_positions.items():
+                    if isinstance(info, dict) and "position" in info:
+                        pos = info["position"]
+                        print(f"    + {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
 
             # [즉시 저장] Generated code
             code_path = Path(forward_dir) / "generated_code.py"
@@ -1377,9 +1478,11 @@ class ForwardAndResetPipeline:
                 # 카메라 종료 (Forward에서 사용하던 별도 카메라)
                 self.shutdown_camera()
 
-                # Step 1 & 2: Reset 코드 생성 (내부에서 detection 수행)
-                # Note: Recording 카메라가 있으면 reset_code_gen에서 자동 공유
-                print(f"\n{YELLOW}" + self._log(f"Generating reset code ({self.reset_mode} mode)...", step="Step 1/4") + f"{RESET}")
+                # Step 1 & 2: Reset 코드 생성
+                # multi-turn: VLM crop-then-point (이미지 캡처 → VLM 검출)
+                # single-turn: Grounding DINO detection + 단일 LLM
+                multi_turn_str = "multi-turn VLM" if self.multi_turn else "single-turn"
+                print(f"\n{YELLOW}" + self._log(f"Generating reset code ({self.reset_mode} mode, {multi_turn_str})...", step="Step 1/4") + f"{RESET}")
                 try:
                     # original 모드: 첫 에피소드의 위치를 사용 (누적 오차 방지)
                     # random 모드: 현재 에피소드의 검출 위치 사용
@@ -1389,6 +1492,23 @@ class ForwardAndResetPipeline:
                     else:
                         reset_original_positions = self.detected_positions
 
+                    # Multi-turn 모드: 코드 생성 전에 current_state 이미지 캡처
+                    reset_current_state_image_path = None
+                    if self.multi_turn:
+                        print(f"  [MultiTurn] Capturing current state for VLM...")
+                        if not (self.camera_manager and self.camera_manager.is_connected):
+                            if not self.initialize_camera():
+                                print(f"  {RED}Failed to initialize camera for reset VLM{RESET}")
+                        time.sleep(0.3)
+                        reset_current_frame = self.capture_frame()
+                        if reset_current_frame is not None:
+                            reset_current_state_image_path = str(Path(reset_dir) / "current_state.jpg")
+                            cv2.imwrite(reset_current_state_image_path, reset_current_frame)
+                            print(f"  Current state captured: {reset_current_state_image_path}")
+                            # 이 이미지를 reset_initial_image로도 사용 (Judge용)
+                            self.reset_initial_image = reset_current_frame
+                            self.reset_initial_resolution = (reset_current_frame.shape[1], reset_current_frame.shape[0])
+
                     reset_code, _, current_positions, target_positions = self.generate_reset_code(
                         original_instruction=instruction,
                         original_positions=reset_original_positions,
@@ -1396,6 +1516,7 @@ class ForwardAndResetPipeline:
                         forward_code=self.generated_code,
                         detection_timeout=detection_timeout,
                         visualize_detection=visualize_detection,
+                        current_state_image_path=reset_current_state_image_path,
                     )
                     result['reset']['current_positions'] = current_positions
                     result['reset']['target_positions'] = target_positions
@@ -1427,23 +1548,31 @@ class ForwardAndResetPipeline:
                     print("-" * 40)
 
                     # Step 2: Reset 초기 이미지 캡처
-                    print(f"\n{YELLOW}" + self._log("Capturing reset initial state...", step="Step 2/4") + f"{RESET}")
-                    # camera_manager가 있으면 재사용, 없으면 새로 생성
-                    if not (self.camera_manager and self.camera_manager.is_connected):
-                        if not self.initialize_camera():
-                            print(f"  {RED}Failed to initialize camera{RESET}")
-                    time.sleep(0.3)
-                    self.reset_initial_image = self.capture_frame()
-                    if self.reset_initial_image is not None:
-                        # 해상도 저장 (Judge용)
-                        self.reset_initial_resolution = (self.reset_initial_image.shape[1], self.reset_initial_image.shape[0])
-                        print(f"  {GREEN}Reset initial image captured ({self.reset_initial_resolution[0]}x{self.reset_initial_resolution[1]}){RESET}")
-                        # [즉시 저장] Reset initial 이미지
+                    # multi-turn 모드에서는 이미 current_state로 캡처됨
+                    if self.reset_initial_image is not None and self.multi_turn:
+                        print(f"\n{YELLOW}" + self._log("Reset initial image already captured (multi-turn)", step="Step 2/4") + f"{RESET}")
+                        # [즉시 저장] Reset initial 이미지 (이미 current_state.jpg로 저장됨, initial_state.jpg로도 복사)
                         reset_initial_path = Path(reset_dir) / "initial_state.jpg"
-                        cv2.imwrite(str(reset_initial_path), self.reset_initial_image)  # Already BGR
+                        cv2.imwrite(str(reset_initial_path), self.reset_initial_image)
                         print(f"  Reset initial image saved: {reset_initial_path}")
                     else:
-                        print(f"  {YELLOW}Warning: Failed to capture reset initial image{RESET}")
+                        print(f"\n{YELLOW}" + self._log("Capturing reset initial state...", step="Step 2/4") + f"{RESET}")
+                        # camera_manager가 있으면 재사용, 없으면 새로 생성
+                        if not (self.camera_manager and self.camera_manager.is_connected):
+                            if not self.initialize_camera():
+                                print(f"  {RED}Failed to initialize camera{RESET}")
+                        time.sleep(0.3)
+                        self.reset_initial_image = self.capture_frame()
+                        if self.reset_initial_image is not None:
+                            # 해상도 저장 (Judge용)
+                            self.reset_initial_resolution = (self.reset_initial_image.shape[1], self.reset_initial_image.shape[0])
+                            print(f"  {GREEN}Reset initial image captured ({self.reset_initial_resolution[0]}x{self.reset_initial_resolution[1]}){RESET}")
+                            # [즉시 저장] Reset initial 이미지
+                            reset_initial_path = Path(reset_dir) / "initial_state.jpg"
+                            cv2.imwrite(str(reset_initial_path), self.reset_initial_image)  # Already BGR
+                            print(f"  Reset initial image saved: {reset_initial_path}")
+                        else:
+                            print(f"  {YELLOW}Warning: Failed to capture reset initial image{RESET}")
 
                     # Step 3: Reset 코드 실행
                     print(f"\n{YELLOW}" + self._log("Executing reset code...", step="Step 3/4") + f"{RESET}")

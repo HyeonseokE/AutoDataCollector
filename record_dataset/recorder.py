@@ -33,6 +33,7 @@ from .config import (
     NUM_JOINTS,
     load_cameras_from_yaml,
     load_skill_features_from_yaml,
+    load_observation_features_from_yaml,
     build_features_from_yaml,
     CameraConfigRecord,
 )
@@ -97,9 +98,15 @@ class DatasetRecorder:
         # Skill feature enabled 설정 로드
         self._skill_enabled = load_skill_features_from_yaml(config_yaml)
 
+        # Observation feature enabled 설정 로드
+        self._obs_enabled = load_observation_features_from_yaml(config_yaml)
+
         print(f"[DatasetRecorder] Camera features: {[cam.to_feature_key() for cam in self.enabled_cameras]}")
         enabled_skills = [k for k, v in self._skill_enabled.items() if v]
         print(f"[DatasetRecorder] Skill features: {enabled_skills}")
+        enabled_obs = [k for k, v in self._obs_enabled.items() if v]
+        if enabled_obs:
+            print(f"[DatasetRecorder] Observation features: {enabled_obs}")
 
         # State tracking
         self._dataset = None
@@ -237,9 +244,10 @@ class DatasetRecorder:
         action: np.ndarray,
         images: Dict[str, np.ndarray],
         skill_label: Optional[str] = None,
+        observation_extras: Optional[Dict[str, np.ndarray]] = None,
     ) -> None:
         """
-        멀티 카메라 프레임 레코딩 + 스킬 라벨
+        멀티 카메라 프레임 레코딩 + 스킬 라벨 + observation extras
 
         Args:
             observation: 현재 로봇 상태 (shape: (6,), normalized)
@@ -249,6 +257,9 @@ class DatasetRecorder:
                     예: {"realsense": img1, "innomaker": img2}
             skill_label: 현재 실행 중인 스킬의 자연어 설명 (optional)
                         예: "move to blue dish", "pick yellow dice"
+            observation_extras: FK 기반 observation features (optional)
+                    {feature_key: np.ndarray} 형태
+                    예: {"observation.ee_pos.robot_xyzrpy": array([x,y,z,r,p,y])}
 
         Note:
             - timestamp는 LeRobotDataset이 frame index와 FPS 기반으로 자동 계산
@@ -312,6 +323,12 @@ class DatasetRecorder:
         for key, value in skill_data.items():
             if self._skill_enabled.get(key, True):
                 frame[key] = value
+
+        # Observation extras (FK 기반 EE 자세 등, enabled인 것만 추가)
+        if observation_extras:
+            for key, value in observation_extras.items():
+                if self._obs_enabled.get(key, False):
+                    frame[key] = value
 
         # 각 카메라 이미지 추가
         for cam in self.enabled_cameras:

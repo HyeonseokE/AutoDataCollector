@@ -40,7 +40,8 @@ Return a JSON object with two keys:
 - Only include the main task-relevant objects (not sub-parts).
 - Focus on providing accurate bounding box coordinates.
 - **Carefully match each bounding box to the correct label** by comparing the visual appearance of each detected object with your analysis from above. Do NOT swap labels between objects.
-- **Labels must be consistent** between overhead and sideview — the same physical object must have the same label in both views."""
+- **Labels must be consistent** between overhead and sideview — the same physical object must have the same label in both views.
+- **Every label must be unique.** If multiple objects of the same type exist, append a numeric suffix to distinguish them (e.g., `"egg_1"`, `"egg_2"`, `"red plate_1"`, `"red plate_2"`)."""
 
     # ── Original single-view prompt (has_side_view=False) ──
     return """\
@@ -62,4 +63,5 @@ Return a JSON array:
 **Important**:
 - Only include the main task-relevant objects (not sub-parts).
 - Focus on providing accurate bounding box coordinates.
-- **Carefully match each bounding box to the correct label** by comparing the visual appearance of each detected object with your analysis from above. Do NOT swap labels between objects."""
+- **Carefully match each bounding box to the correct label** by comparing the visual appearance of each detected object with your analysis from above. Do NOT swap labels between objects.
+- **Every label must be unique.** If multiple objects of the same type exist, append a numeric suffix to distinguish them (e.g., `"egg_1"`, `"egg_2"`, `"red plate_1"`, `"red plate_2"`)."""

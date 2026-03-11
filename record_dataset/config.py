@@ -131,6 +131,7 @@ OBSERVATION_FEATURE_KEYS = [
     "observation.gripper_binary",
 ]
 
+
 # Skill feature keys
 SKILL_FEATURE_KEYS = [
     "skill.natural_language",
@@ -243,6 +244,7 @@ def load_observation_features_from_yaml(yaml_path: str = None) -> Dict[str, bool
         return defaults
 
 
+
 def get_camera_feature_keys() -> List[str]:
     """활성화된 카메라 feature 키 목록"""
     return [cam.to_feature_key() for cam in get_enabled_cameras()]
@@ -276,6 +278,7 @@ def build_dataset_features(
 
     if obs_enabled is None:
         obs_enabled = {key: False for key in OBSERVATION_FEATURE_KEYS}
+
 
     features = {
         # Robot state: current joint positions (normalized -100 to +100)
@@ -316,6 +319,7 @@ def build_dataset_features(
     for key, schema in obs_schemas.items():
         if obs_enabled.get(key, False):
             features[key] = schema
+
 
     # Skill-level subgoal labels (enabled인 것만 추가)
     skill_schemas = {

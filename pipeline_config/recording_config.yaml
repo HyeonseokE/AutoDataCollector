@@ -73,4 +73,3 @@ observation_features:
     robot_xyzrpy: true    # observation.ee_pos.robot_xyzrpy (robot base_link 좌표계 EE 자세 [x,y,z,r,p,y])
     world_xyzrpy: false   # observation.ee_pos.world_xyzrpy (world 좌표계 EE 자세 [x,y,z,r,p,y])
   gripper_binary: true    # observation.gripper_binary (그리퍼 열림=1.0 / 닫힘=0.0)
-

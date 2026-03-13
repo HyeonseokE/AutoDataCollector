@@ -73,13 +73,13 @@ INSTRUCTION="distribute chocolate pies to each plate"
 # since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
 # [필수] 로봇 번호 (2 또는 3)
-ROBOT_ID=3
+ROBOT_ID=2
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=15
+NUM_EPISODES=10
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false
@@ -210,6 +210,7 @@ else
     load_paid_api_config
     LLM_MODEL="$CODEGEN_LLM_MODEL"
     JUDGE_MODEL="$JUDGE_VLM_MODEL"
+    CODEGEN_SESSION2_MODEL="${CODEGEN_SESSION2_MODEL:-}"
 fi
 
 # Recording config 로드 (RECORD_DATASET=true일 때만)
@@ -317,7 +318,10 @@ echo "Record Dataset: $RECORD_DATASET"
 echo "Multi-Turn: $MULTI_TURN"
 echo ""
 echo "--- Model Settings ---"
-echo "LLM Model: $LLM_MODEL"
+echo "LLM Model (Session 1): $LLM_MODEL"
+if [ -n "$CODEGEN_SESSION2_MODEL" ]; then
+    echo "CodeGen Model (Session 2): $CODEGEN_SESSION2_MODEL"
+fi
 echo "Judge Model: $JUDGE_MODEL"
 echo "Judge Timeout: ${JUDGE_TIMEOUT}s"
 if [ "$USE_SERVER" = true ]; then
@@ -387,6 +391,11 @@ fi
 # 파이프라인 실행
 # ============================================================
 
+CODEGEN_S2_ARG=""
+if [ -n "$CODEGEN_SESSION2_MODEL" ]; then
+    CODEGEN_S2_ARG="--codegen-session2-model $CODEGEN_SESSION2_MODEL"
+fi
+
 python execution_forward_and_reset.py \
     --instruction "$INSTRUCTION" \
     --objects "${OBJECTS[@]}" \
@@ -398,6 +407,7 @@ python execution_forward_and_reset.py \
     --reset-mode "$RESET_MODE" \
     --save "$SAVE_DIR" \
     --num-episodes "$NUM_EPISODES" \
+    $CODEGEN_S2_ARG \
     $EXTRA_ARGS
 
 EXIT_CODE=$?

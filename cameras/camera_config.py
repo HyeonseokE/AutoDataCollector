@@ -57,7 +57,7 @@ class RealSenseCameraConfig(CameraConfig):
 class OpenCVCameraConfig(CameraConfig):
     """OpenCV 기반 USB 카메라 설정 (Innomaker U20CAM 등)"""
     camera_type: CameraType = field(default=CameraType.OPENCV, init=False)
-    device_path: str = "/dev/video6"  # Linux 장치 경로
+    device_path: str = "/dev/video7"  # Linux 장치 경로
     device_index: Optional[int] = None  # 또는 인덱스 사용
     fourcc: Optional[str] = "MJPG"  # 코덱 (MJPG가 일반적으로 더 빠름)
     warmup_frames: int = 30  # 연결 후 버릴 프레임 수
@@ -130,7 +130,7 @@ DEFAULT_CAMERA_CONFIGS = MultiCameraConfig(
         ),
         OpenCVCameraConfig(
             name="innomaker",
-            device_path="/dev/video6",
+            device_path="/dev/video7",
             width=640,
             height=480,
             fps=30,

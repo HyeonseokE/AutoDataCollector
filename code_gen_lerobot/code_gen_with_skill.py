@@ -1,5 +1,5 @@
 from .llm import llm_response
-from .forward_execution.user_prompt import lerobot_code_gen_prompt, turn3_code_gen_prompt
+from .forward_execution.user_prompt import lerobot_code_gen_prompt, turn3_code_gen_prompt, context_summary_prompt, codegen_with_context_prompt
 from .forward_execution.turn0_prompt import turn0_scene_understanding_prompt
 from .forward_execution.turn1_prompt import turn1_detect_task_relevant_objects_prompt
 from .forward_execution.turn2_prompt import turn2_crop_pointing_prompt
@@ -8,6 +8,7 @@ from .forward_execution.turn_test_prompt import turn_test_waypoint_trajectory_pr
 import json
 import os
 import re
+import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -358,17 +359,23 @@ def _points_to_positions(
     def _pixel_to_world(px, py):
         if transformer:
             try:
+                # 3D 변환: depth + 변환행렬 (z 부호 반전은 coordinate_transform 내부에서 처리)
                 if use_3d and depth_frame is not None:
-                    depth_m = camera.get_depth_at_pixel(px, py, depth_frame)
-                    wx, wy, wz = transformer.pixel_depth_to_world(px, py, depth_m)
-                else:
-                    wx, wy, wz = transformer.pixel_to_world_2d(px, py)
-                pos = [wx / 100.0, wy / 100.0, wz / 100.0]
-                # z-값 이상치 보정: 테이블 위 물체는 15cm 이하
-                if pos[2] > Z_MAX or pos[2] < -0.02:
-                    print(f"    [Z-FIX] ({px},{py}) z={pos[2]*100:.1f}cm out of range, "
-                          f"clamping to {Z_DEFAULT*100:.0f}cm")
-                    pos[2] = Z_DEFAULT
+                    obj_depth_m = camera.get_depth_at_pixel(px, py, depth_frame)
+                    if obj_depth_m > 0.05:
+                        wx, wy, wz = transformer.pixel_depth_to_world(px, py, obj_depth_m)
+                        pos = [wx / 100.0, wy / 100.0, wz / 100.0]
+                        if 0.0 <= pos[2] <= Z_MAX:
+                            return pos, True
+                        else:
+                            print(f"    [Z-FIX] ({px},{py}) z={pos[2]*100:.1f}cm out of range, "
+                                  f"clamping to {Z_DEFAULT*100:.0f}cm")
+                            pos[2] = Z_DEFAULT
+                            return pos, True
+
+                # 2D fallback
+                wx, wy, _ = transformer.pixel_to_world_2d(px, py)
+                pos = [wx / 100.0, wy / 100.0, Z_DEFAULT]
                 return pos, True
             except Exception as e:
                 print(f"    pixel→world failed ({px},{py}): {e}")
@@ -419,6 +426,7 @@ def lerobot_code_gen_multi_turn(
     camera=None,
     cad_image_dirs: List[str] = None,
     side_view_image: str = None,
+    codegen_model: str = None,
 ) -> Tuple[str, Dict, Dict]:
     """
     Crop-then-Point 멀티턴 LLM 코드 생성 파이프라인
@@ -805,10 +813,21 @@ def lerobot_code_gen_multi_turn(
     else:
         print(f"\n{YELLOW}" + _log("Waypoint Trajectory — skipped (< 2 points)", step="TurnTest") + f"{RESET}")
 
-    # ── Code Generation Turn ──
-    print(f"\n{YELLOW}" + _log("Code Generation", step="CodeGen") + f"{RESET}")
-    codegen_resp = gemini_chat_send(chat, gen_config,
-        {"text": turn3_code_gen_prompt(instruction=instruction, robot_id=robot_id, all_points=all_points)},
+    # ── Context Summary Turn (Session 1 마지막) ──
+    print(f"\n{YELLOW}" + _log("Context Summary (handoff)", step="Summary") + f"{RESET}")
+    summary_resp = gemini_chat_send(chat, gen_config,
+        {"text": context_summary_prompt()},
+        turn_label="Context Summary")
+    print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
+
+    # ── Code Generation (새 Session 2) ──
+    session2_model = codegen_model or llm_model
+    print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET}")
+    codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
+    codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
+        {"text": codegen_with_context_prompt(
+            instruction=instruction, robot_id=robot_id,
+            all_points=all_points, context_summary=summary_resp)},
         turn_label="Code Gen")
     code = extract_code_from_response(codegen_resp)
     assert code, "Failed to extract code from Code Gen response"
@@ -863,6 +882,7 @@ def lerobot_code_gen_multi_turn(
         "turn_test_overhead_waypoints": turn_test_overhead_waypoints,
         "turn_test_sideview_waypoints": turn_test_sideview_waypoints,
         "side_view_image": side_view_image if has_side_view else None,
+        "context_summary": summary_resp,
     }
 
     n_turns = 2 + len(valid_objects) + 1

@@ -26,7 +26,7 @@ echo "  ./calculate_world2robot_transform_matrix.sh 3 my_points.json my_output"
 echo ""
 
 # Arguments with defaults
-ROBOT_INDEX=${1:-3}
+ROBOT_INDEX=${1:-2}
 INPUT_JSON=${2:-"matching_points/robot${ROBOT_INDEX}_matching_points.json"}
 OUTPUT_DIR=${3:-"extrinsics"}
 

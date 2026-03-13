@@ -43,44 +43,59 @@ class GridCalibrator:
         self._current_image = None
         self._click_mode = "origin"  # "origin", "x_axis", "points"
         self._window_name = "Grid Calibration"
+        self._pending_click = None  # 클릭 좌표를 메인 루프로 전달
 
     def _mouse_callback(self, event, x, y, flags, param):
-        """마우스 클릭 콜백"""
+        """마우스 클릭 콜백 — 좌표만 저장, input()은 메인 루프에서 처리"""
         if event == cv2.EVENT_LBUTTONDOWN:
-            if self._click_mode == "origin":
-                self.origin_pixel = (x, y)
-                self.pixel_points.append((x, y))
-                self.world_points.append((0.0, 0.0, 0.0))  # 원점은 (0,0,0)
-                print(f"[Calibration] Origin set at pixel ({x}, {y}) -> World (0, 0, 0)")
-                self._click_mode = "x_axis"
-                self._draw_points()
+            self._pending_click = (x, y)
 
-            elif self._click_mode == "x_axis":
-                self.x_axis_pixel = (x, y)
-                # X축 방향 점의 월드 좌표 입력 받기
-                print(f"\n[Calibration] X-axis direction point at pixel ({x}, {y})")
-                world_x = float(input("  Enter world X coordinate (cm): "))
-                world_y = float(input("  Enter world Y coordinate (cm): "))
-                world_z = float(input("  Enter world Z coordinate (cm, usually 0): "))
+    def _get_world_input(self, label, x, y):
+        """창을 숨기고 터미널 입력을 받은 후 다시 표시"""
+        print(f"\n[Calibration] {label} at pixel ({x}, {y})")
+        # 창 숨기기 — input() 중 "not responding" 방지
+        cv2.destroyWindow(self._window_name)
+        cv2.waitKey(1)
 
-                self.pixel_points.append((x, y))
-                self.world_points.append((world_x, world_y, world_z))
-                print(f"  -> World ({world_x}, {world_y}, {world_z})")
+        world_x = float(input("  Enter world X coordinate (cm): "))
+        world_y = float(input("  Enter world Y coordinate (cm): "))
+        world_z = float(input("  Enter world Z coordinate (cm, usually 0): "))
 
-                self._click_mode = "points"
-                self._draw_points()
+        # 창 다시 열기
+        cv2.namedWindow(self._window_name)
+        cv2.setMouseCallback(self._window_name, self._mouse_callback)
 
-            elif self._click_mode == "points":
-                print(f"\n[Calibration] Point at pixel ({x}, {y})")
-                world_x = float(input("  Enter world X coordinate (cm): "))
-                world_y = float(input("  Enter world Y coordinate (cm): "))
-                world_z = float(input("  Enter world Z coordinate (cm, usually 0): "))
+        return world_x, world_y, world_z
 
-                self.pixel_points.append((x, y))
-                self.world_points.append((world_x, world_y, world_z))
-                print(f"  -> World ({world_x}, {world_y}, {world_z})")
-                print(f"  Total points: {len(self.pixel_points)}")
-                self._draw_points()
+    def _process_click(self, x, y):
+        """메인 루프에서 호출: 클릭 처리 + 터미널 입력"""
+        if self._click_mode == "origin":
+            self.origin_pixel = (x, y)
+            self.pixel_points.append((x, y))
+            self.world_points.append((0.0, 0.0, 0.0))
+            print(f"[Calibration] Origin set at pixel ({x}, {y}) -> World (0, 0, 0)")
+            self._click_mode = "x_axis"
+            self._draw_points()
+
+        elif self._click_mode == "x_axis":
+            self.x_axis_pixel = (x, y)
+            world_x, world_y, world_z = self._get_world_input("X-axis direction point", x, y)
+
+            self.pixel_points.append((x, y))
+            self.world_points.append((world_x, world_y, world_z))
+            print(f"  -> World ({world_x}, {world_y}, {world_z})")
+
+            self._click_mode = "points"
+            self._draw_points()
+
+        elif self._click_mode == "points":
+            world_x, world_y, world_z = self._get_world_input(f"Point #{len(self.pixel_points)+1}", x, y)
+
+            self.pixel_points.append((x, y))
+            self.world_points.append((world_x, world_y, world_z))
+            print(f"  -> World ({world_x}, {world_y}, {world_z})")
+            print(f"  Total points: {len(self.pixel_points)}")
+            self._draw_points()
 
     def _draw_points(self):
         """캘리브레이션 점들을 이미지에 표시"""
@@ -151,10 +166,17 @@ class GridCalibrator:
         print("5. Press 'r' to reset, 'q' to quit")
         print("="*60 + "\n")
 
+        self._pending_click = None
         self._draw_points()
 
         while True:
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(50) & 0xFF
+
+            # 클릭이 있으면 메인 스레드에서 처리 (input() 안전)
+            if self._pending_click is not None:
+                click = self._pending_click
+                self._pending_click = None
+                self._process_click(click[0], click[1])
 
             if key == ord('q'):
                 print("[Calibration] Cancelled")
@@ -168,6 +190,7 @@ class GridCalibrator:
                 self.origin_pixel = None
                 self.x_axis_pixel = None
                 self._click_mode = "origin"
+                self._pending_click = None
                 print("[Calibration] Reset")
                 self._draw_points()
 

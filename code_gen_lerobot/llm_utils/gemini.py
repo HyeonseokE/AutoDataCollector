@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
-from google.api_core.exceptions import ResourceExhausted
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
 
 # Vertex AI 설정 (환경변수로 override 가능)
 PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
@@ -12,7 +12,7 @@ LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 30  # seconds
-GEMINI3_DEFAULT_THINKING_BUDGET = 15000  # Gemini 3 thinking 토큰 제한 (기본 15K)
+GEMINI3_DEFAULT_THINKING_BUDGET = 10000  # Gemini 3 thinking 토큰 제한 (기본 10K)
 
 _initialized = False
 _initialized_location = None
@@ -65,16 +65,17 @@ def _build_contents(turn: Dict) -> list:
 
 def _send_with_retry(chat, contents, generation_config,
                      max_retries=MAX_RETRIES):
-    """Rate limit (429 ResourceExhausted) 시 exponential backoff 재시도."""
+    """Rate limit (429) / Service Unavailable (503) 시 exponential backoff 재시도."""
     for attempt in range(max_retries + 1):
         try:
             return chat.send_message(contents,
                                      generation_config=generation_config)
-        except ResourceExhausted:
+        except (ResourceExhausted, ServiceUnavailable) as e:
             if attempt == max_retries:
                 raise
             delay = RETRY_BASE_DELAY * (2 ** attempt)
-            print(f"  [Rate limit] Waiting {delay}s before retry "
+            err_type = "Rate limit" if isinstance(e, ResourceExhausted) else "503 Unavailable"
+            print(f"  [{err_type}] Waiting {delay}s before retry "
                   f"({attempt + 1}/{max_retries})...")
             time.sleep(delay)
 
@@ -154,7 +155,26 @@ def gemini_chat_send(
         n_images = (1 if turn.get("image_path") else 0) + len(turn.get("image_paths", []))
         img_str = f" + {n_images} image(s)" if n_images > 0 else ""
         label = f" [{turn_label}]" if turn_label else ""
-        print(f"[GEMINI/Chat]{label}{img_str}: {elapsed:.2f}s")
+        # Token usage breakdown
+        token_str = ""
+        try:
+            usage = resp.usage_metadata
+            parts = []
+            if hasattr(usage, 'prompt_token_count') and usage.prompt_token_count:
+                parts.append(f"in={usage.prompt_token_count}")
+            if hasattr(usage, 'candidates_token_count') and usage.candidates_token_count:
+                parts.append(f"out={usage.candidates_token_count}")
+            if hasattr(usage, 'thoughts_token_count') and usage.thoughts_token_count:
+                parts.append(f"think={usage.thoughts_token_count}")
+            elif hasattr(usage, 'thinking_token_count') and usage.thinking_token_count:
+                parts.append(f"think={usage.thinking_token_count}")
+            if hasattr(usage, 'total_token_count') and usage.total_token_count:
+                parts.append(f"total={usage.total_token_count}")
+            if parts:
+                token_str = f" ({', '.join(parts)})"
+        except Exception:
+            pass
+        print(f"[GEMINI/Chat]{label}{img_str}: {elapsed:.2f}s{token_str}")
 
     return resp.text
 

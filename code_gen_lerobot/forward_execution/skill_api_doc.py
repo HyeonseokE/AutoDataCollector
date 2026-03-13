@@ -20,48 +20,31 @@ ROBOT_API_DOC = '''class LeRobotSkills:
     def disconnect(self):
         """Disconnects from robot hardware. Must be called in a finally block for cleanup."""
 
-    def gripper_open(self, duration: float = 1.5, ratio: float = 1.0,
-                     skill_description: str = None):
+    def gripper_open(self, duration: float = 1.5, ratio: float = 1.0):
         """Opens the gripper to the specified ratio.
 
         Args:
             duration: Movement duration in seconds.
             ratio: Open ratio where 0.0 = fully closed and 1.0 = fully open.
                 Use 0.7 for partial open during place operations for controlled release.
-            skill_description: A natural language sentence describing the semantic intent
-                of this action for dataset recording. Must be unique and descriptive.
-                Example: "open gripper to prepare for picking the red block"
         """
 
-    def gripper_close(self, duration: float = 1.5, skill_description: str = None):
+    def gripper_close(self, duration: float = 1.5):
         """Closes the gripper to grasp an object.
         The gripper closes with sufficient force to hold objects up to ~500g.
 
         Args:
             duration: Movement duration in seconds.
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "close gripper to grasp the yellow dice"
         """
 
-    def move_to_initial_state(self, skill_description: str = None) -> bool:
-        """Moves the arm to its home position. Call at the start and end of every task.
+    def move_to_initial_state(self) -> bool:
+        """Moves the arm to its home position. Call at the start of every task."""
 
-        Args:
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "move to initial position to start the task"
-        """
-
-    def move_to_free_state(self, skill_description: str = None) -> bool:
-        """Moves the arm to a safe parking position. Call as the very last skill after task completion.
-
-        Args:
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "move to free position for safe parking"
-        """
+    def move_to_free_state(self) -> bool:
+        """Moves the arm to a safe parking position. Call as the very last skill after task completion."""
 
     def move_to_position(self, position: list[float], duration: float = None,
-                         gripper_offset: float = 0.0, target_name: str = None,
-                         skill_description: str = None) -> bool:
+                         gripper_offset: float = 0.0, target_name: str = None) -> bool:
         """Moves the end-effector to the given XYZ position in world coordinates.
         Use this for approach movements (moving above an object before pick/place),
         retreat movements (lifting after pick/place), and transit movements between objects.
@@ -83,15 +66,12 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                 Always use the detection value: positions["object"]["gripper_offset"].
             target_name: Name of the target object for subgoal labeling in dataset recording.
                 Example: "yellow dice", "blue dish".
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "approach above the red block for grasping"
 
         Returns:
             True if movement successful, False if position is outside reachable workspace.
         """
 
-    def rotate_90degree(self, direction: int = 1, duration: float = 2.0,
-                        skill_description: str = None) -> bool:
+    def rotate_90degree(self, direction: int = 1, duration: float = 2.0) -> bool:
         """Rotates the gripper (wrist_roll joint) by 90 degrees in place.
         The arm position remains the same; only the gripper orientation changes.
         Use this when an object needs to be reoriented after picking.
@@ -99,34 +79,30 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         Args:
             direction: 1 for clockwise rotation, -1 for counter-clockwise rotation.
             duration: Movement duration in seconds.
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "rotate gripper clockwise to reorient the object"
 
         Returns:
             True if rotation successful.
         """
 
     def execute_pick_object(self, object_position: list[float],
-                            gripper_offset: float = 0.0, object_name: str = None,
-                            skill_description: str = None) -> bool:
+                            gripper_offset: float = 0.0, object_name: str = None) -> bool:
         """Executes a pick (grasp) action at the given object position.
         Must be called AFTER moving to the approach position above the object.
         The robot descends to the grasp height (2.5cm offset from object top),
         closes the gripper to grasp the object, and internally saves the current
         pitch angle for the subsequent place operation.
 
-        IMPORTANT: Pass position with z = object_height - 0.02 (2cm below object top) to grasp
-        near the top of the object: [pick_pos[0], pick_pos[1], pick_pos[2] - 0.02].
+        IMPORTANT: Pass the object position as-is from the positions dictionary.
+        The function internally calculates the grasp height (2.5cm below object top).
+        Do NOT subtract any offset from z — just pass pick_pos directly.
 
         Args:
-            object_position: Grasp position [x, y, z] in meters where z should be
-                the object's height minus 2cm (pick_pos[2] - 0.02) for near-top grasp.
+            object_position: Object position [x, y, z] in meters. Pass as-is from
+                positions dictionary. The function internally handles the grasp offset.
             gripper_offset: Asymmetric gripper offset in meters.
                 Use positions["object"]["gripper_offset"] from detection results.
             object_name: Name of the object being picked for subgoal labeling.
                 Example: "yellow dice", "red cup".
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "descend and grasp the red block at its center"
 
         Returns:
             True if pick successful (gripper closed around object).
@@ -134,21 +110,22 @@ ROBOT_API_DOC = '''class LeRobotSkills:
 
     def execute_place_object(self, place_position: list[float],
                              gripper_offset: float = 0.0, is_table: bool = True,
-                             gripper_open_ratio: float = 1.0, target_name: str = None,
-                             skill_description: str = None) -> bool:
+                             gripper_open_ratio: float = 1.0, target_name: str = None) -> bool:
         """Executes a place (release) action at the given target position.
         Must be called AFTER moving to the approach position above the target.
         The robot descends to the place height with the pitch angle saved during
         the pick operation automatically restored, then opens the gripper to
         release the object.
 
-        IMPORTANT: Pass position with z = picked_object_height - 0.02 (pick_pos[2] - 0.02)
-        to release at the middle height of the picked object.
+        IMPORTANT: Pass the target surface position as-is from the positions dictionary.
+        The function internally calculates the correct release height using the pick height saved during execute_pick_object.
+        - is_table=True: z value is ignored (release height = pick_z above table surface)
+        - is_table=False: z value is used as the target surface height (release height = surface_z + pick_z)
         ALWAYS use gripper_open_ratio=0.7 for controlled release.
 
         Args:
-            place_position: Target position [x, y, z] in meters where z should be
-                the picked object's height minus 2cm (pick_pos[2] - 0.02).
+            place_position: Target position [x, y, z] in meters. Pass the target object/surface
+                position as-is. The z coordinate is only used when is_table=False.
             gripper_offset: Asymmetric gripper offset in meters.
             is_table: True if placing directly on the table surface (z=0),
                 False if placing on top of another object.
@@ -156,8 +133,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                 ALWAYS use 0.7 (70% open) for controlled object release.
             target_name: Name of the placement target for subgoal labeling.
                 Example: "blue dish", "table".
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "lower the red block onto the blue dish"
 
         Returns:
             True if place successful (object released at target position).
@@ -167,7 +142,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                       contact_height: float = 0.02, press_duration: float = 0.5,
                       hold_time: float = 0.3, max_press_torque: int = 400,
                       duration: float = None, gripper_offset: float = 0.0,
-                      target_name: str = None, skill_description: str = None) -> bool:
+                      target_name: str = None) -> bool:
         """Executes a 2-phase press action (normal descent + torque-limited press).
         Must be called AFTER closing the gripper and moving to approach position above target.
         Phase 1: Descend to contact surface at normal speed.
@@ -184,8 +159,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             gripper_offset: Asymmetric gripper offset in meters.
             target_name: Name of the target for subgoal labeling.
                 Example: "power button", "microphone".
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "press the power button on the device"
 
         Returns:
             True if press action completed successfully.
@@ -193,8 +166,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
 
     def execute_push(self, start_position: list[float], end_position: list[float],
                      push_height: float = 0.01, duration: float = None,
-                     gripper_offset: float = 0.0, object_name: str = None,
-                     skill_description: str = None) -> bool:
+                     gripper_offset: float = 0.0, object_name: str = None) -> bool:
         """Pushes an object in a straight line using Cartesian linear motion.
         Must be called AFTER closing the gripper and moving to approach position above start.
         Internally handles everything after approach:
@@ -216,8 +188,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             gripper_offset: Asymmetric gripper offset in meters.
             object_name: Name of the object being pushed for subgoal labeling.
                 Example: "bread", "red block".
-            skill_description: A natural language sentence describing the semantic intent.
-                Example: "push the bread 15cm to the right in a straight line"
 
         Returns:
             True if push completed successfully.

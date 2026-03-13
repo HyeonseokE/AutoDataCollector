@@ -1,6 +1,6 @@
 {
   "robot_id": "robot2",
-  "description": "Adaptive compensation parameters for SO-101 Robot 2 (NEEDS CALIBRATION)",
+  "description": "Adaptive compensation parameters for SO-101 Robot 2",
   "calibration_date": "2025-12-18",
 
   "deadband": {
@@ -50,11 +50,11 @@
     "lut": {
       "shoulder_lift": {
         "angles": [-60.0, -46.67, -33.33, -20.0, -6.67, 6.67, 20.0],
-        "corrections": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        "corrections": [0.505, 0.028, 0.140, -0.168, -0.225, -0.281, 0.084]
       },
       "elbow_flex": {
         "angles": [0.0, 13.33, 26.67, 40.0, 53.33, 66.67, 80.0],
-        "corrections": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        "corrections": [-2.216, -0.461, -0.335, -0.208, -0.262, -0.498, 0.081]
       }
     }
   }

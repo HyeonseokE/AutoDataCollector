@@ -160,7 +160,9 @@ def main():
             with open(calibration_file, 'r') as f:
                 calib_data = json.load(f)
             for name, data in calib_data.items():
-                motor_id = data['motor_id']
+                motor_id = data.get('motor_id', data.get('id'))
+                if motor_id is None:
+                    continue
                 calibration_by_id[motor_id] = MotorCalibration(
                     motor_id=motor_id,
                     model=data.get('model', 'sts3215'),

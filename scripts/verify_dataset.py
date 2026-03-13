@@ -6,7 +6,7 @@ Usage:
 """
 
 import sys
-sys.path.insert(0, "/home/csi/lerobot_CaP_distillation/lerobot/src")
+sys.path.insert(0, "/home/lerobot/AutoDataCollector/lerobot/src")
 
 import argparse
 import json

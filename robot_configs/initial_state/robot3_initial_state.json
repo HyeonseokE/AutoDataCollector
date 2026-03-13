@@ -9,7 +9,7 @@
   "gripper_normalized": -100.0,
   "recorded_at": "2026-01-20T10:03:20.809652",
   "robot_id": "robot3",
-  "config_file": "/home/csi/lerobot_CaP_distillation/robot_configs/robot/so101_robot3.yaml",
+  "config_file": "/home/lerobot/AutoDataCollector/robot_configs/robot/so101_robot3.yaml",
   "state_type": "initial_state",
   "description": "Safe initial state for IK solving. Robot moves here before computing IK to target."
 }

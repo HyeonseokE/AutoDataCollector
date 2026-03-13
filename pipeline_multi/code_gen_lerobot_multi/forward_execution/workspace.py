@@ -125,7 +125,7 @@ class MultiRobotWorkspace:
                 if isinstance(info, dict):
                     validated[name] = {**info, "position": clamped}
                 else:
-                    validated[name] = {"position": clamped, "gripper_offset": 0.02}
+                    validated[name] = {"position": clamped}
 
         return validated
 

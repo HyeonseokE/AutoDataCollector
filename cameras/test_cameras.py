@@ -11,7 +11,7 @@ Usage:
 
     # 특정 카메라 테스트
     python cameras/test_cameras.py --test realsense
-    python cameras/test_cameras.py --test opencv --device /dev/video6
+    python cameras/test_cameras.py --test opencv --device /dev/video7
 
     # 기본 설정으로 멀티 카메라 테스트
     python cameras/test_cameras.py --multi
@@ -124,7 +124,7 @@ def test_realsense():
     return True
 
 
-def test_opencv(device: str = "/dev/video6"):
+def test_opencv(device: str = "/dev/video7"):
     """OpenCV 카메라 테스트"""
     print("\n" + "=" * 60)
     print(f"OpenCV Camera Test ({device})")
@@ -192,7 +192,7 @@ def test_multi_camera():
         ),
         OpenCVCameraConfig(
             name="innomaker",
-            device_path="/dev/video6",
+            device_path="/dev/video7",
             width=640,
             height=480,
             fps=30,
@@ -255,7 +255,7 @@ def test_async_performance():
         ),
         OpenCVCameraConfig(
             name="innomaker",
-            device_path="/dev/video6",
+            device_path="/dev/video7",
             width=640,
             height=480,
             fps=30,
@@ -327,7 +327,7 @@ def live_view():
         ),
         OpenCVCameraConfig(
             name="innomaker",
-            device_path="/dev/video6",
+            device_path="/dev/video7",
             width=640,
             height=480,
             fps=30,
@@ -405,7 +405,7 @@ def save_test_images():
         ),
         OpenCVCameraConfig(
             name="innomaker",
-            device_path="/dev/video6",
+            device_path="/dev/video7",
             width=640,
             height=480,
             fps=30,
@@ -447,7 +447,7 @@ def main():
                        help="Find all connected cameras")
     parser.add_argument("--test", type=str, choices=["realsense", "opencv"],
                        help="Test specific camera type")
-    parser.add_argument("--device", type=str, default="/dev/video6",
+    parser.add_argument("--device", type=str, default="/dev/video7",
                        help="Device path for OpenCV camera")
     parser.add_argument("--multi", action="store_true",
                        help="Test multi-camera setup")

@@ -64,10 +64,10 @@ class CameraConfigRecord:
     fps: int = 30
 
     # 공통 설정 (LeRobot 호환)
-    index_or_path: Optional[str] = None  # 장치 경로 (예: "/dev/video6") 또는 인덱스
+    index_or_path: Optional[str] = None  # 장치 경로 (예: "/dev/video7") 또는 인덱스
 
     # OpenCV 전용 설정 (레거시 호환)
-    device_path: Optional[str] = None  # 예: "/dev/video6" (index_or_path 대체 가능)
+    device_path: Optional[str] = None  # 예: "/dev/video7" (index_or_path 대체 가능)
     device_index: Optional[int] = None
     fourcc: Optional[str] = "MJPG"
 
@@ -106,7 +106,7 @@ DEFAULT_CAMERAS = [
         name="innomaker",
         type="opencv",
         enabled=True,
-        device_path="/dev/video6",
+        device_path="/dev/video7",
         width=640,
         height=480,
         fps=30,

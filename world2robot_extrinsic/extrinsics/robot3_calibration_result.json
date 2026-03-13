@@ -1,7 +1,7 @@
 {
   "robot_id": "robot3",
   "calibrated_at": "2025-12-19T00:21:28.194703",
-  "input_file": "/home/csi/lerobot_CaP_distillation/world2robot_extrinsic/matching_points/robot3_matching_points.json",
+  "input_file": "/home/lerobot/AutoDataCollector/world2robot_extrinsic/matching_points/robot3_matching_points.json",
   "num_points": 13,
   "world_to_base_transform": {
     "rotation_matrix": [

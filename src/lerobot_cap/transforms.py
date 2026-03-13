@@ -148,16 +148,18 @@ class FrameTransformer:
         self.robot_id = config.get("robot_id", "unknown")
 
         for frame_name, frame_data in config.get("frames", {}).items():
-            # User provides: robot position/orientation in world frame
             robot_position = np.array(frame_data.get("translation", [0, 0, 0]))
             robot_rpy = frame_data.get("rotation_rpy", [0, 0, 0])
 
-            # Compute T_world_from_base (robot pose in world frame)
-            R_world_from_base = rotation_matrix_from_rpy(robot_rpy[0], robot_rpy[1], robot_rpy[2])
-            T_world_from_base = make_homogeneous_matrix(R_world_from_base, robot_position)
-
-            # Compute inverse: T_base_from_world (for transforming world points to base_link)
-            T_base_from_world = invert_homogeneous_matrix(T_world_from_base)
+            # Prefer raw 4x4 transform matrix if available (handles det=-1 reflections)
+            if "transform_4x4" in frame_data:
+                T_base_from_world = np.array(frame_data["transform_4x4"])
+                T_world_from_base = np.linalg.inv(T_base_from_world)
+            else:
+                # Fallback: reconstruct from RPY (only works for proper rotations, det=+1)
+                R_world_from_base = rotation_matrix_from_rpy(robot_rpy[0], robot_rpy[1], robot_rpy[2])
+                T_world_from_base = make_homogeneous_matrix(R_world_from_base, robot_position)
+                T_base_from_world = invert_homogeneous_matrix(T_world_from_base)
 
             self.frames[frame_name] = {
                 "T_base_from_frame": T_base_from_world,

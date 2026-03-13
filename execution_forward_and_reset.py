@@ -137,6 +137,7 @@ class ForwardAndResetPipeline:
         multi_turn: bool = False,
         cad_image_dirs: List[str] = None,
         side_view_image: str = None,
+        codegen_model: str = None,
     ):
         """
         초기화
@@ -165,6 +166,7 @@ class ForwardAndResetPipeline:
         self.multi_turn = multi_turn
         self.cad_image_dirs = cad_image_dirs or []
         self.side_view_image = side_view_image
+        self.codegen_model = codegen_model
         self.multi_turn_info: Dict = {}
 
         # Recording options
@@ -518,6 +520,7 @@ class ForwardAndResetPipeline:
             camera=active_camera,
             cad_image_dirs=self.cad_image_dirs,
             side_view_image=self.side_view_image,
+            codegen_model=self.codegen_model,
         )
 
         # multi-turn 정보 저장
@@ -531,6 +534,15 @@ class ForwardAndResetPipeline:
 
         return code
 
+    def _extract_skill_sequence(self, exec_globals: Dict = None):
+        """LeRobotSkills._last_instance에서 스킬 시퀀스를 추출"""
+        try:
+            from skills.skills_lerobot import LeRobotSkills
+            if LeRobotSkills._last_instance and hasattr(LeRobotSkills._last_instance, 'skill_sequence'):
+                self._last_skill_sequence = LeRobotSkills._last_instance.skill_sequence
+        except Exception:
+            pass
+
     def execute_code(self, code: str, positions: Dict) -> bool:
         """생성된 코드 실행 (레코딩 모드 지원)
 
@@ -540,6 +552,7 @@ class ForwardAndResetPipeline:
         실행 시 올바른 pix2world 좌표를 덮어쓰는 버그가 발생합니다.
         대신 exec 후 execute_task()를 수동으로 호출합니다.
         """
+        self._last_skill_sequence = []  # 초기화
         try:
             exec_globals = {
                 "__name__": "__generated__",
@@ -549,14 +562,18 @@ class ForwardAndResetPipeline:
             # 레코딩 모드: RecordingContext 설정
             # LeRobotSkills가 생성될 때 자동으로 콜백을 획득
             if self.record_dataset and self.dataset_recorder:
-                return self._execute_code_with_recording(code, exec_globals)
+                success = self._execute_code_with_recording(code, exec_globals)
             else:
                 exec(code, exec_globals)
                 if "execute_task" in exec_globals:
                     exec_globals["execute_task"]()
                 elif "execute_reset_task" in exec_globals:
                     exec_globals["execute_reset_task"]()
-                return True
+                success = True
+
+            # 스킬 시퀀스 추출 (LeRobotSkills 인스턴스에서)
+            self._extract_skill_sequence(exec_globals)
+            return success
 
         except AssertionError as e:
             error_msg = str(e)
@@ -948,6 +965,7 @@ class ForwardAndResetPipeline:
             camera=active_camera,
             current_episode=self.current_episode,
             total_episodes=self.total_episodes,
+            codegen_model=self.codegen_model,
         )
 
         return reset_code, original_positions, current_pos, target_pos
@@ -1348,6 +1366,20 @@ class ForwardAndResetPipeline:
 
             forward_success = self.execute_code(self.generated_code, self.detected_positions)
             result['forward']['execution_success'] = forward_success
+
+            # 후처리: 스킬 라벨 생성
+            if hasattr(self, '_last_skill_sequence') and self._last_skill_sequence:
+                try:
+                    from record_dataset.postprocess import generate_skill_labels
+                    skill_labels_path = str(Path(forward_dir) / "skill_labels.json")
+                    generate_skill_labels(
+                        instruction=instruction,
+                        skill_sequence=self._last_skill_sequence,
+                        llm_model=self.judge_model,  # 빠른 모델 사용
+                        save_path=skill_labels_path,
+                    )
+                except Exception as e:
+                    print(f"  [SkillLabeler] Warning: {e}")
 
             # 레코딩 모드: 에피소드 종료 + 시각화 (forward 직후 즉시)
             if self.record_dataset:
@@ -2395,6 +2427,13 @@ def main():
     )
 
     parser.add_argument(
+        "--codegen-session2-model",
+        type=str,
+        default=None,
+        help="Model for code generation Session 2 (context handoff). If not set, uses --llm model."
+    )
+
+    parser.add_argument(
         "--side-view-image",
         type=str,
         default=None,
@@ -2431,6 +2470,7 @@ def main():
         cad_image_dirs=args.cad_image_dirs,
         side_view_image=args.side_view_image,
         recording_fps=args.recording_fps,
+        codegen_model=args.codegen_session2_model,
     )
 
     # 에피소드 실행 (항상 session 구조 사용)

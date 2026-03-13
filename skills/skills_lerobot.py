@@ -67,6 +67,9 @@ class LeRobotSkills:
     """
     Primitive skills for SO-101 LeRobot.
 
+    Class Attributes:
+        _last_instance: 마지막으로 생성된 인스턴스 (후처리에서 skill_sequence 접근용)
+
     Provides high-level manipulation primitives:
     - move_to_position: Move end-effector to target position
     - gripper_open / gripper_close: Gripper control
@@ -87,6 +90,8 @@ class LeRobotSkills:
         tcp_offset: TCP (Tool Center Point) offset from gripper_frame_link [x, y, z] in meters.
                    Default is [-0.04, 0, 0] (4cm). Can be customized per task.
     """
+
+    _last_instance = None
 
     def __init__(
         self,
@@ -112,6 +117,8 @@ class LeRobotSkills:
         self.use_deceleration = use_deceleration
         self.verbose = verbose
         self.pick_offset = pick_offset  # Fixed offset from object top for pick/place
+        self.skill_sequence = []  # 실행된 스킬 시퀀스 기록 (후처리 라벨링용)
+        LeRobotSkills._last_instance = self  # 후처리에서 접근 가능하도록
 
         # LeRobot dataset recording callback
         # Auto-acquire from RecordingContext if not explicitly provided
@@ -458,13 +465,25 @@ class LeRobotSkills:
         goal_joint_5: np.ndarray,
         goal_gripper: float,
         kinematics=None,
+        target_name: str = None,
+        position: list = None,
     ) -> None:
         """스킬 레코딩 정보 설정 (헬퍼)
 
         Args:
             goal_joint_5: 목표 arm joint (radians, 5축)
             goal_gripper: 목표 gripper (normalized, -100~+100)
+            target_name: 대상 물체 이름 (시퀀스 기록용)
+            position: 목표 위치 [x, y, z] (시퀀스 기록용)
         """
+        # 스킬 시퀀스에 기록 (후처리 라벨링용)
+        self.skill_sequence.append({
+            "label": label,
+            "type": skill_type,
+            "target_name": target_name,
+            "position": [round(p, 4) for p in position] if position else None,
+        })
+
         if not HAS_RECORDING_CONTEXT or not RecordingContext.is_active():
             return
 
@@ -1178,7 +1197,7 @@ class LeRobotSkills:
             )
 
         # Set skill recording info (after trajectory planning)
-        label = skill_description or (f"move to {target_name}" if target_name else "move to position")
+        label = skill_description or (f"move {target_name}" if target_name else "move to position")
         goal_joint_rad = trajectory.joint_positions[-1]
         self._set_skill_recording(
             label=label,
@@ -1186,6 +1205,8 @@ class LeRobotSkills:
             goal_joint_5=goal_joint_rad,
             goal_gripper=self.current_gripper_pos,
             kinematics=active_planner.kinematics,
+            target_name=target_name,
+            position=position.tolist() if hasattr(position, 'tolist') else list(position),
         )
 
         # Execute trajectory with active kinematics for correct error measurement
@@ -1207,7 +1228,9 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * ratio
+        GRIPPER_MAX_RATIO = 0.95
+        clamped_ratio = min(ratio, GRIPPER_MAX_RATIO)
+        target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
 
         self._set_skill_recording(
@@ -1218,9 +1241,9 @@ class LeRobotSkills:
         )
 
         try:
-            self._log(f"Gripper: Opening to {ratio*100:.0f}% (pos={target_pos:.0f})...")
+            self._log(f"Gripper: Opening to {clamped_ratio*100:.0f}% (pos={target_pos:.0f})...")
             self._execute_move_gripper_pose(target_pos, duration=duration)
-            self._log(f"Gripper: Open ({ratio*100:.0f}%)")
+            self._log(f"Gripper: Open ({clamped_ratio*100:.0f}%)")
         finally:
             self._clear_skill_recording()
 
@@ -1231,19 +1254,21 @@ class LeRobotSkills:
         Args:
             duration: Movement duration in seconds (default: 1.5)
         """
+        GRIPPER_CLOSE_RATIO = 0.95
+        target_pos = self.gripper_open_pos + (self.gripper_close_pos - self.gripper_open_pos) * GRIPPER_CLOSE_RATIO
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
 
         self._set_skill_recording(
             label=skill_description or "close gripper",
             skill_type="gripper_close",
             goal_joint_5=current_arm_rad,
-            goal_gripper=self.gripper_close_pos,
+            goal_gripper=target_pos,
         )
 
         try:
-            self._log(f"Gripper: Closing (pos={self.gripper_close_pos:.0f})...")
-            self._execute_move_gripper_pose(self.gripper_close_pos, duration=duration)
-            self._log("Gripper: Closed")
+            self._log(f"Gripper: Closing to 95% (pos={target_pos:.0f})...")
+            self._execute_move_gripper_pose(target_pos, duration=duration)
+            self._log("Gripper: Closed (95%)")
         finally:
             self._clear_skill_recording()
     
@@ -1413,13 +1438,15 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.0
+        MIN_PICK_Z = 0.015  # Minimum pick height (1.5cm) — gripper can't reach lower without hitting table
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
         self._log(f"\n[Execute Pick Object]")
         self._log(f"  Object height: {object_height*100:.1f}cm")
-        self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.0f}cm from top)")
+        if object_height - self.pick_offset < MIN_PICK_Z:
+            self._log(f"  [Pick Z-Fix] {(object_height - self.pick_offset)*100:.1f}cm < min {MIN_PICK_Z*100:.1f}cm, clamping to {MIN_PICK_Z*100:.1f}cm")
+        self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.1f}cm from top)")
 
         # Move to pick position (skill recording handled inside)
         pick_label = f"pick {object_name}" if object_name else None
@@ -1486,8 +1513,12 @@ class LeRobotSkills:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
 
+        MIN_PLACE_Z = 0.02  # Minimum place height (2cm) — robot can't reach lower while holding object
         pick_z = getattr(self, '_pick_z', self.pick_offset)
         place_z = target_surface_height + pick_z
+        if place_z < MIN_PLACE_Z:
+            self._log(f"  [Place Z-Fix] {place_z*100:.1f}cm < min {MIN_PLACE_Z*100:.0f}cm, clamping to {MIN_PLACE_Z*100:.0f}cm")
+            place_z = MIN_PLACE_Z
         final_position = [place_position[0], place_position[1], place_z]
 
         saved_pitch = getattr(self, '_saved_pitch', None)
@@ -1495,7 +1526,7 @@ class LeRobotSkills:
 
         self._log(f"\n[Execute Place Object]")
         self._log(f"  Target surface: z={target_surface_height*100:.1f}cm")
-        self._log(f"  Place point: z={place_z*100:.1f}cm (pick_z={pick_z*100:.1f}cm)")
+        self._log(f"  Place point: z={place_z*100:.1f}cm (pick_z={pick_z*100:.1f}cm, min={MIN_PLACE_Z*100:.0f}cm)")
         if saved_pitch is not None:
             self._log(f"  Restoring pitch: {np.degrees(saved_pitch):.1f}°")
 
@@ -1522,6 +1553,29 @@ class LeRobotSkills:
         # Open gripper (skill recording handled inside)
         release_desc = f"release object on {target_name}" if target_name else None
         self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
+
+        # Post-place clearance: move +1cm in TCP +x direction to avoid collision on retreat
+        PLACE_CLEARANCE_M = 0.01
+        try:
+            _, current_joints_rad, _ = self._get_current_state()
+            kinematics = self.kinematics_tcp if effective_gripper_offset > 0 else self.planner.kinematics
+            current_pos_base, R_gripper = kinematics.forward_kinematics(current_joints_rad)
+            tcp_x_base = R_gripper[:, 0]  # TCP +x axis in base_link frame
+            clearance_pos_base = current_pos_base + tcp_x_base * PLACE_CLEARANCE_M
+
+            # base_link → world frame 역변환 (방향벡터 + 위치)
+            if self.frame != "base_link" and self.frame_transformer and self.frame_transformer.has_frame(self.frame):
+                T_base_from_world = self.frame_transformer.frames[self.frame]["T_base_from_frame"]
+                T_world_from_base = np.linalg.inv(T_base_from_world)
+                p_hom = np.array([*clearance_pos_base, 1.0])
+                clearance_world = (T_world_from_base @ p_hom)[:3]
+            else:
+                clearance_world = clearance_pos_base
+
+            self._log(f"  Post-place clearance: +{PLACE_CLEARANCE_M*100:.0f}cm in TCP +x")
+            self.move_to_position(clearance_world, duration=0.5)
+        except Exception as e:
+            self._log(f"  Post-place clearance skipped: {e}")
 
         # Clear saved state
         self._pick_z = None

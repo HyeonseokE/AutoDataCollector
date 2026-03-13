@@ -75,9 +75,7 @@ class CoordinateTransformer:
         world_2d = cv2.perspectiveTransform(pixel, self.homography_matrix)
 
         x = float(world_2d[0, 0, 0])
-        # [Y-AXIS SIGN FLIP] 월드 좌표계와 카메라 좌표계의 y축 방향 차이 보정
-        # 수정 필요시 이 라인의 부호를 변경하세요
-        y = -float(world_2d[0, 0, 1])
+        y = float(world_2d[0, 0, 1])
         z = self.z_offset
 
         return x, y, z
@@ -148,7 +146,8 @@ class CoordinateTransformer:
             # 완전한 3D 변환
             point = np.array([cam_x, cam_y, cam_z, 1.0])
             world_point = self.transform_matrix_3d @ point
-            return float(world_point[0]), float(world_point[1]), float(world_point[2])
+            # Z축 부호 반전: 캘리브레이션이 평면(z=0)에서 수행되어 z방향이 뒤집힘
+            return float(world_point[0]), float(world_point[1]), float(-world_point[2])
         else:
             # 2D 변환 사용 (Z는 근사)
             # 카메라 좌표를 픽셀로 역변환 후 homography 적용

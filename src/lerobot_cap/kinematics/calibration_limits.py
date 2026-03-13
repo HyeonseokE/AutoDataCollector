@@ -136,21 +136,30 @@ def load_calibration_limits(
         joint_names = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll']
 
     # Load calibration data
+    # Supports both formats:
+    #   1) AutoDataCollector: {"motor_1": {"motor_id": 1, ...}, "motor_2": ...}
+    #   2) LeRobot official:  {"shoulder_pan": {"id": 1, ...}, "shoulder_lift": ...}
     with open(calibration_file, 'r') as f:
         calib_data = json.load(f)
 
-    # Motor keys corresponding to joint names
-    motor_keys = [f'motor_{i+1}' for i in range(len(joint_names))]
+    # Build motor lookup by joint name or motor index
+    # Try joint_name keys first (LeRobot format), then motor_N keys (AutoDataCollector format)
+    def _find_motor(calib_data, joint_name, motor_index):
+        # LeRobot format: key is joint name
+        if joint_name in calib_data:
+            return calib_data[joint_name]
+        # AutoDataCollector format: key is motor_N
+        mkey = f'motor_{motor_index + 1}'
+        if mkey in calib_data:
+            return calib_data[mkey]
+        raise ValueError(f"Motor for '{joint_name}' (motor_{motor_index+1}) not found in calibration file")
 
     range_degrees = []
     range_radians = []
     offset_normalized_list = []
 
-    for mkey in motor_keys:
-        if mkey not in calib_data:
-            raise ValueError(f"Motor {mkey} not found in calibration file")
-
-        motor = calib_data[mkey]
+    for i, jname in enumerate(joint_names):
+        motor = _find_motor(calib_data, jname, i)
         range_min = motor['range_min']
         range_max = motor['range_max']
         homing_offset = motor.get('homing_offset', 0)

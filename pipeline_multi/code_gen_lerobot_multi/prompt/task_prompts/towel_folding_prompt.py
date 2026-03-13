@@ -132,7 +132,7 @@ ensuring both robots close/open grippers at exactly the same moment.
 - **Robot 3**: rotate_90degree(-1) TWICE, then execute_pause_for_sync
 - **Robot 2**: move_to_initial_state, then execute_pause_for_sync (wait for Robot 3)
 - Use `execute_multi_pick_object(skills, sync_barrier, pick_pos, gripper_offset=0.0)`
-- Use `execute_multi_place_object(skills, sync_barrier, place_pos, gripper_offset=0.0, is_table=True, gripper_open_ratio=0.3)`
+- Use `execute_multi_place_object(skills, sync_barrier, place_pos, gripper_offset=0.0, is_table=True)`
 - Use `execute_pause_for_sync(skills, sync_barrier, "skill_name")` for explicit sync
 - The `sync_barrier` object is pre-injected and available globally
 """
@@ -259,7 +259,7 @@ def execute_task():
         skills.move_to_position([pick_pos[0], pick_pos[1], approach_height])
         execute_pause_for_sync(skills, sync_barrier, "move_to_position:lift")  # After pick lift
         skills.move_to_position([place_pos[0], place_pos[1], approach_height])
-        execute_multi_place_object(skills, sync_barrier, place_pos, gripper_offset=0.0, is_table=True, gripper_open_ratio=0.3)
+        execute_multi_place_object(skills, sync_barrier, place_pos, gripper_offset=0.0, is_table=True)
         skills.move_to_position([place_pos[0], place_pos[1], approach_height])
 
         # === Cleanup ===

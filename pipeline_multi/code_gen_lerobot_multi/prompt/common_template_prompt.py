@@ -42,15 +42,6 @@ class TaskPrompt:
         """Reset execution example code - override in subclass"""
         raise NotImplementedError
 
-    def get_tcp_offset(self) -> Optional[List[float]]:
-        """
-        Get task-specific TCP offset. Override in subclass if needed.
-
-        Returns:
-            TCP offset [x, y, z] in meters, or None to use default (-4cm)
-        """
-        return None  # Use default TCP offset
-
     def matches(self, instruction: str) -> bool:
         """Check if instruction matches this task type"""
         instruction_lower = instruction.lower()
@@ -75,7 +66,7 @@ class ForwardTemplatePrompt:
 
         Args:
             instruction: Natural language goal
-            object_positions: Object positions dict {name: {"position": [x,y,z], "gripper_offset": float}}
+            object_positions: Object positions dict {name: {"position": [x,y,z]}}
             robot_id: Robot ID (2 or 3)
             task_prompt: Task-specific prompt instance
             spec: Additional specification
@@ -92,9 +83,8 @@ class ForwardTemplatePrompt:
         for name, info in object_positions.items():
             if info is not None:
                 pos = info["position"]
-                offset = info.get("gripper_offset", 0.0)
                 positions_lines.append(
-                    f'    "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], "gripper_offset": {offset:.3f}}},'
+                    f'    "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
                 )
         positions_str = "\n".join(positions_lines)
 
@@ -143,14 +133,6 @@ class ForwardTemplatePrompt:
        - Follow the role-specific instructions in the Task-Specific Context
 """
 
-        # TCP offset section - get from task_prompt if available
-        tcp_offset = None
-        tcp_offset_line = ""
-        if task_prompt:
-            tcp_offset = task_prompt.get_tcp_offset()
-        if tcp_offset:
-            tcp_offset_line = f"        tcp_offset={tcp_offset},  # Task-specific TCP offset\n"
-
         prompt = f"""You are an AI assistant generating executable Python code for a LeRobot SO-101 robot arm.
 The robot is part of a multi-robot system where each robot executes independently with its own coordinate frame.
 
@@ -189,33 +171,32 @@ The robot is part of a multi-robot system where each robot executes independentl
        | `gripper_open()` | Open gripper | - |
        | `move_to_initial_state()` | Move to initial/home position | - |
        | `move_to_free_state()` | Move to safe parking position | - |
-       | `move_to_position(position, gripper_offset=0.0)` | Move end-effector to [x,y,z] | position: List[float], gripper_offset: float |
+       | `move_to_position(position)` | Move end-effector to [x,y,z] | position: List[float] |
        | `rotate_90degree(direction)` | Rotate gripper 90deg | direction: 1 (CW) or -1 (CCW) |
-       | `execute_multi_pick_object(skills, sync_barrier, pos, gripper_offset=0.0)` | **Multi-robot pick** - sync before gripper close | pos: [x,y,z] |
-       | `execute_multi_place_object(skills, sync_barrier, pos, gripper_offset=0.0, is_table=True, gripper_open_ratio=0.3)` | **Multi-robot place** - sync before gripper open | pos: [x,y,z] |
+       | `execute_multi_pick_object(skills, sync_barrier, pos)` | **Multi-robot pick** - sync before gripper close | pos: [x,y,z] |
+       | `execute_multi_place_object(skills, sync_barrier, pos, is_table=True)` | **Multi-robot place** - sync before gripper open fully | pos: [x,y,z] |
        | `detect_objects(queries, timeout=5.0, visualize=False)` | **Real-time object detection** - get current object positions | queries: List[str], returns Dict |
 
     6. **Skill Composition Patterns (Multi-Robot)**:
 
        ```python
-       from pipeline_multi.multi_skills import execute_multi_pick_object, execute_multi_place_object, execute_pause_for_sync, compute_tcp_offset_for_pin
+       from pipeline_multi.multi_skills import execute_multi_pick_object, execute_multi_place_object, execute_pause_for_sync
 
        # IMPORTANT: 'positions' and 'sync_barrier' are pre-injected globals
        # Do NOT redefine them! Just use them directly:
        pick_obj = positions["object_name"]  # positions is already available
        pick_pos = pick_obj["position"]
-       offset = pick_obj["gripper_offset"]
 
        # MULTI-ROBOT PICK pattern:
        skills.gripper_open()
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset)
-       execute_multi_pick_object(skills, sync_barrier, pick_pos, gripper_offset=offset)
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset)
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height])
+       execute_multi_pick_object(skills, sync_barrier, pick_pos)
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height])
 
        # MULTI-ROBOT PLACE pattern:
-       skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset)
-       execute_multi_place_object(skills, sync_barrier, place_pos, gripper_offset=offset, is_table=True)
-       skills.move_to_position([place_pos[0], place_pos[1], approach_height], gripper_offset=offset)
+       skills.move_to_position([place_pos[0], place_pos[1], approach_height])
+       execute_multi_place_object(skills, sync_barrier, place_pos, is_table=True)
+       skills.move_to_position([place_pos[0], place_pos[1], approach_height])
 
        # REAL-TIME DETECTION pattern (for dynamic object tracking):
        # Use when you need to re-detect object positions during execution
@@ -230,7 +211,7 @@ The robot is part of a multi-robot system where each robot executes independentl
 # Robot ID: {robot_id}
 import numpy as np
 from skills.skills_lerobot import LeRobotSkills
-from pipeline_multi.multi_skills import execute_multi_pick_object, execute_multi_place_object, execute_pause_for_sync, compute_tcp_offset_for_pin
+from pipeline_multi.multi_skills import execute_multi_pick_object, execute_multi_place_object, execute_pause_for_sync
 
 def execute_task():
     '''Execute the robot task based on the goal.'''
@@ -238,7 +219,7 @@ def execute_task():
     skills = LeRobotSkills(
         robot_config="{robot_config}",
         frame="world",
-{tcp_offset_line}    )
+    )
     skills.connect()
 
     try:
@@ -312,21 +293,19 @@ class ResetTemplatePrompt:
         """
         robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
 
-        def get_position_and_offset(info):
+        def get_position(info):
             if info is None:
-                return None, 0.0
+                return None
             elif isinstance(info, dict) and "position" in info:
-                pos = info["position"]
-                offset = info.get("gripper_offset", 0.02)
-                return pos, offset
+                return info["position"]
             elif isinstance(info, (list, tuple)) and len(info) >= 3:
-                return list(info[:3]), 0.02
-            return None, 0.0
+                return list(info[:3])
+            return None
 
         # Format target positions
         target_lines = []
         for name, info in target_positions.items():
-            pos, _ = get_position_and_offset(info)
+            pos = get_position(info)
             if pos is not None:
                 target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
         target_str = "\n".join(target_lines)
@@ -334,10 +313,10 @@ class ResetTemplatePrompt:
         # Format current positions
         current_lines = []
         for name, info in current_positions.items():
-            pos, offset = get_position_and_offset(info)
+            pos = get_position(info)
             if pos is not None:
                 current_lines.append(
-                    f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], "gripper_offset": {offset:.4f}}},'
+                    f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
                 )
         current_str = "\n".join(current_lines)
 

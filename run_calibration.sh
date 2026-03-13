@@ -9,4 +9,4 @@ for port in /dev/ttyACM*; do
     fi
 done
 
-python scripts/find_joint_limits.py --config robot_configs/robot/so101_robot3.yaml
+python scripts/find_joint_limits.py --config robot_configs/robot/so101_robot2.yaml

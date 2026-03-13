@@ -67,12 +67,34 @@ def kabsch_umeyama(source_points: np.ndarray, target_points: np.ndarray) -> tupl
     # R = V @ U^T
     R = Vt.T @ U.T
 
-    # Handle reflection case (det(R) = -1)
-    # If determinant is negative, we have a reflection instead of rotation
-    if np.linalg.det(R) < 0:
-        print("  경고: 반사(reflection) 감지됨 - 보정 적용")
+    # Reflection handling for coplanar calibration points (Z≈0)
+    #
+    # When calibration points are all at Z≈0, the SVD has a zero singular value
+    # for the Z direction, making the Z-axis of R arbitrary. The standard Kabsch
+    # correction (flip Vt[-1,:] when det<0) forces det=+1 but may invert Z.
+    #
+    # Physical constraint: World Z+ and Robot Base Z+ both point UP (away from table).
+    # If det(R)=+1 but R[2,2]<0, Z is inverted — physically wrong.
+    # If det(R)=-1 but R[2,2]>0, Z is preserved — physically correct.
+    #
+    # This happens when the World and Robot coordinate frames have opposite
+    # handedness (e.g., Y-axes point in opposite directions). In that case,
+    # the correct transformation IS a reflection (det=-1), not a proper rotation.
+    #
+    # Strategy: choose the R that preserves Z direction (R[2,2] > 0).
+    det_R = np.linalg.det(R)
+    print(f"  det(R) = {det_R:.4f}, R[2,2] = {R[2, 2]:.4f}")
+
+    if R[2, 2] < 0:
+        # Z is inverted — flip the smallest singular vector to fix Z direction
+        print("  Z축 반전 감지됨 - SVD 최소 singular vector 반전으로 보정")
         Vt[-1, :] *= -1
         R = Vt.T @ U.T
+        det_R = np.linalg.det(R)
+        print(f"  보정 후: det(R) = {det_R:.4f}, R[2,2] = {R[2, 2]:.4f}")
+
+    if det_R < 0:
+        print("  det(R) = -1: World/Robot 좌표계 handedness가 다름 (정상)")
 
     # Step 6: Compute translation
     # t = centroid_target - R @ centroid_source
@@ -354,15 +376,18 @@ def main():
             "calibration_source": str(input_path),
             "num_calibration_points": len(points),
             "calibration_rmse_mm": error_stats['rmse'] * 1000,
+            "det_R": float(np.linalg.det(R)),
             "frames": {
                 "world": {
                     "translation": robot_position_in_world.tolist(),
                     "rotation_rpy": [robot_roll, robot_pitch, robot_yaw],
+                    "transform_4x4": T.tolist(),
                 }
             },
             "_usage": {
-                "translation": "world 좌표계 기준 로봇 위치 [x, y, z] (미터)",
-                "rotation_rpy": "world 좌표계 기준 로봇 회전 [roll, pitch, yaw] (도)",
+                "translation": "world 좌표계 기준 로봇 위치 [x, y, z] (미터) — RPY용",
+                "rotation_rpy": "world 좌표계 기준 로봇 회전 [roll, pitch, yaw] (도) — RPY용",
+                "transform_4x4": "World → Base 변환 4x4 행렬 (det=-1 가능, 직접 사용 권장)",
             },
             "_raw_transform": {
                 "description": "World → Base 변환 행렬 (직접 사용 시)",

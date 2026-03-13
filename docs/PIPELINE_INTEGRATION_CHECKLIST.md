@@ -442,7 +442,7 @@ ROBOT_ID=3 NUM_EPISODES=50 ./run_forward_and_reset.sh
 
 ### 즉시 실행 (권장)
 ```bash
-cd /home/csi/lerobot_CaP_distillation
+cd /home/lerobot/AutoDataCollector
 
 # 테스트 실행 (1 에피소드)
 ROBOT_ID=3 NUM_EPISODES=1 ./run_forward_and_reset.sh

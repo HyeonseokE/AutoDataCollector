@@ -38,11 +38,12 @@ echo "처음부터 다시 시작하려면:"
 echo "  rm robot{N}_matching_points.json"
 echo ""
 
+###################### 설정 ###########################
 # Target position (positional arguments with defaults, 단위: meter)
 # ex) 10cm = 0.1m
-ROBOT_INDEX=${1:-3}
-X=${2:-0.25}
-Y=${3:--0.09}
+ROBOT_INDEX=${1:-2}
+X=${2:-0.28}
+Y=${3:--0.12}
 Z=${4:-0.0}
 
 # Validate robot index

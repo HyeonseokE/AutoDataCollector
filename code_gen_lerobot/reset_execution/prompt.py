@@ -776,3 +776,203 @@ if __name__ == "__main__":
 - Include all imports and the complete execute_task() function
 
 **Generate the complete executable RESET code:**"""
+
+
+def reset_context_summary_prompt() -> str:
+    """Session 1 마지막에 reset 컨텍스트 요약을 요청하는 프롬프트"""
+    return """### Context Handoff Summary (Reset)
+
+Before we move to reset code generation, summarize your understanding concisely (under 300 words):
+
+1. **Current Scene**: Where each object is now (after the forward task)
+2. **Object Properties**: Each object's size, shape, graspability
+3. **Spatial Relationships**: Which objects are near each other, stacking if any
+4. **Reset Strategy**: Which objects to move first, any ordering constraints (e.g., unstacking)
+5. **Potential Risks**: Objects too large to grip, collision risks, workspace boundary issues
+
+Output as a structured summary. This will be passed to a fresh code generation session."""
+
+
+def codegen_reset_with_context_prompt(
+    context_summary: str,
+    target_positions: Dict,
+    current_positions: Dict,
+    robot_id: int,
+    is_random_reset: bool,
+    workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]],
+    all_points: Dict = None,
+) -> str:
+    """
+    새로운 chat session에서 컨텍스트 요약과 함께 reset 코드를 생성하는 프롬프트.
+    Session 1의 누적 토큰 없이 깨끗한 세션에서 코드 생성.
+    """
+    robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
+    (x_min, x_max), (y_min, y_max) = workspace_bounds
+
+    def get_pos_offset(info):
+        if info is None:
+            return None, 0.0
+        elif isinstance(info, dict) and "position" in info:
+            return info["position"], info.get("gripper_offset", 0.02)
+        elif isinstance(info, (list, tuple)) and len(info) >= 3:
+            return list(info[:3]), 0.02
+        return None, 0.0
+
+    target_lines = []
+    for name, info in target_positions.items():
+        pos, _ = get_pos_offset(info)
+        if pos is not None:
+            target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
+    target_str = "\n".join(target_lines)
+
+    current_lines = []
+    for name, info in current_positions.items():
+        pos, offset = get_pos_offset(info)
+        if pos is not None:
+            current_lines.append(
+                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], '
+                f'"gripper_offset": {offset:.4f}}},'
+            )
+    current_str = "\n".join(current_lines)
+
+    if is_random_reset:
+        task_title = "RANDOM RESET (Shuffle Objects)"
+        task_desc = "Move each object to its NEW RANDOM target position."
+        target_label = "Random Target Positions (Generated)"
+    else:
+        task_title = "RESET to Initial Environment"
+        task_desc = "Restore each object to its initial position (before the forward task)."
+        target_label = "Initial Positions (Before Forward Execution)"
+
+    return f"""\
+### Scene Context (from prior analysis session)
+
+{context_summary}
+
+### Code Generation Task: {task_title}
+{task_desc}
+
+### **WORKSPACE CONSTRAINT**
+All target positions must be within: x=[{x_min:.2f}, {x_max:.2f}], y=[{y_min:.2f}, {y_max:.2f}]m.
+Positions outside this range are unreachable.
+
+### **Environment States**
+Object position z-coordinate = object height (table surface is z=0).
+
+- **{target_label}**:
+  ```python
+  target_positions = {{
+{target_str}
+  }}
+  ```
+- **Current State** (Detected by VLM + pix2world):
+  ```python
+  current_positions = {{
+{current_str}
+  }}
+  ```
+
+### **Available Skills**
+| Method | Description | Key Parameters |
+|--------|-------------|----------------|
+| `connect()` | Connect to robot | - |
+| `disconnect()` | Disconnect from robot | - |
+| `gripper_open()` | Open gripper | - |
+| `move_to_initial_state()` | Move to initial/home position | - |
+| `move_to_free_state()` | Move to safe parking position | - |
+| `move_to_position(position, ...)` | Move end-effector to [x,y,z] | position, gripper_offset, target_name |
+| `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
+| `execute_pick_object(object_position, ...)` | Descend to pick, close gripper, save pitch | object_position, gripper_offset, object_name |
+| `execute_place_object(place_position, ...)` | Descend to place with saved pitch, open gripper | place_position, gripper_offset, is_table, gripper_open_ratio, target_name |
+
+**execute_pick_object**: Pass the object position as-is. The function internally handles the grasp height offset.
+**execute_place_object**: Pass the target position as-is. The function internally calculates the correct release height.
+  - is_table=True: place on table, is_table=False: place on another object
+  - **ALWAYS use `gripper_open_ratio=0.7`**
+
+**Gripper Offset**: Use `gripper_offset=current_positions["object"]["gripper_offset"]` ONLY for pick-related calls. Do NOT pass gripper_offset for place or other movements.
+
+### **Skill Composition Patterns** (MUST follow exactly)
+
+```python
+# PICK pattern — ALWAYS open gripper BEFORE approaching the object
+cx, cy, cz = <current object position x, y, z>
+offset = <gripper_offset from current_positions>
+approach_height = 0.20
+
+skills.gripper_open()
+skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>")
+skills.execute_pick_object([cx, cy, cz], gripper_offset=offset, object_name="<object_name>")
+skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>")
+
+# PLACE ON TABLE pattern — NO gripper_offset, is_table=True
+tx, ty, tz = <target position x, y, z>
+
+skills.move_to_position([tx, ty, approach_height], target_name="original position")
+skills.execute_place_object([tx, ty, tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
+skills.move_to_position([tx, ty, approach_height], target_name="original position")
+```
+
+### **Code Template**
+
+```python
+from skills.skills_lerobot import LeRobotSkills
+
+def execute_task():
+    '''Move objects from current positions to target positions.'''
+
+    skills = LeRobotSkills(
+        robot_config="{robot_config}",
+        frame="world",
+    )
+    skills.connect()
+
+    try:
+        approach_height = 0.20  # 20cm above objects
+
+        # Target positions (where to place objects)
+        target_positions = {{
+{target_str}
+        }}
+
+        # Current positions (from detection)
+        current_positions = {{
+{current_str}
+        }}
+
+        skills.move_to_initial_state()
+
+        # === RESET: Move objects to target positions ===
+        # Extract actual [x,y,z] values and hardcode them below
+
+        # ... (your reset logic with hardcoded values) ...
+
+        skills.move_to_initial_state()
+        skills.move_to_free_state()
+
+    finally:
+        skills.disconnect()
+
+if __name__ == "__main__":
+    execute_task()
+```
+
+### **Guidelines**
+
+1. Generate code that moves each object from current to target position
+2. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
+3. **Hardcode actual coordinate values** from current_positions and target_positions directly in the code
+4. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
+5. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
+6. Use `approach_height = 0.20` (20cm) for all approach/lift movements
+7. **gripper_offset**: ONLY use for pick-related calls
+8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
+9. Use `is_table=True` when placing on table
+10. Always include try/finally for proper cleanup
+11. Always start with `move_to_initial_state()`, end with `move_to_initial_state()` and `move_to_free_state()`
+
+### **Output Format**
+- Provide complete executable Python code
+- Do not include markdown code blocks
+
+**Generate the complete executable RESET code:**"""

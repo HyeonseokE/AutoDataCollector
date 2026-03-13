@@ -30,7 +30,7 @@ class OpenCVCamera:
     Usage:
         config = OpenCVCameraConfig(
             name="innomaker",
-            device_path="/dev/video6",
+            device_path="/dev/video7",
             width=640,
             height=480,
         )

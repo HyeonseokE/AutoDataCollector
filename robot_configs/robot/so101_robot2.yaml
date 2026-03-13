@@ -46,17 +46,17 @@ joint_names:
 
 # Kinematics configuration
 kinematics:
-  urdf_path: /home/csi/lerobot_CaP_distillation/assets/urdf/so101_robot2.urdf
+  urdf_path: /home/lerobot/AutoDataCollector/assets/urdf/so101_robot2.urdf
   end_effector_frame: gripper_frame_link
 
 # Calibration file (absolute path)
-calibration_file: /home/csi/lerobot_CaP_distillation/calibration/so101/robot2_calibration.json
+calibration_file: /home/lerobot/AutoDataCollector/calibration/so101/robot2_calibration.json
 
 # Compensation file (robot-specific compensation parameters)
-compensation_file: /home/csi/lerobot_CaP_distillation/calibration/so101/robot2_compensation.json
+compensation_file: /home/lerobot/AutoDataCollector/calibration/so101/robot2_compensation.json
 
 # Coordinate frames configuration (world frame transformation)
-frames_file: /home/csi/lerobot_CaP_distillation/robot_configs/world2robot_matrices/robot2_matrix.json
+frames_file: /home/lerobot/AutoDataCollector/robot_configs/world2robot_matrices/robot2_matrix.json
 
 # Safety limits (normalized -100 to +100)
 safety:

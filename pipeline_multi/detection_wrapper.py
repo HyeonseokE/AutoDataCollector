@@ -27,7 +27,7 @@ class SharedDetectionManager:
     3. 각 로봇의 Workspace에서 도달 가능한 객체만 필터링
 
     Returns:
-        {robot_id: {object_name: {"position": [...], "gripper_offset": float, ...}}}
+        {robot_id: {object_name: {"position": [...], ...}}}
     """
 
     def __init__(
@@ -93,7 +93,7 @@ class SharedDetectionManager:
 
         Returns:
             검출된 객체 위치 (world frame)
-            {object_name: {"position": [x,y,z], "gripper_offset": float, ...}}
+            {object_name: {"position": [x,y,z], ...}}
         """
         from run_detect import run_realtime_detection
 
@@ -224,7 +224,7 @@ class SharedDetectionManager:
             filter_by_reachability: 도달 불가능한 위치 필터링 여부
 
         Returns:
-            {robot_id: {object_name: {"position": [...], "gripper_offset": float, ...}}}
+            {robot_id: {object_name: {"position": [...], ...}}}
         """
         # 1. 공유 감지 실행
         detected_positions = self.run_shared_detection(

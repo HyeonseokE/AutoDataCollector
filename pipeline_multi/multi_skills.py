@@ -9,79 +9,10 @@ from typing import List, Union, Optional
 import numpy as np
 
 
-def compute_tcp_offset_for_pin(
-    skills,
-    pin_position_world: Union[List[float], np.ndarray],
-    pick_position_world: Union[List[float], np.ndarray],
-    base_tcp_offset: List[float] = None,
-) -> List[float]:
-    """
-    PIN 위치에 맞는 tcp_offset 계산 (XY offset만 적용, Z는 무시)
-
-    World 좌표계에서 PIN과 CENTER의 XY offset을 계산하여
-    TCP offset에 직접 반영합니다.
-
-    Args:
-        skills: LeRobotSkills 인스턴스
-        pin_position_world: PIN 위치 [x, y, z] (world frame)
-        pick_position_world: PICK 위치 (CENTER) [x, y, z] (world frame)
-        base_tcp_offset: 기본 TCP offset (None이면 skills.tcp_offset 사용)
-
-    Returns:
-        tcp_offset_override: PIN에 맞춘 tcp offset [x, y, z]
-
-    Example:
-        # Pick at CENTER
-        execute_multi_pick_object(skills, sync_barrier, center_pos, gripper_offset=...)
-
-        # Compute tcp_offset for PIN alignment
-        assembly_tcp_offset = compute_tcp_offset_for_pin(
-            skills,
-            pin_position_world=gray_circle["position"],
-            pick_position_world=pink_part["position"],
-        )
-
-        # Place with PIN-aligned TCP
-        skills.move_to_position(
-            target_pos,
-            gripper_offset=...,
-            tcp_offset_override=assembly_tcp_offset,
-        )
-    """
-    pin_pos = np.array(pin_position_world)
-    pick_pos = np.array(pick_position_world)
-
-    # Calculate pin offset (PIN - CENTER), XY only
-    pin_offset_x = pin_pos[0] - pick_pos[0]
-    pin_offset_y = pin_pos[1] - pick_pos[1]
-    # Z offset is ignored
-
-    skills._log(f"\n[Compute TCP Offset for PIN]")
-    skills._log(f"  PIN position: [{pin_pos[0]:.4f}, {pin_pos[1]:.4f}, {pin_pos[2]:.4f}]")
-    skills._log(f"  PICK position: [{pick_pos[0]:.4f}, {pick_pos[1]:.4f}, {pick_pos[2]:.4f}]")
-    skills._log(f"  XY offset: [{pin_offset_x:.4f}, {pin_offset_y:.4f}]")
-
-    # Base TCP offset
-    if base_tcp_offset is None:
-        base_tcp_offset = getattr(skills, 'tcp_offset', [-0.02, 0.0, 0.0])
-
-    # assembly_tcp_offset = base + pin_offset (XY only, Z unchanged)
-    tcp_offset_override = [
-        base_tcp_offset[0] + pin_offset_x,
-        base_tcp_offset[1] + pin_offset_y,
-        base_tcp_offset[2],  # Z unchanged
-    ]
-
-    skills._log(f"  Base TCP offset: {base_tcp_offset}")
-    skills._log(f"  TCP offset override: {tcp_offset_override}")
-    return tcp_offset_override
-
-
 def execute_multi_pick_object(
     skills,
     sync_barrier,
     object_position: Union[List[float], np.ndarray],
-    gripper_offset: float = 0.0,
 ) -> bool:
     """
     멀티로봇용 pick 스킬 - gripper close 직전에 동기화
@@ -90,7 +21,6 @@ def execute_multi_pick_object(
         skills: LeRobotSkills 인스턴스
         sync_barrier: SyncBarrier 인스턴스
         object_position: 객체 위치 [x, y, z]
-        gripper_offset: 그리퍼 오프셋
 
     Returns:
         성공 여부
@@ -108,7 +38,7 @@ def execute_multi_pick_object(
     skills._log(f"  Pick point: {pick_z*100:.1f}cm")
 
     # Move to pick position
-    move_success = skills.move_to_position(pick_position, gripper_offset=gripper_offset)
+    move_success = skills.move_to_position(pick_position)
     if not move_success:
         print("Warning: Failed to reach pick position, but continuing for sync")
 
@@ -136,9 +66,7 @@ def execute_multi_place_object(
     skills,
     sync_barrier,
     place_position: Union[List[float], np.ndarray],
-    gripper_offset: float = 0.0,
     is_table: bool = True,
-    gripper_open_ratio: float = 0.3,
 ) -> bool:
     """
     멀티로봇용 place 스킬 - gripper open 직전에 동기화
@@ -147,9 +75,7 @@ def execute_multi_place_object(
         skills: LeRobotSkills 인스턴스
         sync_barrier: SyncBarrier 인스턴스
         place_position: 목표 위치 [x, y, z]
-        gripper_offset: 그리퍼 오프셋
         is_table: 테이블에 놓을지 여부
-        gripper_open_ratio: 그리퍼 열림 비율 (0.0-1.0)
 
     Returns:
         성공 여부
@@ -175,7 +101,6 @@ def execute_multi_place_object(
 
     # Move to place position
     move_success = skills.move_to_position(final_position,
-                                           gripper_offset=gripper_offset,
                                            target_pitch=saved_pitch)
     if not move_success:
         print("Warning: Failed to reach place position, but continuing for sync")
@@ -185,7 +110,7 @@ def execute_multi_place_object(
     sync_barrier.wait("place_ready")
 
     # Open gripper (동기화됨)
-    skills.gripper_open(ratio=gripper_open_ratio)
+    skills.gripper_open()
 
     if not move_success:
         return False

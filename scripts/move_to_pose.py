@@ -69,7 +69,7 @@ def load_initial_state(robot_id: str, initial_state_path: str = None) -> dict:
         path = Path(initial_state_path)
     else:
         # Default: configs/initial_state/{robot_id}_initial_state.json
-        path = PROJECT_ROOT / "configs" / "initial_state" / f"{robot_id}_initial_state.json"
+        path = PROJECT_ROOT / "robot_configs" / "initial_state" / f"{robot_id}_initial_state.json"
 
     if not path.exists():
         return None

@@ -32,7 +32,7 @@ class MultiCameraManager:
 
         configs = [
             RealSenseCameraConfig(name="realsense", width=640, height=480),
-            OpenCVCameraConfig(name="innomaker", device_path="/dev/video6"),
+            OpenCVCameraConfig(name="innomaker", device_path="/dev/video7"),
         ]
 
         manager = MultiCameraManager(configs)

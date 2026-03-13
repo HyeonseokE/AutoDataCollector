@@ -542,6 +542,7 @@ def lerobot_reset_code_gen_multi_turn(
     workspace=None,
     current_episode: int = 1,
     total_episodes: int = 1,
+    codegen_model: str = None,
 ) -> Tuple[str, Dict, Dict, Dict, Dict]:
     """
     VLM Multi-Turn Reset 코드 생성 파이프라인.
@@ -877,23 +878,32 @@ def lerobot_reset_code_gen_multi_turn(
         elif isinstance(info, (list, tuple)) and len(info) >= 3:
             print(f"    + {name}: [{info[0]:.4f}, {info[1]:.4f}, {info[2]:.4f}]")
 
-    # ── CodeGen Turn: Reset 코드 생성 ──
-    print(f"\n{YELLOW}" + _log("Code Generation", step="CodeGen") + f"{RESET_COLOR}")
-    codegen_prompt = turn_codegen_reset_prompt(
-        target_positions=target_positions,
-        current_positions={
-            name: grippable_objects[name]
-            for name in grippable_objects
-            if name in target_positions
-        },
-        robot_id=robot_id,
-        is_random_reset=(reset_mode == "random"),
-        workspace_bounds=ws_bounds,
-        all_points=all_points,
-    )
+    # ── Context Summary Turn (Session 1 마지막) ──
+    from .prompt import reset_context_summary_prompt, codegen_reset_with_context_prompt
+    print(f"\n{YELLOW}" + _log("Context Summary (handoff)", step="Summary") + f"{RESET_COLOR}")
+    summary_resp = gemini_chat_send(chat, gen_config,
+        {"text": reset_context_summary_prompt()},
+        turn_label="Context Summary (Reset)")
+    print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
 
-    codegen_resp = gemini_chat_send(chat, gen_config,
-        {"text": codegen_prompt},
+    # ── Code Generation (새 Session 2) ──
+    session2_model = codegen_model or llm_model
+    print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET_COLOR}")
+    codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
+    codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
+        {"text": codegen_reset_with_context_prompt(
+            context_summary=summary_resp,
+            target_positions=target_positions,
+            current_positions={
+                name: grippable_objects[name]
+                for name in grippable_objects
+                if name in target_positions
+            },
+            robot_id=robot_id,
+            is_random_reset=(reset_mode == "random"),
+            workspace_bounds=ws_bounds,
+            all_points=all_points,
+        )},
         turn_label="CodeGen (Reset)")
 
     code = extract_code_from_response(codegen_resp)

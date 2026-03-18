@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/distribute_chocolate_pies1"
+dataset_repo_id: "local/distribute_chocolatepies"
 recording_fps: 30
 robot_type: "so101"
 
@@ -73,3 +73,8 @@ observation_features:
     robot_xyzrpy: true    # observation.ee_pos.robot_xyzrpy (robot base_link 좌표계 EE 자세 [x,y,z,r,p,y])
     world_xyzrpy: false   # observation.ee_pos.world_xyzrpy (world 좌표계 EE 자세 [x,y,z,r,p,y])
   gripper_binary: true    # observation.gripper_binary (그리퍼 열림=1.0 / 닫힘=0.0)
+  radian:
+    state: true            # observation.radian.state (캘리브레이션 중앙 기준 관절 위치, 라디안)
+    action: true           # observation.radian.action (캘리브레이션 중앙 기준 목표 관절 위치, 라디안)
+    state_urdf0: true      # observation.radian.state_urdf0 (URDF 0° 기준 관절 위치, 라디안)
+    action_urdf0: true     # observation.radian.action_urdf0 (URDF 0° 기준 목표 관절 위치, 라디안)

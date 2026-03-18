@@ -282,12 +282,13 @@ class RecordingContext:
                 print(f"[RecordingContext] Kinematics registered for observation features: {enabled}")
 
     @classmethod
-    def _compute_observation_extras(cls, state: np.ndarray) -> Dict[str, Any]:
+    def _compute_observation_extras(cls, state: np.ndarray, action: np.ndarray = None) -> Dict[str, Any]:
         """
         현재 로봇 상태에서 observation extras 계산 (FK 기반 EE 자세 등).
 
         Args:
             state: 현재 로봇 상태 (6 joints, normalized -100~+100)
+            action: 타겟 액션 (6 joints, normalized -100~+100)
 
         Returns:
             Dict: enabled된 observation feature들의 {key: value} 딕셔너리
@@ -298,6 +299,10 @@ class RecordingContext:
         need_robot_ee = obs_enabled.get("observation.ee_pos.robot_xyzrpy", False)
         need_world_ee = obs_enabled.get("observation.ee_pos.world_xyzrpy", False)
         need_gripper = obs_enabled.get("observation.gripper_binary", False)
+        need_radian_state = obs_enabled.get("observation.radian.state", False)
+        need_radian_action = obs_enabled.get("observation.radian.action", False)
+        need_radian_state_urdf0 = obs_enabled.get("observation.radian.state_urdf0", False)
+        need_radian_action_urdf0 = obs_enabled.get("observation.radian.action_urdf0", False)
 
         # FK 기반 EE 자세 계산
         if (need_robot_ee or need_world_ee) and cls._kinematics is not None and cls._calibration_limits is not None:
@@ -351,6 +356,55 @@ class RecordingContext:
             extras["observation.gripper_binary"] = np.array(
                 [1.0 if gripper_norm > 0 else 0.0], dtype=np.float32
             )
+
+        # Radian conversion (캘리브레이션 중앙 기준 + URDF 0° 기준)
+        need_any_radian = need_radian_state or need_radian_action or need_radian_state_urdf0 or need_radian_action_urdf0
+        if need_any_radian and cls._calibration_limits is not None:
+            half_range = cls._calibration_limits.half_range_radians
+            offset_norm = cls._calibration_limits.offset_normalized
+            try:
+                # --- 캘리브레이션 중앙 기준: norm / 100 * half_range ---
+                if need_radian_state:
+                    arm_norm = np.asarray(state[:5], dtype=np.float64)
+                    arm_rad = (arm_norm / 100.0) * half_range
+                    gripper_norm = float(state[5]) if len(state) > 5 else 0.0
+                    gripper_rad = gripper_norm / 100.0 * np.pi
+                    extras["observation.radian.state"] = np.concatenate(
+                        [arm_rad, [gripper_rad]]
+                    ).astype(np.float32)
+
+                if need_radian_action and action is not None:
+                    act_arm_norm = np.asarray(action[:5], dtype=np.float64)
+                    act_arm_rad = (act_arm_norm / 100.0) * half_range
+                    act_gripper_norm = float(action[5]) if len(action) > 5 else 0.0
+                    act_gripper_rad = act_gripper_norm / 100.0 * np.pi
+                    extras["observation.radian.action"] = np.concatenate(
+                        [act_arm_rad, [act_gripper_rad]]
+                    ).astype(np.float32)
+
+                # --- URDF 0° 기준: (norm - offset) / 100 * half_range ---
+                if need_radian_state_urdf0:
+                    arm_norm = np.asarray(state[:5], dtype=np.float64)
+                    arm_rad = ((arm_norm - offset_norm) / 100.0) * half_range
+                    gripper_norm = float(state[5]) if len(state) > 5 else 0.0
+                    gripper_rad = gripper_norm / 100.0 * np.pi
+                    extras["observation.radian.state_urdf0"] = np.concatenate(
+                        [arm_rad, [gripper_rad]]
+                    ).astype(np.float32)
+
+                if need_radian_action_urdf0 and action is not None:
+                    act_arm_norm = np.asarray(action[:5], dtype=np.float64)
+                    act_arm_rad = ((act_arm_norm - offset_norm) / 100.0) * half_range
+                    act_gripper_norm = float(action[5]) if len(action) > 5 else 0.0
+                    act_gripper_rad = act_gripper_norm / 100.0 * np.pi
+                    extras["observation.radian.action_urdf0"] = np.concatenate(
+                        [act_arm_rad, [act_gripper_rad]]
+                    ).astype(np.float32)
+            except Exception:
+                for key in ["observation.radian.state", "observation.radian.action",
+                            "observation.radian.state_urdf0", "observation.radian.action_urdf0"]:
+                    if obs_enabled.get(key, False) and key not in extras:
+                        extras[key] = np.zeros(6, dtype=np.float32)
 
         return extras
 
@@ -505,8 +559,8 @@ class RecordingContext:
                 cls._camera_errors += 1
                 return False
 
-            # FK 기반 observation extras 계산 (EE 자세, gripper binary)
-            obs_extras = cls._compute_observation_extras(state)
+            # FK 기반 observation extras 계산 (EE 자세, gripper binary, radian)
+            obs_extras = cls._compute_observation_extras(state, action)
 
             # 멀티 카메라 레코딩 (통합) + 스킬 라벨 + observation extras
             cls._recorder.record_frame_multi(

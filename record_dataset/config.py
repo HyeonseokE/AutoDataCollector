@@ -129,6 +129,10 @@ OBSERVATION_FEATURE_KEYS = [
     "observation.ee_pos.robot_xyzrpy",
     "observation.ee_pos.world_xyzrpy",
     "observation.gripper_binary",
+    "observation.radian.state",
+    "observation.radian.action",
+    "observation.radian.state_urdf0",
+    "observation.radian.action_urdf0",
 ]
 
 
@@ -234,10 +238,18 @@ def load_observation_features_from_yaml(yaml_path: str = None) -> Dict[str, bool
         if isinstance(ep, bool):
             ep = {"robot_xyzrpy": ep, "world_xyzrpy": ep}
 
+        rd = of.get("radian", {})
+        if isinstance(rd, bool):
+            rd = {"state": rd, "action": rd, "state_urdf0": rd, "action_urdf0": rd}
+
         return {
             "observation.ee_pos.robot_xyzrpy": ep.get("robot_xyzrpy", False),
             "observation.ee_pos.world_xyzrpy": ep.get("world_xyzrpy", False),
             "observation.gripper_binary": of.get("gripper_binary", False),
+            "observation.radian.state": rd.get("state", False),
+            "observation.radian.action": rd.get("action", False),
+            "observation.radian.state_urdf0": rd.get("state_urdf0", False),
+            "observation.radian.action_urdf0": rd.get("action_urdf0", False),
         }
     except Exception as e:
         print(f"[Config] Warning: Failed to load observation_features from {yaml_path}: {e}")
@@ -313,6 +325,22 @@ def build_dataset_features(
         "observation.gripper_binary": {
             "dtype": "float32", "shape": (1,),
             "names": None,
+        },
+        "observation.radian.state": {
+            "dtype": "float32", "shape": (NUM_JOINTS,),
+            "names": JOINT_NAMES,
+        },
+        "observation.radian.action": {
+            "dtype": "float32", "shape": (NUM_JOINTS,),
+            "names": JOINT_NAMES,
+        },
+        "observation.radian.state_urdf0": {
+            "dtype": "float32", "shape": (NUM_JOINTS,),
+            "names": JOINT_NAMES,
+        },
+        "observation.radian.action_urdf0": {
+            "dtype": "float32", "shape": (NUM_JOINTS,),
+            "names": JOINT_NAMES,
         },
     }
 

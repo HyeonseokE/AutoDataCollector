@@ -54,7 +54,6 @@ def pull(
     pull_distance: float = 0.05,
     pull_height: Optional[float] = None,
     pull_duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     object_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -97,10 +96,6 @@ def pull(
                        - None: 거리 기반 자동 계산 (5cm/s, 최소 2초)
                        - 서랍: 2~3초 (천천히, 안정적으로)
                        - 빠른 당기기: 1~2초
-
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-                        - 0.0: gripper_frame_link 기준 IK
-                        - >0: TCP frame 기준 IK
 
         object_name: 당길 대상 이름 (선택). default=None
                      - 레코딩 시 subgoal 라벨에 사용
@@ -157,7 +152,7 @@ def pull(
         start=pull_start,
         end=pull_end,
         duration=pull_duration,
-        gripper_offset=gripper_offset,
+
         maintain_pitch=True,
         target_name=object_name,
         skill_description=skill_description or f"{desc_prefix}: pulling",

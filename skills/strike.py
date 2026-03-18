@@ -58,7 +58,6 @@ def strike(
     num_strikes: int = 1,
     strike_interval: float = 0.3,
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     target_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -117,8 +116,6 @@ def strike(
 
         duration: wind-up 이동 시간 (단위: 초). default=None
 
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-
         target_name: 타격 대상 이름 (선택). default=None
                      - 예: "nail", "button", "xylophone key"
 
@@ -147,7 +144,6 @@ def strike(
     if not skills.move_to_position(
         position=[pos[0], pos[1], wind_up_height],
         duration=duration,
-        gripper_offset=gripper_offset,
         maintain_pitch=True,
         target_name=target_name,
         skill_description=f"{desc_prefix}: wind up",
@@ -170,7 +166,7 @@ def strike(
             strike_success = skills.move_to_position(
                 position=[pos[0], pos[1], strike_height],
                 duration=strike_duration,
-                gripper_offset=gripper_offset,
+
                 maintain_pitch=True,
                 target_name=target_name,
                 skill_description=(
@@ -190,7 +186,6 @@ def strike(
         skills.move_to_position(
             position=[pos[0], pos[1], wind_up_height],
             duration=retract_duration,
-            gripper_offset=gripper_offset,
             maintain_pitch=True,
             target_name=target_name,
             skill_description=f"{desc_prefix}: retract {strike_num}",

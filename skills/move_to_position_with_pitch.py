@@ -55,7 +55,6 @@ def move_to_position_with_pitch(
     position: Union[List[float], np.ndarray],
     pitch_deg: float,
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     target_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -84,11 +83,6 @@ def move_to_position_with_pitch(
                   - None이면 skills 내부 기본값(movement_duration) 사용
                   - 작을수록 빠르게 이동, 클수록 느리고 안정적
 
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-                        - 0.0: gripper_frame_link 기준 IK
-                        - >0: TCP frame (gripper 끝에서 -4cm) 기준 IK
-                        - pick/place 시 물체를 정확히 잡으려면 >0 설정
-
         target_name: 대상 물체 이름 (선택). default=None
                      - 레코딩 시 subgoal 라벨에 사용
                      - 예: "red block", "blue dish"
@@ -105,7 +99,6 @@ def move_to_position_with_pitch(
     return skills.move_to_position(
         position=position,
         duration=duration,
-        gripper_offset=gripper_offset,
         target_pitch=pitch_rad,
         target_name=target_name,
         skill_description=skill_description,

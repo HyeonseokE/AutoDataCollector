@@ -143,7 +143,7 @@ Turn 1 (bbox detection)
 Turn 2 (crop pointing, per object)
   → all_points: [{"px": 320, "py": 240, "role": "grasp", ...}, ...]
   → _points_to_positions() converts pixel → world coordinates
-  → positions: {"red block": {"position": [x,y,z], "gripper_offset": 0.02}}
+  → positions: {"red block": {"position": [x,y,z]}}
 
   ↓ (passed to Turn 3 code generation as structured data)
 ```

@@ -68,7 +68,6 @@ def push_object(
     run_up_distance: float = 0.04,
     approach_height: float = 0.20,
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     object_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -101,8 +100,6 @@ def push_object(
 
         duration: 밀기 구간 이동 시간 (단위: 초). default=None
                   - None: 거리 기반 자동 계산 (5cm/s, 최소 2초)
-
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
 
         object_name: 밀 대상 물체 이름 (선택). default=None
 
@@ -146,7 +143,7 @@ def push_object(
     skills._log("\n[Step 1] Descend to pre-contact position")
     if not skills.move_to_position(
         position=[pre_contact[0], pre_contact[1], push_height],
-        gripper_offset=gripper_offset,
+
         maintain_pitch=False,
         target_name=object_name,
         skill_description=f"{desc_prefix}: descend to pre-contact",
@@ -166,7 +163,7 @@ def push_object(
         start=[pre_contact[0], pre_contact[1], push_height],
         end=[end_pos[0], end_pos[1], push_height],
         duration=duration,
-        gripper_offset=gripper_offset,
+
         maintain_pitch=True,
         target_name=object_name,
         skill_description=skill_description or f"{desc_prefix}: pushing",
@@ -180,7 +177,7 @@ def push_object(
     skills._log(f"\n[Step 3] Retract from object (opposite push direction -{run_up_distance*100:.0f}cm)")
     skills.move_to_position(
         position=[retract_pos[0], retract_pos[1], push_height],
-        gripper_offset=gripper_offset,
+
         maintain_pitch=False,
         target_name=object_name,
         skill_description=f"{desc_prefix}: retract away from object",
@@ -190,7 +187,7 @@ def push_object(
     skills._log(f"\n[Step 4] Retreat to approach height ({approach_height*100:.0f}cm)")
     skills.move_to_position(
         position=[retract_pos[0], retract_pos[1], approach_height],
-        gripper_offset=gripper_offset,
+
         maintain_pitch=False,
         target_name=object_name,
         skill_description=f"{desc_prefix}: retreat after push",

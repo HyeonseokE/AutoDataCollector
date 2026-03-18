@@ -61,7 +61,6 @@ def shake(
     shake_height: float = 0.10,
     shake_speed: Optional[float] = None,
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     object_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -112,8 +111,6 @@ def shake(
                      - 0.5: 천천히
 
         duration: lift 이동 시간 (단위: 초). default=None
-
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
 
         object_name: 흔들 대상 이름 (선택). default=None
                      - 예: "bottle", "spray can"
@@ -179,7 +176,7 @@ def shake(
     if not skills.move_to_position(
         position=shake_center.tolist(),
         duration=duration,
-        gripper_offset=gripper_offset,
+
         target_name=object_name,
         skill_description=f"{desc_prefix}: lift to shake height",
     ):
@@ -204,7 +201,7 @@ def shake(
         success = skills.move_to_position(
             position=target.tolist(),
             duration=shake_speed,
-            gripper_offset=gripper_offset,
+    
             target_name=object_name,
             skill_description=(
                 skill_description
@@ -219,7 +216,7 @@ def shake(
     skills.move_to_position(
         position=shake_center.tolist(),
         duration=shake_speed,
-        gripper_offset=gripper_offset,
+
         target_name=object_name,
         skill_description=f"{desc_prefix}: return to center",
     )

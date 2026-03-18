@@ -81,22 +81,35 @@ class RealSenseD435:
 
         return color_image, depth_image
 
-    def get_depth_at_pixel(self, u: int, v: int, depth_image: np.ndarray) -> float:
+    def get_depth_at_pixel(self, u: int, v: int, depth_image: np.ndarray, patch_size: int = 3) -> float:
         """
-        특정 픽셀의 깊이값 반환 (미터 단위)
+        특정 픽셀 주변 영역의 median 깊이값 반환 (미터 단위)
 
         Args:
             u: x 픽셀 좌표
             v: y 픽셀 좌표
             depth_image: 깊이 이미지
+            patch_size: 주변 패치 크기 (patch_size x patch_size, 홀수)
 
         Returns:
-            깊이값 (meters)
+            깊이값 (meters), median 기반으로 노이즈에 강건
         """
-        if 0 <= u < self.width and 0 <= v < self.height:
-            depth_mm = depth_image[v, u]
-            return depth_mm * 0.001  # mm to meters
-        return 0.0
+        if not (0 <= u < self.width and 0 <= v < self.height):
+            return 0.0
+
+        half = patch_size // 2
+        v_min = max(0, v - half)
+        v_max = min(self.height, v + half + 1)
+        u_min = max(0, u - half)
+        u_max = min(self.width, u + half + 1)
+
+        patch = depth_image[v_min:v_max, u_min:u_max]
+        valid = patch[patch > 0]
+        if len(valid) == 0:
+            return 0.0
+
+        depth_mm = float(np.median(valid))
+        return depth_mm * 0.001  # mm to meters
 
     def pixel_to_camera_coords(self, u: int, v: int, depth_m: float) -> Tuple[float, float, float]:
         """

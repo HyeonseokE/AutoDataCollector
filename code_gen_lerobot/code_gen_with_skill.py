@@ -51,8 +51,8 @@ def lerobot_code_gen(
         instruction: 자연어 목표 (예: "빨간 컵을 파란 상자에 놓아라")
         object_queries: 디텍션 ON시 찾을 객체 리스트 (예: ["red cup", "blue box"])
         object_positions: 디텍션 OFF시 직접 전달할 위치 딕셔너리
-                         Extended format: {"name": {"position": [x,y,z], "gripper_offset": float, ...}}
-                         Legacy format: {"name": [x,y,z]} (gripper_offset will be 0.02 default)
+                         Extended format: {"name": {"position": [x,y,z], ...}}
+                         Legacy format: {"name": [x,y,z]}
         use_detection: True면 object_detection으로 위치 획득, False면 object_positions 사용
         detection_timeout: 디텍션 타임아웃 (초)
         llm_model: LLM 모델 (예: "gpt-4o-mini", "gemini-1.5-flash")
@@ -77,8 +77,8 @@ def lerobot_code_gen(
         code = lerobot_code_gen(
             instruction="빨간 컵을 파란 상자에 놓아라",
             object_positions={
-                "red cup": {"position": [0.15, 0.05, 0.02], "gripper_offset": 0.015},
-                "blue box": {"position": [0.20, -0.05, 0.03], "gripper_offset": 0.0},
+                "red cup": {"position": [0.15, 0.05, 0.02]},
+                "blue box": {"position": [0.20, -0.05, 0.03]},
             },
             use_detection=False,
         )
@@ -135,7 +135,7 @@ def lerobot_code_gen(
         positions = object_positions
 
     # Normalize to extended format if legacy format is used
-    # Legacy: {"name": [x,y,z]} → Extended: {"name": {"position": [x,y,z], "gripper_offset": 0.01}}
+    # Legacy: {"name": [x,y,z]} → Extended: {"name": {"position": [x,y,z]}}
     normalized_positions = {}
     for name, info in positions.items():
         if info is None:
@@ -144,10 +144,9 @@ def lerobot_code_gen(
             # Already extended format
             normalized_positions[name] = info
         elif isinstance(info, (list, tuple)) and len(info) >= 3:
-            # Legacy format - convert to extended with default gripper_offset
+            # Legacy format - convert to extended
             normalized_positions[name] = {
                 "position": list(info[:3]),
-                "gripper_offset": 0.01,  # default 2cm
             }
         else:
             normalized_positions[name] = None
@@ -160,7 +159,6 @@ def lerobot_code_gen(
     for name, info in positions.items():
         if info:
             pos = info["position"]
-            offset = info.get("gripper_offset", 0.0)
             bbox = info.get("bbox_size_m")
             grippable = info.get("grippable", True)
 
@@ -175,8 +173,8 @@ def lerobot_code_gen(
             else:
                 size_info = "size=N/A"
 
-            # grippable 및 offset 정보
-            grip_info = f"grippable={grippable}, offset={offset*1000:.1f}mm"
+            # grippable 정보
+            grip_info = f"grippable={grippable}"
 
             print(f"    ✓ {name}: {base_info}, {size_info}, {grip_info}")
         else:
@@ -303,7 +301,7 @@ def _points_to_positions(
         camera: depth 카메라 (3D 변환용)
 
     Returns:
-        {object_label: {"position": [x,y,z], "gripper_offset": float, "pixel": [px,py],
+        {object_label: {"position": [x,y,z], "pixel": [px,py],
                          "points": {"label": [x,y,z], ...}}}
     """
     # Object별로 모든 point 수집 + grasp point 선택
@@ -323,43 +321,72 @@ def _points_to_positions(
     if not grasp_by_object:
         return {}
 
-    # CoordinateTransformer 로드
+    # Pix2Robot 캘리브레이션 로드 (pixel → robot 직접 변환)
+    pix2robot = None
+    try:
+        from pix2robot_calibrator import Pix2RobotCalibrator
+        calib_path = Path(__file__).parent.parent / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
+        if calib_path.exists():
+            pix2robot = Pix2RobotCalibrator(robot_id=robot_id)
+            if pix2robot.load(str(calib_path)):
+                print(f"  [CropPoint] Pix2Robot calibration loaded ({len(pix2robot.pixel_points)} points)")
+            else:
+                pix2robot = None
+    except Exception as e:
+        print(f"  [CropPoint] Pix2Robot not available: {e}")
+
+    # Fallback: 기존 CoordinateTransformer (pix2robot가 없을 때)
     transformer = None
     use_3d = False
-    try:
-        from object_detection.localization.coordinate_transform import CoordinateTransformer
-        calib_path = Path(__file__).parent.parent / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
-        if calib_path.exists():
-            transformer = CoordinateTransformer(str(calib_path))
-            if not transformer.is_ready:
-                transformer = None
-            else:
-                use_3d = (transformer.transform_matrix_3d is not None
-                          and transformer.camera_intrinsics is not None
-                          and camera is not None)
-                mode = "3D" if use_3d else "2D"
-                print(f"  [CropPoint] CoordinateTransformer [{mode}]")
-    except Exception as e:
-        print(f"  [CropPoint] CoordinateTransformer not available: {e}")
+    if pix2robot is None:
+        try:
+            from object_detection.localization.coordinate_transform import CoordinateTransformer
+            calib_path = Path(__file__).parent.parent / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
+            if calib_path.exists():
+                transformer = CoordinateTransformer(str(calib_path))
+                if not transformer.is_ready:
+                    transformer = None
+                else:
+                    use_3d = (transformer.transform_matrix_3d is not None
+                              and transformer.camera_intrinsics is not None
+                              and camera is not None)
+                    mode = "3D" if use_3d else "2D"
+                    print(f"  [CropPoint] Fallback: CoordinateTransformer [{mode}]")
+        except Exception as e:
+            print(f"  [CropPoint] CoordinateTransformer not available: {e}")
 
-    # Depth 프레임 (3D 변환용)
+    # Depth 프레임 (pix2robot 높이 추정 + fallback 3D 변환용)
     depth_frame = None
-    if use_3d and camera is not None:
+    if camera is not None:
         try:
             _, depth_frame = camera.get_frames()
-            if depth_frame is None:
+            if depth_frame is None and use_3d:
                 use_3d = False
         except Exception:
-            use_3d = False
+            if use_3d:
+                use_3d = False
 
-    # pixel→world 변환 헬퍼
+    # pixel→robot 변환 헬퍼
     Z_MAX = 0.15  # 15cm — 테이블 위 물체 최대 높이
     Z_DEFAULT = 0.02  # z 이상 시 대체값 (2cm)
 
-    def _pixel_to_world(px, py):
+    def _pixel_to_robot(px, py):
+        # 1) Pix2Robot 직접 변환 (depth로 물체 높이 추정)
+        if pix2robot is not None:
+            try:
+                obj_depth = None
+                if depth_frame is not None and camera is not None:
+                    obj_depth = camera.get_depth_at_pixel(px, py, depth_frame)
+                    if obj_depth <= 0.05:
+                        obj_depth = None
+                pos = pix2robot.pixel_to_robot(px, py, depth_m=obj_depth)
+                return pos, True
+            except Exception as e:
+                print(f"    pix2robot failed ({px},{py}): {e}")
+
+        # 2) Fallback: 기존 pix2world 변환
         if transformer:
             try:
-                # 3D 변환: depth + 변환행렬 (z 부호 반전은 coordinate_transform 내부에서 처리)
                 if use_3d and depth_frame is not None:
                     obj_depth_m = camera.get_depth_at_pixel(px, py, depth_frame)
                     if obj_depth_m > 0.05:
@@ -368,17 +395,14 @@ def _points_to_positions(
                         if 0.0 <= pos[2] <= Z_MAX:
                             return pos, True
                         else:
-                            print(f"    [Z-FIX] ({px},{py}) z={pos[2]*100:.1f}cm out of range, "
-                                  f"clamping to {Z_DEFAULT*100:.0f}cm")
                             pos[2] = Z_DEFAULT
                             return pos, True
 
-                # 2D fallback
                 wx, wy, _ = transformer.pixel_to_world_2d(px, py)
                 pos = [wx / 100.0, wy / 100.0, Z_DEFAULT]
                 return pos, True
             except Exception as e:
-                print(f"    pixel→world failed ({px},{py}): {e}")
+                print(f"    pixel→world fallback failed ({px},{py}): {e}")
         return [0.0, 0.0, 0.03], False
 
     # positions 구성
@@ -386,11 +410,10 @@ def _points_to_positions(
     for obj_label, grasp_pt in grasp_by_object.items():
         # 기본 position (grasp point)
         gpx, gpy = grasp_pt["px"], grasp_pt["py"]
-        world_pos, success = _pixel_to_world(gpx, gpy)
+        world_pos, success = _pixel_to_robot(gpx, gpy)
 
         positions[obj_label] = {
             "position": world_pos,
-            "gripper_offset": 0.01,
             "pixel": [gpx, gpy],
         }
         if not success:
@@ -401,7 +424,7 @@ def _points_to_positions(
         for pt in points_by_object.get(obj_label, []):
             pt_label = pt.get("label", "unknown")
             pt_px, pt_py = pt["px"], pt["py"]
-            pt_world, pt_success = _pixel_to_world(pt_px, pt_py)
+            pt_world, pt_success = _pixel_to_robot(pt_px, pt_py)
             if pt_success:
                 obj_points[pt_label] = pt_world
         if obj_points:
@@ -733,7 +756,6 @@ def lerobot_code_gen_multi_turn(
                 if fb is not None:
                     fb_pos = fb["position"] if isinstance(fb, dict) and "position" in fb else fb
                     info["position"] = list(fb_pos[:3])
-                    info["gripper_offset"] = fb.get("gripper_offset", 0.01) if isinstance(fb, dict) else 0.01
                     info.pop("_needs_world_coords", None)
 
     for name, info in positions.items():
@@ -827,7 +849,8 @@ def lerobot_code_gen_multi_turn(
     codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
         {"text": codegen_with_context_prompt(
             instruction=instruction, robot_id=robot_id,
-            all_points=all_points, context_summary=summary_resp)},
+            all_points=all_points, context_summary=summary_resp,
+            positions=positions)},
         turn_label="Code Gen")
     code = extract_code_from_response(codegen_resp)
     assert code, "Failed to extract code from Code Gen response"

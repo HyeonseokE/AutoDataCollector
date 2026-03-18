@@ -263,7 +263,6 @@ class SkillsRecordingWrapper:
         position: Union[List[float], np.ndarray],
         duration: Optional[float] = None,
         maintain_wrist_roll: bool = True,
-        gripper_offset: float = 0.0,
         maintain_pitch: bool = False,
     ) -> bool:
         """지정 위치로 이동"""
@@ -276,7 +275,6 @@ class SkillsRecordingWrapper:
                 position=position,
                 duration=duration,
                 maintain_wrist_roll=maintain_wrist_roll,
-                gripper_offset=gripper_offset,
                 maintain_pitch=maintain_pitch,
             )
 

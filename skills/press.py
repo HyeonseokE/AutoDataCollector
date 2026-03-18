@@ -66,7 +66,6 @@ def press(
     hold_time: float = 0.3,
     max_press_torque: int = 400,
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     target_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -127,10 +126,6 @@ def press(
                   - None: skills 내부 기본값(movement_duration) 사용
                   - 누르는 속도(press_duration)와 별도 제어
 
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-                        - 0.0: gripper_frame_link 기준 IK
-                        - >0: TCP frame 기준 IK
-
         target_name: 누를 대상 이름 (선택). default=None
                      - 레코딩 시 subgoal 라벨에 사용
                      - 예: "power button", "switch"
@@ -164,7 +159,7 @@ def press(
     if not skills.move_to_position(
         position=[pos[0], pos[1], contact_height],
         duration=duration,
-        gripper_offset=gripper_offset,
+
         maintain_pitch=False,
         target_name=target_name,
         skill_description=f"{desc_prefix}: descend to contact",
@@ -180,7 +175,7 @@ def press(
         press_success = skills.move_to_position(
             position=[pos[0], pos[1], press_z],
             duration=press_duration,
-            gripper_offset=gripper_offset,
+    
             maintain_pitch=True,
             target_name=target_name,
             skill_description=skill_description or f"{desc_prefix}: pressing down",
@@ -204,7 +199,7 @@ def press(
     skills.move_to_position(
         position=[pos[0], pos[1], contact_height],
         duration=press_duration,
-        gripper_offset=gripper_offset,
+
         maintain_pitch=True,
         target_name=target_name,
         skill_description=f"{desc_prefix}: retract from surface",

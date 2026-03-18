@@ -2,7 +2,6 @@
 Reset Execution Module
 
 Reset execution pipeline for CaP-based robot control.
-Uses object detection to find current positions and restores objects to original positions.
 
 Flow:
 1. Load original_positions from saved execution context
@@ -13,10 +12,6 @@ Flow:
 Reset Modes:
 - "original": Restore objects to their initial positions (default)
 - "random": Shuffle objects to random positions within workspace
-
-Multi-turn mode:
-- Uses VLM crop-then-point pipeline (same as forward)
-- Grounding DINO dependency removed
 """
 
 from .code_gen import (
@@ -37,9 +32,8 @@ from .workspace import (
     is_grippable,
     classify_objects,
     generate_random_positions,
-    compute_workspace_bounds,
     draw_workspace_on_image,
-    GRIPPER_MAX_OPEN_WIDTH,
+    GRIPPER_MAX_OPEN_PX,
 )
 
 __all__ = [
@@ -59,7 +53,6 @@ __all__ = [
     "is_grippable",
     "classify_objects",
     "generate_random_positions",
-    "compute_workspace_bounds",
     "draw_workspace_on_image",
-    "GRIPPER_MAX_OPEN_WIDTH",
+    "GRIPPER_MAX_OPEN_PX",
 ]

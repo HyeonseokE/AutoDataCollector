@@ -80,7 +80,6 @@ def wipe(
     stroke_length: Optional[float] = None,
     wipe_height: float = 0.01,
     stroke_duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     object_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -126,10 +125,6 @@ def wipe(
                          - 모든 stroke에 동일하게 적용
                          - 작을수록 빠르게 닦음 (단, 추종 오차 증가)
 
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-                        - 0.0: gripper_frame_link 기준 IK
-                        - >0: TCP frame 기준 IK
-
         object_name: 닦기 대상 이름 (선택). default=None
                      - 레코딩 시 subgoal 라벨에 사용
                      - 예: "table surface", "spill area"
@@ -174,7 +169,7 @@ def wipe(
     skills._log("\n[Step 1] Descend to wipe height")
     if not skills.move_to_position(
         position=[start_pos[0], start_pos[1], wipe_height],
-        gripper_offset=gripper_offset,
+
         maintain_pitch=True,
         target_name=object_name,
         skill_description=f"{desc_prefix}: descend to surface",
@@ -204,7 +199,7 @@ def wipe(
             start=s_from,
             end=s_to,
             duration=stroke_duration,
-            gripper_offset=gripper_offset,
+    
             maintain_pitch=True,
             target_name=object_name,
             skill_description=(

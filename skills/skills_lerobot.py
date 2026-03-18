@@ -87,7 +87,6 @@ class LeRobotSkills:
         use_deceleration: Enable end deceleration
         verbose: Print debug information
         pick_offset: Fixed offset from object top for pick/place (meters, default 3cm)
-        tcp_offset: TCP (Tool Center Point) offset from gripper_frame_link [x, y, z] in meters.
                    Default is [-0.04, 0, 0] (4cm). Can be customized per task.
     """
 
@@ -97,14 +96,13 @@ class LeRobotSkills:
         self,
         robot_config: str = "robot_configs/robot/so101_robot3.yaml",
         frame: str = "world",
-        gripper_open_pos: float = 85.0,
-        gripper_close_pos: float = -95.0,
+        gripper_open_pos: float = 100.0,
+        gripper_close_pos: float = -100.0,
         movement_duration: float = 3.0,
         use_compensation: bool = True,
         use_deceleration: bool = True,
         verbose: bool = True,
-        pick_offset: float = 0.025,  # Pick/place offset from object top (meters, 2.5cm)
-        tcp_offset: list = None,  # TCP offset [x, y, z] in meters (default: [-0.04, 0, 0])
+        pick_offset: float = 0.015,  # Pick/place offset from object top (meters, 1.5cm)
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
     ):
@@ -130,10 +128,8 @@ class LeRobotSkills:
         # Will be initialized on connect()
         self.config = None
         self.robot: Optional[FeetechController] = None
-        self.kinematics: Optional[KinematicsEngine] = None  # Default (gripper_frame_link)
-        self.kinematics_tcp: Optional[KinematicsEngine] = None  # TCP frame (with offset)
-        self.planner: Optional[TrajectoryPlanner] = None  # Default planner
-        self.planner_tcp: Optional[TrajectoryPlanner] = None  # TCP planner
+        self.kinematics: Optional[KinematicsEngine] = None
+        self.planner: Optional[TrajectoryPlanner] = None
         self.calibration_limits = None
         self.frame_transformer: Optional[FrameTransformer] = None
         self.compensator: Optional[AdaptiveCompensator] = None
@@ -142,29 +138,6 @@ class LeRobotSkills:
         self.free_state: Optional[np.ndarray] = None
         self.free_state_gripper: float = gripper_open_pos
 
-
-        # TCP (Tool Center Point) offset for gripper_offset mode
-        # ═══════════════════════════════════════════════════════════════════
-        # TCP = 실제 작업(물체 파지)이 수행되는 지점
-        # gripper_frame_link = 그리퍼 메커니즘의 기하학적 중심
-        # tcp_offset = gripper_frame_link에서 TCP까지의 오프셋 (로컬 좌표)
-        #
-        # 좌표계 변환 (Onshape CAD → URDF gripper_frame_link):
-        #   Onshape X (손가락)  →  URDF Z
-        #   Onshape Z (위)     →  URDF -X
-        #   Onshape -Z (아래)  →  URDF +X
-        #
-        # [+0.04, 0, 0] 의미:
-        #   - URDF local +X = Onshape -Z (아래, link_gripper 반대 방향)
-        #   - TCP가 gripper_frame_link에서 4cm 아래(손가락 끝 방향)에 위치
-        #   - TCP가 target에 도달하면, gripper 본체는 target 위에 위치
-        #
-        # gripper_offset > 0 일 때:
-        #   - TCP frame으로 IK 계산 → TCP가 target에 도달
-        #   - 결과: 그리퍼 본체는 target보다 위에 위치
-        # ═══════════════════════════════════════════════════════════════════
-        # Use provided tcp_offset or default to -4cm
-        self.tcp_offset = tcp_offset if tcp_offset is not None else [-0.04, 0.0, 0.0]
 
         # Current state
         self.current_gripper_pos = gripper_open_pos
@@ -259,15 +232,6 @@ class LeRobotSkills:
             joint_names=ik_joint_names,
         )
 
-        # TCP kinematics engine (gripper_frame_link + offset)
-        self._log(f"  Creating TCP kinematics (offset: {[x*1000 for x in self.tcp_offset]}mm)")
-        self.kinematics_tcp = KinematicsEngine(
-            str(urdf_path),
-            end_effector_frame=ee_frame,
-            joint_names=ik_joint_names,
-            tcp_offset=self.tcp_offset,
-        )
-
         # Load calibration limits
         calibration_file = self.config.get("calibration_file")
         if calibration_file and Path(calibration_file).exists():
@@ -286,14 +250,6 @@ class LeRobotSkills:
             calibration_limits=self.calibration_limits,
         )
 
-        self.planner_tcp = TrajectoryPlanner(
-            self.kinematics_tcp,
-            max_velocity=1.0,
-            max_acceleration=2.0,
-            interpolation_points=50,
-            calibration_limits=self.calibration_limits,
-        )
-
         # Initialize frame transformer
         frames_file = self.config.get("frames_file")
         if frames_file and Path(frames_file).exists():
@@ -306,7 +262,7 @@ class LeRobotSkills:
             with open(calibration_file, 'r') as f:
                 calib_data = json.load(f)
             for name, data in calib_data.items():
-                motor_id = data['motor_id']
+                motor_id = data.get('motor_id', data.get('id'))
                 calibration_by_id[motor_id] = MotorCalibration(
                     motor_id=motor_id,
                     model=data.get('model', 'sts3215'),
@@ -372,7 +328,7 @@ class LeRobotSkills:
 
         # Initialize workspace with kinematics engine and frame transformer
         self.workspace = BaseWorkspace(self.kinematics, self.frame_transformer)
-        self._log(f"  Workspace: reach [{self.workspace.min_reach:.3f}, {self.workspace.max_reach:.3f}]m, x_min_world={self.workspace.x_min_world:.2f}m")
+        self._log(f"  Workspace: reach [{self.workspace.min_reach:.3f}, {self.workspace.max_reach:.3f}]m")
 
         # Initialize current_gripper_pos with actual position (for correct action recording)
         self.current_gripper_pos = float(self.robot.read_positions(normalize=True)[5])
@@ -539,7 +495,6 @@ class LeRobotSkills:
         Args:
             kinematics: KinematicsEngine to use for FK calculation.
                        If None, uses default self.kinematics (gripper_frame_link).
-                       Pass kinematics_tcp for TCP frame measurements.
 
         Returns:
             Tuple of (normalized_arm, radians_arm, ee_position)
@@ -771,7 +726,7 @@ class LeRobotSkills:
             trajectory: Planner가 계산한 trajectory
             target_position: 목표 위치 (base_link frame)
             description: 로그 설명
-            kinematics: FK용 KinematicsEngine (TCP mode 시 kinematics_tcp 전달)
+            kinematics: FK용 KinematicsEngine
         """
         self._log(f"  {description}")
 
@@ -891,8 +846,8 @@ class LeRobotSkills:
         Returns:
             Dict[str, Dict]: 검출 결과
             {
-                "red part": {"position": [x, y, z], "gripper_offset": 0.045, ...},
-                "pink part": {"position": [x, y, z], "gripper_offset": 0.045, ...},
+                "red part": {"position": [x, y, z], ...},
+                "pink part": {"position": [x, y, z], ...},
             }
             검출 실패한 객체는 None
 
@@ -1016,10 +971,8 @@ class LeRobotSkills:
         position: Union[List[float], np.ndarray],
         duration: Optional[float] = None,
         maintain_wrist_roll: bool = True,
-        gripper_offset: float = 0.0,
         maintain_pitch: bool = False,
         target_pitch: Optional[float] = None,
-        tcp_offset_override: Optional[List[float]] = None,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
     ) -> bool:
@@ -1035,20 +988,10 @@ class LeRobotSkills:
             position: Target [x, y, z] in meters (in self.frame coordinate)
             duration: Movement duration (uses default if None)
             maintain_wrist_roll: Maintain wrist_roll joint during movement (default: True)
-            gripper_offset: Gripper offset toggle for pick operations (default: 0.0).
-                           When > 0, uses TCP frame (gripper_frame_link + tcp_offset) for IK.
-                           TCP frame is offset -4cm in Z direction from gripper_frame_link.
-                           This moves a point 4cm below gripper center to the target position,
-                           effectively positioning the gripper higher for grasping.
             maintain_pitch: Maintain current gripper pitch during movement (default: False).
                            Ignored if target_pitch is specified.
             target_pitch: Specific pitch angle to achieve (radians). If specified,
                          overrides maintain_pitch. Use for restoring saved pitch at place.
-            tcp_offset_override: Dynamic TCP offset [x, y, z] in TCP local frame (meters).
-                                When specified with gripper_offset > 0, this offset is used
-                                instead of self.tcp_offset to adjust the target position.
-                                Useful for picking at a different point (e.g., pin position)
-                                than the default gripper center.
             target_name: Name of the target object for subgoal labeling (optional).
                         예: "blue dish", "yellow dice"
                         Used for recording skill-level subgoal labels.
@@ -1062,31 +1005,7 @@ class LeRobotSkills:
         # Get current state first
         current_arm_norm, current_joints, current_ee = self._get_current_state()
 
-        # TCP offset override: adjust target position to account for different TCP origin
-        if tcp_offset_override is not None and gripper_offset > 0:
-            # Get current gripper rotation matrix for coordinate transformation
-            _, R_gripper = self.kinematics_tcp.forward_kinematics(current_joints)
-
-            # Calculate difference between override offset and default tcp_offset
-            offset_diff = np.array(tcp_offset_override) - np.array(self.tcp_offset)
-
-            # Transform offset difference from TCP local frame to world frame
-            offset_world = R_gripper @ offset_diff
-
-            # Adjust target position: TCP must move further so new origin reaches target
-            position = position - offset_world
-
-            self._log(f"  TCP offset override: {tcp_offset_override}")
-            self._log(f"  Position adjusted by: [{offset_world[0]:.4f}, {offset_world[1]:.4f}, {offset_world[2]:.4f}]")
-
-        # Select planner based on gripper_offset
-        # gripper_offset > 0: Use TCP frame (gripper_frame_link + offset)
-        # gripper_offset == 0: Use default frame (gripper_frame_link)
-        if gripper_offset > 0:
-            active_planner = self.planner_tcp
-            self._log(f"\nUsing TCP frame (offset: {[x*1000 for x in self.tcp_offset]}mm)")
-        else:
-            active_planner = self.planner
+        active_planner = self.planner
 
         # Transform to robot_base_link frame
         target_position = self._transform_pos_world2robot(position)
@@ -1228,7 +1147,7 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        GRIPPER_MAX_RATIO = 0.95
+        GRIPPER_MAX_RATIO = 0.30
         clamped_ratio = min(ratio, GRIPPER_MAX_RATIO)
         target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
@@ -1416,7 +1335,6 @@ class LeRobotSkills:
     def execute_pick_object(
         self,
         object_position: Union[List[float], np.ndarray],
-        gripper_offset: float = 0.0,
         object_name: Optional[str] = None,
         skill_description: Optional[str] = None,
     ) -> bool:
@@ -1428,7 +1346,6 @@ class LeRobotSkills:
 
         Args:
             object_position: Object top surface position [x, y, z] in meters (from 3D detection)
-            gripper_offset: Gripper offset for asymmetric gripper (meters)
             object_name: Name of the object being picked for subgoal labeling (optional).
                         예: "yellow dice", "red cup"
 
@@ -1438,7 +1355,7 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.015  # Minimum pick height (1.5cm) — gripper can't reach lower without hitting table
+        MIN_PICK_Z = 0.025  # Minimum pick height (2.5cm) — gripper can't reach lower without hitting table
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
@@ -1450,7 +1367,7 @@ class LeRobotSkills:
 
         # Move to pick position (skill recording handled inside)
         pick_label = f"pick {object_name}" if object_name else None
-        if not self.move_to_position(pick_position, gripper_offset=gripper_offset, target_name=pick_label, skill_description=skill_description):
+        if not self.move_to_position(pick_position, target_name=pick_label, skill_description=skill_description):
             print("Error: Failed to reach pick position")
             return False
 
@@ -1460,18 +1377,6 @@ class LeRobotSkills:
 
         # Store pick_z for place operation
         self._pick_z = pick_z
-
-        # Compute object-holding TCP offset from gripper opening
-        # Mapping: closed (gripper_close_pos) = 0mm, half-open (range/2) = 40mm, linear
-        actual_gripper = float(self.robot.read_positions(normalize=True)[5])
-        gripper_range = self.gripper_open_pos - self.gripper_close_pos  # 180
-        half_range = gripper_range / 2.0  # 90
-        opening_ratio = max(0.0, min(1.0, (actual_gripper - self.gripper_close_pos) / half_range))
-        object_tcp_offset_m = opening_ratio * 0.04  # 0 ~ 40mm
-        # TCP offset: object center is shifted in local -X (toward fingertip) from default TCP
-        self._object_tcp_offset = [-object_tcp_offset_m, 0.0, 0.0]
-        self._log(f"  Gripper actual pos: {actual_gripper:.1f} (opening ratio: {opening_ratio:.2f})")
-        self._log(f"  Object TCP offset: {[x*1000 for x in self._object_tcp_offset]}mm")
 
         # Store current pitch for place operation
         _, current_joints, _ = self._get_current_state()
@@ -1484,26 +1389,20 @@ class LeRobotSkills:
     def execute_place_object(
         self,
         place_position: Union[List[float], np.ndarray],
-        gripper_offset: float = 0.0,
         is_table: bool = True,
         gripper_open_ratio: float = 1.0,
-        tcp_offset_override: Optional[List[float]] = None,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
     ) -> bool:
         """
         Execute place at target position (called from place_approach position).
 
-        TCP moves to position where object bottom touches target surface, then opens gripper.
+        Moves to position where object bottom touches target surface, then opens gripper.
 
         Args:
             place_position: Target position [x, y, z] in meters
-            gripper_offset: Gripper offset for asymmetric gripper (meters)
             is_table: If True, place on table (z=0). If False, place on object at place_position[2].
             gripper_open_ratio: How much to open gripper (0.0-1.0, default: 0.3 = 30%)
-            tcp_offset_override: Dynamic TCP offset [x, y, z] in TCP local frame (meters).
-                                When specified with gripper_offset > 0, passed to move_to_position
-                                to adjust the target position for different TCP origins.
             target_name: Name of the target for subgoal labeling (optional).
                         예: "blue dish", "table"
 
@@ -1514,37 +1413,35 @@ class LeRobotSkills:
         target_surface_height = 0.0 if is_table else place_position[2]
 
         MIN_PLACE_Z = 0.02  # Minimum place height (2cm) — robot can't reach lower while holding object
-        pick_z = getattr(self, '_pick_z', self.pick_offset)
-        place_z = target_surface_height + pick_z
-        if place_z < MIN_PLACE_Z:
-            self._log(f"  [Place Z-Fix] {place_z*100:.1f}cm < min {MIN_PLACE_Z*100:.0f}cm, clamping to {MIN_PLACE_Z*100:.0f}cm")
-            place_z = MIN_PLACE_Z
+
+        if is_table:
+            # Placing on table: use target z (object's own height) as reference
+            # place_position[2] = object's own height when on table
+            # place_z = object height - pick_offset (same as how we'd pick it from table)
+            place_z = max(place_position[2] - self.pick_offset, MIN_PLACE_Z)
+        else:
+            # Placing on another object: use saved pick_z offset from surface
+            pick_z = getattr(self, '_pick_z', self.pick_offset)
+            place_z = target_surface_height + pick_z
+            if place_z < MIN_PLACE_Z:
+                self._log(f"  [Place Z-Fix] {place_z*100:.1f}cm < min {MIN_PLACE_Z*100:.0f}cm, clamping to {MIN_PLACE_Z*100:.0f}cm")
+                place_z = MIN_PLACE_Z
+
         final_position = [place_position[0], place_position[1], place_z]
 
         saved_pitch = getattr(self, '_saved_pitch', None)
-        object_tcp_offset = getattr(self, '_object_tcp_offset', None)
 
+        pick_z = getattr(self, '_pick_z', self.pick_offset)
         self._log(f"\n[Execute Place Object]")
         self._log(f"  Target surface: z={target_surface_height*100:.1f}cm")
         self._log(f"  Place point: z={place_z*100:.1f}cm (pick_z={pick_z*100:.1f}cm, min={MIN_PLACE_Z*100:.0f}cm)")
         if saved_pitch is not None:
             self._log(f"  Restoring pitch: {np.degrees(saved_pitch):.1f}°")
 
-        # Apply object-holding TCP offset if available (from execute_pick_object)
-        # This ensures the held object (not TCP) is positioned at the place target
-        effective_tcp_override = tcp_offset_override
-        effective_gripper_offset = gripper_offset
-        if object_tcp_offset is not None and tcp_offset_override is None:
-            effective_tcp_override = object_tcp_offset
-            effective_gripper_offset = gripper_offset if gripper_offset > 0 else 0.01  # TCP frame 필요
-            self._log(f"  Object TCP offset applied: {[x*1000 for x in object_tcp_offset]}mm")
-
         # Move to place position (skill recording handled inside)
         place_label = f"place on {target_name}" if target_name else None
         if not self.move_to_position(final_position,
-                                     gripper_offset=effective_gripper_offset,
                                      target_pitch=saved_pitch,
-                                     tcp_offset_override=effective_tcp_override,
                                      target_name=place_label,
                                      skill_description=skill_description):
             print("Error: Failed to reach place position")
@@ -1554,33 +1451,9 @@ class LeRobotSkills:
         release_desc = f"release object on {target_name}" if target_name else None
         self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
 
-        # Post-place clearance: move +1cm in TCP +x direction to avoid collision on retreat
-        PLACE_CLEARANCE_M = 0.01
-        try:
-            _, current_joints_rad, _ = self._get_current_state()
-            kinematics = self.kinematics_tcp if effective_gripper_offset > 0 else self.planner.kinematics
-            current_pos_base, R_gripper = kinematics.forward_kinematics(current_joints_rad)
-            tcp_x_base = R_gripper[:, 0]  # TCP +x axis in base_link frame
-            clearance_pos_base = current_pos_base + tcp_x_base * PLACE_CLEARANCE_M
-
-            # base_link → world frame 역변환 (방향벡터 + 위치)
-            if self.frame != "base_link" and self.frame_transformer and self.frame_transformer.has_frame(self.frame):
-                T_base_from_world = self.frame_transformer.frames[self.frame]["T_base_from_frame"]
-                T_world_from_base = np.linalg.inv(T_base_from_world)
-                p_hom = np.array([*clearance_pos_base, 1.0])
-                clearance_world = (T_world_from_base @ p_hom)[:3]
-            else:
-                clearance_world = clearance_pos_base
-
-            self._log(f"  Post-place clearance: +{PLACE_CLEARANCE_M*100:.0f}cm in TCP +x")
-            self.move_to_position(clearance_world, duration=0.5)
-        except Exception as e:
-            self._log(f"  Post-place clearance skipped: {e}")
-
         # Clear saved state
         self._pick_z = None
         self._saved_pitch = None
-        self._object_tcp_offset = None
 
         self._log("[Execute Place Object] Complete")
         return True
@@ -1594,7 +1467,6 @@ class LeRobotSkills:
         hold_time: float = 0.3,
         max_press_torque: int = 400,
         duration: Optional[float] = None,
-        gripper_offset: float = 0.0,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
     ) -> bool:
@@ -1614,7 +1486,6 @@ class LeRobotSkills:
             hold_time: time to hold pressed state (seconds, default 0.3)
             max_press_torque: torque limit during press (0-1000, default 400)
             duration: descent/retract movement time (seconds, None=default)
-            gripper_offset: TCP offset (meters, 0.0=no offset)
             target_name: target label for recording
             skill_description: skill label for recording
         """
@@ -1628,7 +1499,6 @@ class LeRobotSkills:
             hold_time=hold_time,
             max_press_torque=max_press_torque,
             duration=duration,
-            gripper_offset=gripper_offset,
             target_name=target_name,
             skill_description=skill_description,
         )
@@ -1641,7 +1511,6 @@ class LeRobotSkills:
         run_up_distance: float = 0.03,
         approach_height: float = 0.20,
         duration: Optional[float] = None,
-        gripper_offset: float = 0.0,
         object_name: Optional[str] = None,
         skill_description: Optional[str] = None,
     ) -> bool:
@@ -1659,7 +1528,6 @@ class LeRobotSkills:
             run_up_distance: pre-contact offset behind start (meters, default 3cm)
             approach_height: retreat height after push (meters, default 20cm)
             duration: push movement time (seconds, None=auto based on distance)
-            gripper_offset: TCP offset (meters, 0.0=no offset)
             object_name: object label for recording
             skill_description: skill label for recording
         """
@@ -1672,7 +1540,6 @@ class LeRobotSkills:
             run_up_distance=run_up_distance,
             approach_height=approach_height,
             duration=duration,
-            gripper_offset=gripper_offset,
             object_name=object_name,
             skill_description=skill_description,
         )
@@ -1956,11 +1823,11 @@ def main():
         print("  2-1. Opening gripper...")
         skills.gripper_open()
 
-        print("  2-2. Moving to pick approach position (with gripper offset)...")
-        skills.move_to_position(pick_approach, apply_gripper_offset=True)
+        print("  2-2. Moving to pick approach position...")
+        skills.move_to_position(pick_approach)
 
-        print("  2-3. Descending to pick position (with gripper offset)...")
-        skills.move_to_position(pick_position, apply_gripper_offset=True)
+        print("  2-3. Descending to pick position...")
+        skills.move_to_position(pick_position)
 
         print("  2-4. Closing gripper...")
         skills.gripper_close()

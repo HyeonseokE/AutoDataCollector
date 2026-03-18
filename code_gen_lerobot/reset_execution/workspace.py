@@ -25,8 +25,8 @@ if TYPE_CHECKING:
     from lerobot_cap.kinematics.engine import KinematicsEngine
 
 
-# SO-101 그리퍼 사양
-GRIPPER_MAX_OPEN_WIDTH = 0.10  # 10cm - 그리퍼 최대 열림 폭 (bbox 추정 오차 고려)
+# SO-101 그리퍼 사양 (픽셀 기준)
+GRIPPER_MAX_OPEN_PX = 80  # 그리퍼 최대 열림 폭 (pixels, ~10cm 상당)
 
 
 class ResetWorkspace(BaseWorkspace):
@@ -34,7 +34,8 @@ class ResetWorkspace(BaseWorkspace):
     Reset 태스크 전용 Workspace.
 
     BaseWorkspace를 상속하고 추가 제약:
-    - 더 좁은 XY 범위 (안정적인 배치를 위해)
+    - Reach 기반 도달 가능 범위 (base_link frame)
+    - IK 검증 (approach + pick 높이)
     - Z는 테이블 표면에 고정
     - 객체 간 최소 거리
     - 초기 위치에서 최소 이동 거리
@@ -44,12 +45,8 @@ class ResetWorkspace(BaseWorkspace):
         self,
         kinematics_engine: Optional["KinematicsEngine"] = None,
         frame_transformer=None,
-        x_range_world: Tuple[float, float] = (0.14, 0.32),
-        y_range_world: Tuple[float, float] = (-0.25, 0.08),
-        z_fixed_world: float = 0.01,
-        min_object_distance: float = 0.07,
-        min_displacement_from_inital: float = 0.07,
-        gripper_max_width: float = GRIPPER_MAX_OPEN_WIDTH,
+        z_fixed: float = 0.01,
+        min_displacement_px: int = 50,
     ):
         """
         Initialize ResetWorkspace.
@@ -57,105 +54,145 @@ class ResetWorkspace(BaseWorkspace):
         Args:
             kinematics_engine: KinematicsEngine 인스턴스
             frame_transformer: FrameTransformer 인스턴스
-            x_range_world: X 범위 (min, max) - world frame
-            y_range_world: Y 범위 (min, max) - world frame
-            z_fixed_world: 고정 Z 높이 (테이블 표면, world frame)
-            min_object_distance: 객체 간 최소 거리
-            min_displacement_from_inital: 초기 위치에서 최소 이동 거리
-            gripper_max_width: 그리퍼 최대 열림 폭
+            z_fixed: 고정 Z 높이 (테이블 표면, meters)
+            min_displacement_px: 초기 위치에서 최소 이동 거리 (pixels)
         """
         super().__init__(kinematics_engine, frame_transformer)
 
-        # Reset 전용 제약 (world frame)
-        self.x_min_world, self.x_max_world = x_range_world
-        self.y_min_world, self.y_max_world = y_range_world
-        self.z_fixed_world = z_fixed_world
-        self.min_object_distance = min_object_distance
-        self.min_displacement_from_inital = min_displacement_from_inital
-        self.gripper_max_width = gripper_max_width
+        self.z_fixed = z_fixed
+        self.min_displacement_px = min_displacement_px
 
-    def is_valid(self, position_world: np.ndarray) -> bool:
+    def is_valid(self, position: np.ndarray) -> bool:
         """
-        Reset용 유효성 검사.
-
-        1. 기본 검사 (Kinematics reach)
-        2. Reset 추가 제약 (XY 범위)
+        Reset용 유효성 검사 (reach 기반).
 
         Args:
-            position_world: [x, y, z] 위치 (world frame)
+            position: [x, y, z] 위치 (base_link frame)
 
         Returns:
             True if valid for reset
         """
-        # 1. 기본 검사 (BaseWorkspace)
-        if not self.is_reachable(position_world):
-            return False
+        return self.is_reachable(position)
 
-        # 2. Reset 추가 제약
-        x, y = position_world[0], position_world[1]
-        return (self.x_min_world <= x <= self.x_max_world and
-                self.y_min_world <= y <= self.y_max_world)
+    def _check_ik_feasible(self, position: np.ndarray) -> bool:
+        """
+        해당 위치에서 approach(z=0.20) + pick/place(z=0.025) 높이 모두 IK가 풀리는지 검증.
+        KinematicsEngine이 없으면 검증 건너뜀 (True 반환).
+        """
+        if self._kinematics is None:
+            return True
+
+        check_heights = [0.20, 0.025]  # approach, pick/place
+        for z in check_heights:
+            pos = np.array([position[0], position[1], z])
+            _, success = self._kinematics.inverse_kinematics_position_only(
+                pos, max_iterations=50,
+            )
+            if not success:
+                return False
+        return True
 
     def generate_random_position(
         self,
         obstacles: List[dict],
         initial_pos: Optional[List[float]] = None,
-        obj_radius: float = 0.015,
+        obj_bbox_px: Optional[Tuple[int, int]] = None,
+        pix2robot=None,
         max_attempts: int = 100,
+        bbox_margin_px: int = 30,
     ) -> Optional[List[float]]:
         """
-        단일 객체용 랜덤 위치 생성.
+        단일 객체용 랜덤 위치 생성 (reach 기반 + 픽셀 bbox 충돌 검증).
 
         Args:
-            obstacles: 피해야 할 위치들 [{"center": [x,y], "radius": r}, ...]
-            initial_pos: 초기 위치 (이 위치에서 min_displacement_from_inital 이상 떨어져야 함)
-            obj_radius: 객체 반경
+            obstacles: 피해야 할 장애물들
+                [{"center_px": [u,v], "half_w_px": int, "half_h_px": int}, ...]
+            initial_pos: 초기 위치 [x,y,z] (이 위치에서 min_displacement_from_initial 이상 떨어져야 함)
+            obj_bbox_px: 이 객체의 bbox 픽셀 크기 (w_px, h_px). None이면 (30, 30) 사용.
+            pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
+            bbox_margin_px: bbox 충돌 마진 (pixels, default 30px)
 
         Returns:
             [x, y, z] 또는 None (실패 시)
         """
+        margin = 0.01
+        r_min = self.min_reach + margin
+        r_max = self.max_reach - margin
+
+        if obj_bbox_px is None:
+            obj_bbox_px = (30, 30)
+        obj_half_w = obj_bbox_px[0] // 2 + bbox_margin_px
+        obj_half_h = obj_bbox_px[1] // 2 + bbox_margin_px
+
         for _ in range(max_attempts):
-            # 랜덤 위치 생성
-            x = np.random.uniform(self.x_min_world, self.x_max_world)
-            y = np.random.uniform(self.y_min_world, self.y_max_world)
-            z = self.z_fixed_world
+            # Reach 링 내에서 극좌표 랜덤 샘플링
+            angle = np.random.uniform(0, 2 * np.pi)
+            r = np.sqrt(np.random.uniform(r_min**2, r_max**2))
+            x = r * np.cos(angle)
+            y = r * np.sin(angle)
+            z = self.z_fixed
+
+            # x > 0 제한 (로봇 전방만)
+            if x <= 0:
+                continue
 
             candidate = [x, y, z]
 
-            # 조건 1: 기본 도달 가능 여부
+            # 조건 1: 기본 도달 가능 여부 (reach limits)
             if not self.is_reachable(np.array(candidate)):
                 continue
 
-            # 조건 2: 초기 위치에서 충분히 떨어졌는지
-            if initial_pos is not None:
-                displacement = np.sqrt(
-                    (x - initial_pos[0])**2 + (y - initial_pos[1])**2
-                )
-                if displacement < self.min_displacement_from_inital:
+            # 조건 2: IK 검증 (approach + pick/place 높이)
+            if not self._check_ik_feasible(np.array(candidate)):
+                continue
+
+            # 조건 3: 카메라 FOV 내 + 초기 위치 이격 + bbox 충돌 (픽셀 공간)
+            if pix2robot is not None:
+                try:
+                    cu, cv = pix2robot.robot_to_pixel(x, y)
+                except Exception:
                     continue
 
-            # 조건 3: 장애물과 겹치지 않는지
-            collision = False
-            for occ in obstacles:
-                dist = np.sqrt(
-                    (x - occ["center"][0])**2 +
-                    (y - occ["center"][1])**2
-                )
-                if dist < occ["radius"] + obj_radius:
-                    collision = True
-                    break
+                # FOV 체크: bbox + 가장자리 마진(30px) 포함하여 이미지 범위 내
+                img_w, img_h = 640, 480
+                edge_margin = 30
+                if (cu - obj_half_w < edge_margin or cu + obj_half_w >= img_w - edge_margin or
+                    cv - obj_half_h < edge_margin or cv + obj_half_h >= img_h - edge_margin):
+                    continue
 
-            if collision:
-                continue
+                # 초기 위치에서 충분히 떨어졌는지
+                if initial_pos is not None:
+                    try:
+                        iu, iv = pix2robot.robot_to_pixel(initial_pos[0], initial_pos[1])
+                        dist_px = np.sqrt((cu - iu)**2 + (cv - iv)**2)
+                        if dist_px < self.min_displacement_px:
+                            continue
+                    except Exception:
+                        pass
+
+                # bbox 충돌 검사
+                collision = False
+                for occ in obstacles:
+                    ou, ov = occ["center_px"]
+                    o_hw = occ["half_w_px"]
+                    o_hh = occ["half_h_px"]
+                    # AABB 겹침 검사
+                    if (abs(cu - ou) < obj_half_w + o_hw and
+                        abs(cv - ov) < obj_half_h + o_hh):
+                        collision = True
+                        break
+
+                if collision:
+                    continue
 
             return candidate
 
         return None
 
     def __repr__(self) -> str:
-        return (f"ResetWorkspace(x_world=[{self.x_min_world:.2f}, {self.x_max_world:.2f}], "
-                f"y_world=[{self.y_min_world:.2f}, {self.y_max_world:.2f}], z_world={self.z_fixed_world:.2f})")
+        return (f"ResetWorkspace(reach=[{self.min_reach:.2f}, {self.max_reach:.2f}], "
+                f"z_fixed={self.z_fixed:.2f})")
 
 
 # ============================================================
@@ -163,37 +200,34 @@ class ResetWorkspace(BaseWorkspace):
 # ============================================================
 
 def is_grippable(
-    bbox_size_m: Tuple[float, float],
-    gripper_max_width: float = GRIPPER_MAX_OPEN_WIDTH,
+    bbox_px: Tuple[int, int],
+    gripper_max_px: int = GRIPPER_MAX_OPEN_PX,
 ) -> bool:
     """
-    그리퍼로 잡을 수 있는 물체인지 판단.
+    그리퍼로 잡을 수 있는 물체인지 판단 (픽셀 bbox 기반).
 
     Args:
-        bbox_size_m: (width, height) in meters
-        gripper_max_width: 그리퍼 최대 열림 폭
+        bbox_px: (width_px, height_px) 픽셀 크기
+        gripper_max_px: 그리퍼 최대 열림 폭 (pixels)
 
     Returns:
         True if object can be gripped
     """
-    if bbox_size_m is None:
+    if bbox_px is None:
         return True
-
-    width, height = bbox_size_m
-    min_dim = min(width, height)
-    return min_dim < gripper_max_width
+    return min(bbox_px) < gripper_max_px
 
 
 def classify_objects(
     detections: Dict[str, dict],
-    gripper_max_width: float = GRIPPER_MAX_OPEN_WIDTH,
+    gripper_max_px: int = GRIPPER_MAX_OPEN_PX,
 ) -> Tuple[Dict[str, dict], Dict[str, dict]]:
     """
-    객체를 grippable / non-grippable(obstacle)로 분류.
+    객체를 grippable / non-grippable(obstacle)로 분류 (픽셀 bbox 기반).
 
     Args:
-        detections: {name: {"position": [x,y,z], "bbox_size_m": [w,h], ...}}
-        gripper_max_width: 그리퍼 최대 열림 폭
+        detections: {name: {"position": [...], "bbox_px": (w,h), ...}}
+        gripper_max_px: 그리퍼 최대 열림 폭 (pixels)
 
     Returns:
         (grippable_objects, obstacle_objects)
@@ -204,10 +238,8 @@ def classify_objects(
     for name, info in detections.items():
         if info is None:
             continue
-
-        bbox_size = info.get("bbox_size_m")
-
-        if is_grippable(bbox_size, gripper_max_width):
+        bbox_px = info.get("bbox_px")
+        if is_grippable(bbox_px, gripper_max_px):
             grippable[name] = info
         else:
             obstacles[name] = info
@@ -215,30 +247,64 @@ def classify_objects(
     return grippable, obstacles
 
 
+def _get_bbox_px(info: dict, default: Tuple[int, int] = (30, 30)) -> Tuple[int, int]:
+    """객체 info에서 bbox 픽셀 크기(w, h) 추출."""
+    bbox = info.get("bbox_px")
+    if bbox is not None:
+        return tuple(bbox)
+    # box_2d [ymin, xmin, ymax, xmax] (0-1000 스케일) → 픽셀 크기 추정
+    box = info.get("box_2d")
+    if box is not None and len(box) == 4:
+        ymin, xmin, ymax, xmax = box
+        # 0-1000 스케일 → 대략 640x480 이미지 기준
+        w = int((xmax - xmin) * 640 / 1000)
+        h = int((ymax - ymin) * 480 / 1000)
+        return (max(w, 10), max(h, 10))
+    return default
+
+
+def _get_center_px(info: dict, pix2robot) -> Optional[Tuple[int, int]]:
+    """객체 info에서 center 픽셀 좌표 추출. pixel이 있으면 사용, 없으면 robot→pixel 변환."""
+    px = info.get("pixel")
+    if px is not None:
+        return (int(px[0]), int(px[1]))
+    pos = info.get("position")
+    if pos is not None and pix2robot is not None:
+        try:
+            return pix2robot.robot_to_pixel(pos[0], pos[1])
+        except Exception:
+            pass
+    return None
+
+
 def generate_random_positions(
     grippable_objects: Dict[str, dict],
     obstacle_objects: Dict[str, dict],
     initial_positions: Dict[str, List[float]],
     workspace: ResetWorkspace = None,
+    pix2robot=None,
     seed: int = None,
     max_attempts: int = 100,
+    bbox_margin_px: int = 30,
 ) -> Dict[str, List[float]]:
     """
-    랜덤 위치 생성 (핵심 알고리즘).
+    랜덤 위치 생성 (픽셀 bbox 기반 충돌 검증).
 
     조건:
-    1. workspace 범위 내 (base reachability + reset 제약)
-    2. 모든 장애물(non-grippable)과 겹치지 않음
-    3. 이미 배치된 다른 grippable 객체와 min_distance 유지
-    4. 초기 위치에서 min_displacement_from_inital 이상 떨어져야 함
+    1. workspace 범위 내 (reach + IK 검증)
+    2. 모든 장애물과 bbox 겹치지 않음 (픽셀 공간, ±margin px)
+    3. 이미 배치된 다른 grippable 객체와 bbox 겹치지 않음
+    4. 초기 위치에서 min_displacement_from_initial 이상 떨어져야 함
 
     Args:
-        grippable_objects: 이동할 객체들
+        grippable_objects: 이동할 객체들 {name: {"position": [...], "bbox_px": (w,h), ...}}
         obstacle_objects: 장애물 객체들 (위치 고정)
         initial_positions: 객체들의 초기 위치
         workspace: ResetWorkspace 인스턴스
+        pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
         seed: 재현성을 위한 random seed
         max_attempts: 위치당 최대 시도 횟수
+        bbox_margin_px: bbox 충돌 마진 (pixels)
 
     Returns:
         {object_name: [x, y, z]} 랜덤 타겟 위치
@@ -249,41 +315,55 @@ def generate_random_positions(
     if seed is not None:
         np.random.seed(seed)
 
-    # 장애물 위치 리스트 - 모든 검출 객체 포함 (grippable + non-grippable)
-    occupied_positions = []
+    # pix2robot 자동 로드
+    if pix2robot is None:
+        try:
+            from pix2robot_calibrator import Pix2RobotCalibrator
+            from pathlib import Path
+            for rid in [2, 3]:
+                p = Path(__file__).parent.parent.parent / "robot_configs" / "pix2robot_matrices" / f"robot{rid}_pix2robot_data.npz"
+                if p.exists():
+                    pix2robot = Pix2RobotCalibrator(robot_id=rid)
+                    if not pix2robot.load(str(p)):
+                        pix2robot = None
+                    else:
+                        break
+        except Exception:
+            pass
 
-    # 1) Non-grippable 객체 추가 (위치 고정, 이동 안 함)
+    # 장애물 리스트 (픽셀 bbox 기반)
+    occupied = []
+
+    # 1) Non-grippable 객체 (고정 장애물)
     for name, info in obstacle_objects.items():
         if info is None:
             continue
-        pos = info.get("position", info) if isinstance(info, dict) else info
-        if pos is None:
+        center_px = _get_center_px(info, pix2robot)
+        if center_px is None:
             continue
-        size = info.get("bbox_size_m", [0.05, 0.05]) if isinstance(info, dict) else [0.05, 0.05]
-        if size is None:
-            size = [0.05, 0.05]
-        occupied_positions.append({
+        bbox_px = _get_bbox_px(info)
+        occupied.append({
             "name": name,
-            "center": [pos[0], pos[1]],
-            "radius": max(size) / 2 + workspace.min_object_distance,
-            "is_fixed": True,  # 고정 장애물
+            "center_px": center_px,
+            "half_w_px": bbox_px[0] // 2 + bbox_margin_px,
+            "half_h_px": bbox_px[1] // 2 + bbox_margin_px,
+            "is_fixed": True,
         })
 
-    # 2) Grippable 객체의 현재 위치도 추가 (이동 전까지 장애물로 취급)
+    # 2) Grippable 객체의 현재 위치 (이동 전까지 장애물)
     for name, info in grippable_objects.items():
         if info is None:
             continue
-        pos = info.get("position", info) if isinstance(info, dict) else info
-        if pos is None:
+        center_px = _get_center_px(info, pix2robot)
+        if center_px is None:
             continue
-        size = info.get("bbox_size_m", [0.03, 0.03]) if isinstance(info, dict) else [0.03, 0.03]
-        if size is None:
-            size = [0.03, 0.03]
-        occupied_positions.append({
+        bbox_px = _get_bbox_px(info)
+        occupied.append({
             "name": name,
-            "center": [pos[0], pos[1]],
-            "radius": max(size) / 2 + workspace.min_object_distance,
-            "is_fixed": False,  # 이동 가능 객체
+            "center_px": center_px,
+            "half_w_px": bbox_px[0] // 2 + bbox_margin_px,
+            "half_h_px": bbox_px[1] // 2 + bbox_margin_px,
+            "is_fixed": False,
         })
 
     # 결과 저장
@@ -293,7 +373,7 @@ def generate_random_positions(
         if obj_info is None:
             continue
 
-        # 초기 위치 가져오기 (forward 시작 전 위치)
+        # 초기 위치
         initial_info = initial_positions.get(obj_name)
         if initial_info is None:
             initial_pos = None
@@ -304,54 +384,51 @@ def generate_random_positions(
         else:
             initial_pos = None
 
-        # 객체 크기
-        if isinstance(obj_info, dict):
-            obj_size = obj_info.get("bbox_size_m", [0.03, 0.03])
-        else:
-            obj_size = [0.03, 0.03]
-        if obj_size is None:
-            obj_size = [0.03, 0.03]
-        obj_radius = max(obj_size) / 2
+        # 이 객체의 bbox 픽셀 크기
+        obj_bbox_px = _get_bbox_px(obj_info if isinstance(obj_info, dict) else {})
 
-        # 이 객체의 현재 위치를 장애물 목록에서 제거 (자기 자신과 충돌 방지)
-        obstacles_for_this_obj = [
-            occ for occ in occupied_positions if occ["name"] != obj_name
-        ]
+        # 자기 자신은 장애물에서 제거
+        obstacles_for_this = [occ for occ in occupied if occ["name"] != obj_name]
 
         # 랜덤 위치 생성
         position = workspace.generate_random_position(
-            obstacles=obstacles_for_this_obj,
+            obstacles=obstacles_for_this,
             initial_pos=initial_pos,
-            obj_radius=obj_radius,
+            obj_bbox_px=obj_bbox_px,
+            pix2robot=pix2robot,
             max_attempts=max_attempts,
+            bbox_margin_px=bbox_margin_px,
         )
 
         if position is not None:
             target_positions[obj_name] = position
-            # 이 객체의 현재 위치를 제거하고 새 위치로 업데이트
-            occupied_positions = [occ for occ in occupied_positions if occ["name"] != obj_name]
-            occupied_positions.append({
-                "name": obj_name,
-                "center": [position[0], position[1]],
-                "radius": obj_radius + workspace.min_object_distance,
-                "is_fixed": False,
-            })
+            # 새 위치로 장애물 업데이트
+            occupied = [occ for occ in occupied if occ["name"] != obj_name]
+            if pix2robot is not None:
+                try:
+                    new_px = pix2robot.robot_to_pixel(position[0], position[1])
+                    occupied.append({
+                        "name": obj_name,
+                        "center_px": new_px,
+                        "half_w_px": obj_bbox_px[0] // 2 + bbox_margin_px,
+                        "half_h_px": obj_bbox_px[1] // 2 + bbox_margin_px,
+                        "is_fixed": False,
+                    })
+                except Exception:
+                    pass
         else:
             # Fallback
             print(f"[Warning] Could not find valid position for '{obj_name}'")
             if initial_pos is not None:
                 offset = np.random.uniform(-0.03, 0.03, 2)
                 fallback_pos = [
-                    np.clip(initial_pos[0] + offset[0], workspace.x_min_world, workspace.x_max_world),
-                    np.clip(initial_pos[1] + offset[1], workspace.y_min_world, workspace.y_max_world),
-                    workspace.z_fixed_world,
+                    initial_pos[0] + offset[0],
+                    initial_pos[1] + offset[1],
+                    workspace.z_fixed,
                 ]
             else:
-                fallback_pos = [
-                    (workspace.x_min_world + workspace.x_max_world) / 2,
-                    (workspace.y_min_world + workspace.y_max_world) / 2,
-                    workspace.z_fixed_world,
-                ]
+                r_mid = (workspace.min_reach + workspace.max_reach) / 2
+                fallback_pos = [r_mid, 0.0, workspace.z_fixed]
             target_positions[obj_name] = fallback_pos
 
     return target_positions
@@ -371,15 +448,8 @@ def compute_workspace_bounds(
     """
     IK 그리드 샘플링으로 로봇별 도달 가능 workspace 경계를 자동 계산.
 
-    Args:
-        workspace: BaseWorkspace 인스턴스 (None이면 기본 생성)
-        z_table: 테이블 표면 Z 높이 (meters)
-        step: 스캔 간격 (meters)
-        x_scan: X 스캔 범위 (min, max)
-        y_scan: Y 스캔 범위 (min, max)
-
     Returns:
-        ((x_min, x_max), (y_min, y_max)) in meters
+        ((x_min, x_max), (y_min, y_max)) in meters (base_link frame)
     """
     if workspace is None:
         workspace = BaseWorkspace()
@@ -392,151 +462,130 @@ def compute_workspace_bounds(
                 valid_y.append(y)
 
     if not valid_x:
-        # Fallback to hardcoded defaults
-        return (0.14, 0.32), (-0.25, 0.08)
+        return (0.12, 0.40), (-0.30, 0.15)
 
     return (min(valid_x), max(valid_x)), (min(valid_y), max(valid_y))
 
 
 def draw_workspace_on_image(
     image: np.ndarray,
-    workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]],
-    coord_transformer,
-    alpha: float = 0.3,
     robot_id: int = 3,
+    pix2robot_calibrator=None,
+    workspace_bounds=None,
+    coord_transformer=None,
 ) -> np.ndarray:
     """
-    로봇 워크스페이스를 원형(min/max reach) + x_min 제약으로 이미지에 시각화.
+    로봇 워크스페이스를 이미지에 시각화 (pix2robot 직접 매핑 기반).
 
     시각적 요소:
-    - 로봇 base 중심으로 min_reach / max_reach 시안 원호 경계
-    - x_min_world 시안 수직선
-    - convex hull 바깥 어둡게 마스킹
+    - 도달 가능 영역 밝게 / 불가 영역 어둡게 (convex hull 마스킹)
+    - CYAN 점선: min_reach / max_reach 원호 (로봇 base 중심)
 
     Args:
         image: BGR 이미지 (numpy array)
-        workspace_bounds: ((x_min, x_max), (y_min, y_max)) in meters (프롬프트 전달용)
-        coord_transformer: CoordinateTransformer 인스턴스
-        alpha: 미사용 (호환성 유지)
-        robot_id: 로봇 ID (프레임 설정 로드용)
+        robot_id: 로봇 ID
+        pix2robot_calibrator: Pix2RobotCalibrator 인스턴스 (우선 사용)
+        workspace_bounds: (legacy, 미사용) 호환성 유지
+        coord_transformer: (legacy, 미사용) 호환성 유지
 
     Returns:
         시각화된 이미지 (numpy array, copy)
     """
     import cv2
-    import json
 
     img_h, img_w = image.shape[:2]
     result = image.copy()
 
-    # ── 로봇 base 위치 로드 (World frame, cm) ──
-    robot_x_cm, robot_y_cm = 5.1, -25.1  # defaults
-    base_rotation_matrix = None
+    # ── Pix2Robot 로드 (없으면 자동 로드 시도) ──
+    p2r = pix2robot_calibrator
+    if p2r is None:
+        try:
+            from pix2robot_calibrator import Pix2RobotCalibrator
+            calib_path = (
+                Path(__file__).parent.parent.parent
+                / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
+            )
+            if calib_path.exists():
+                p2r = Pix2RobotCalibrator(robot_id=robot_id)
+                if not p2r.load(str(calib_path)):
+                    p2r = None
+        except Exception:
+            pass
 
-    try:
-        frame_config_path = (
-            Path(__file__).parent.parent.parent
-            / f"robot_configs/world2robot_matrices/robot{robot_id}_matrix.json"
-        )
-        if frame_config_path.exists():
-            with open(frame_config_path, 'r') as f:
-                frame_config = json.load(f)
-            frames_world = frame_config.get("frames", {}).get("world", {})
-            if "translation" in frames_world:
-                t = frames_world["translation"]
-                robot_x_cm = t[0] * 100
-                robot_y_cm = t[1] * 100
-            raw_transform = frame_config.get("_raw_transform", {})
-            base_rotation_matrix = raw_transform.get("rotation_matrix")
-    except Exception:
-        pass
+    if p2r is None:
+        return result
 
-    robot_x_m = robot_x_cm / 100.0
-    robot_y_m = robot_y_cm / 100.0
+    def robot_to_px(x, y):
+        """로봇 좌표 → 픽셀 좌표 (범위 밖이면 None)"""
+        try:
+            u, v = p2r.robot_to_pixel(x, y)
+            if 0 <= u < img_w and 0 <= v < img_h:
+                return (u, v)
+        except Exception:
+            pass
+        return None
 
     # ── Workspace 파라미터 ──
     ws = BaseWorkspace()
-    min_reach_cm = ws.min_reach * 100
-    max_reach_cm = ws.max_reach * 100
-    x_min_world_cm = ws.x_min_world * 100
+    min_reach = ws.min_reach
+    max_reach = ws.max_reach
+    margin = 0.01
 
-    # 그리드 스캔 범위 (로봇 base 중심)
-    grid_step_cm = 1.5
-    x_min_scan = max(x_min_world_cm, robot_x_cm - max_reach_cm)
-    x_max_scan = robot_x_cm + max_reach_cm
-    y_min_scan = robot_y_cm - max_reach_cm
-    y_max_scan = robot_y_cm + max_reach_cm
+    # ── 도달 가능 영역 마스크 생성 (픽셀 순회 방식) ──
+    # 모든 픽셀 → pixel_to_robot → 거리 계산 → 도넛 범위 내인지 판정
+    ws_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    step_px = 2  # 2px 간격으로 샘플링 (속도 vs 정밀도)
 
-    def is_reachable_from_base(x_m, y_m):
-        if x_m < ws.x_min_world:
-            return False
-        dx = x_m - robot_x_m
-        dy = y_m - robot_y_m
-        dist = np.sqrt(dx * dx + dy * dy)
-        margin = 0.01
-        return (ws.min_reach + margin) <= dist <= (ws.max_reach - margin)
-
-    # ── 도달 가능 픽셀 수집 (convex hull 마스킹용) ──
-    valid_pixels = []
-    for x_cm in np.arange(x_min_scan, x_max_scan, grid_step_cm):
-        for y_cm in np.arange(y_min_scan, y_max_scan, grid_step_cm):
+    for v in range(0, img_h, step_px):
+        for u in range(0, img_w, step_px):
             try:
-                u, v = coord_transformer.world_to_pixel(x_cm, y_cm)
-                if not (0 <= u < img_w and 0 <= v < img_h):
-                    continue
-                if is_reachable_from_base(x_cm / 100.0, y_cm / 100.0):
-                    valid_pixels.append((u, v))
+                rx, ry, _ = p2r.pixel_to_robot(u, v)
+                dist = np.sqrt(rx * rx + ry * ry)
+                if (min_reach + margin) <= dist <= (max_reach - margin):
+                    # step_px 크기의 사각형으로 채움
+                    ws_mask[v:v+step_px, u:u+step_px] = 255
             except Exception:
                 continue
 
-    # ── 바깥 영역 마스킹 (valid 영역 바깥 어둡게) ──
-    if valid_pixels:
-        ws_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-        hull = cv2.convexHull(np.array(valid_pixels))
-        cv2.fillConvexPoly(ws_mask, hull, 255)
-        # 마스크 바깥을 어둡게
-        result[ws_mask == 0] = (result[ws_mask == 0] * 0.5).astype(np.uint8)
+    # ── 도달 불가 영역 검정 마스킹 ──
+    if np.any(ws_mask):
+        result[ws_mask == 0] = (result[ws_mask == 0] * 0.4).astype(np.uint8)
 
     COLOR_CYAN = (255, 255, 0)
 
-    # ── Min reach 원 ──
-    for angle in range(0, 360, 10):
-        rad = np.radians(angle)
-        px = robot_x_cm + min_reach_cm * np.cos(rad)
-        py = robot_y_cm + min_reach_cm * np.sin(rad)
-        try:
-            pu, pv = coord_transformer.world_to_pixel(px, py)
-            if 0 <= pu < img_w and 0 <= pv < img_h:
-                cv2.circle(result, (pu, pv), 2, COLOR_CYAN, -1)
-        except Exception:
-            pass
-
-    # ── Max reach 원 ──
+    # ── Min reach 원호 (Cyan 점선) ──
     for angle in range(0, 360, 3):
         rad = np.radians(angle)
-        px = robot_x_cm + max_reach_cm * np.cos(rad)
-        py = robot_y_cm + max_reach_cm * np.sin(rad)
-        try:
-            pu, pv = coord_transformer.world_to_pixel(px, py)
-            if 0 <= pu < img_w and 0 <= pv < img_h:
-                cv2.circle(result, (pu, pv), 2, COLOR_CYAN, -1)
-        except Exception:
-            pass
+        x = (min_reach + margin) * np.cos(rad)
+        y = (min_reach + margin) * np.sin(rad)
+        px = robot_to_px(x, y)
+        if px is not None:
+            cv2.circle(result, px, 2, COLOR_CYAN, -1)
 
-    # ── x_min_world 수직선 ──
-    for y_cm in np.arange(y_min_scan, y_max_scan, 2):
-        try:
-            pu, pv = coord_transformer.world_to_pixel(x_min_world_cm, y_cm)
-            if 0 <= pu < img_w and 0 <= pv < img_h:
-                cv2.circle(result, (pu, pv), 2, COLOR_CYAN, -1)
-        except Exception:
-            pass
+    # ── Max reach 원호 (Cyan 점선) ──
+    for angle in range(0, 360, 2):
+        rad = np.radians(angle)
+        x = (max_reach - margin) * np.cos(rad)
+        y = (max_reach - margin) * np.sin(rad)
+        px = robot_to_px(x, y)
+        if px is not None:
+            cv2.circle(result, px, 2, COLOR_CYAN, -1)
 
-    # ── Workspace bounds 라벨 (프롬프트에 전달되는 값) ──
-    (x_min, x_max), (y_min, y_max) = workspace_bounds
-    label = f"WS: x=[{x_min:.2f},{x_max:.2f}] y=[{y_min:.2f},{y_max:.2f}]"
-    cv2.putText(result, label, (10, img_h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+    # ── 가장자리 마진 사각형 (Green) ──
+    edge_margin = 30
+    COLOR_GREEN = (0, 255, 0)
+    cv2.rectangle(result,
+                  (edge_margin, edge_margin),
+                  (img_w - edge_margin - 1, img_h - edge_margin - 1),
+                  COLOR_GREEN, 1)
+
+    # ── 라벨 텍스트 ──
+    reach_label = f"Reach: [{min_reach:.2f}, {max_reach:.2f}]m"
+    cv2.putText(result, reach_label, (10, img_h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_CYAN, 1, cv2.LINE_AA)
+    margin_label = f"Edge margin: {edge_margin}px"
+    cv2.putText(result, margin_label, (10, img_h - 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_GREEN, 1, cv2.LINE_AA)
 
     return result
 

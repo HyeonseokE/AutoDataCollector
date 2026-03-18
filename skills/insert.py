@@ -89,7 +89,6 @@ def insert(
     max_insert_torque: int = 400,
     hold_time: float = 0.3,
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     release_after: bool = True,
     target_name: Optional[str] = None,
     skill_description: Optional[str] = None,
@@ -147,8 +146,6 @@ def insert(
                   - None: skills 내부 기본값 사용
                   - 삽입 속도(insert_duration)와 별도 제어
 
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-
         release_after: 삽입 후 gripper 열기 여부. default=True
                        - True: 삽입 후 물체 놓기 (peg-in-hole)
                        - False: 삽입 후 계속 잡기 (나사 조이기 전 단계)
@@ -185,7 +182,7 @@ def insert(
     if not skills.move_to_position(
         position=[pos[0], pos[1], align_height],
         duration=duration,
-        gripper_offset=gripper_offset,
+
         maintain_pitch=True,
         target_name=target_name,
         skill_description=f"{desc_prefix}: align above hole",
@@ -204,7 +201,7 @@ def insert(
         insert_success = skills.move_to_position(
             position=[pos[0], pos[1], insert_z],
             duration=insert_duration,
-            gripper_offset=gripper_offset,
+    
             maintain_pitch=True,
             target_name=target_name,
             skill_description=skill_description or f"{desc_prefix}: inserting",

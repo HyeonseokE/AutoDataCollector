@@ -1,43 +1,56 @@
-# Fixing Plan
+# Pix2Robot 캘리브레이션
 
-## 1. Gemini 3 Flash Thinking Budget 제한
+## 핵심 개념
+- **기존**: pixel → world → robot (3단계, depth 노이즈 문제)
+- **변경**: pixel → robot 직접 변환 (호모그래피 + depth 높이 추정)
 
-### 문제
-- `gemini-3-flash-preview`가 thinking에 62K+ 토큰을 소비하고 실제 응답 0 토큰 (빈 응답)
-- 294초 소요 후 에러 발생 (`content has no parts`)
-- `GenerationConfig`에 `thinking_config` 미설정 → thinking 토큰 무제한
+## 변환 방식
+| 항목 | 설명 |
+|------|------|
+| **호모그래피 3x3** | 픽셀(u,v) → 로봇(x,y) 평면 매핑 (cv2.findHomography, RANSAC) |
+| **table_depth** | 캘리브레이션 시 수집한 카메라→테이블 depth 평균 (meters) |
+| **물체 높이(z)** | `table_depth - 물체_depth` → 테이블 위 물체 높이 (depth 미제공 시 table_z ≈ 0) |
 
-### 해결
-- `gemini_chat_start()`에서 `GenerationConfig`에 thinking budget 설정
-- 또는 모델을 `gemini-2.0-flash`로 변경 (thinking 없음)
-
-### 파일
-- `code_gen_lerobot/llm_utils/gemini.py` — `GenerationConfig`에 `thinking_config` 추가
-- `pipeline_config/paid_api_config.yaml` — 모델명 변경 (선택)
-
----
-
-## 2. 프롬프트 패턴 구조 통일 (START/PREPARE/EXECUTE/END)
-
-### 문제
-- 현재 패턴이 스킬별 독립 블록으로 나열되어 있어 구조가 불명확
-- LLM이 일관된 코드 구조를 생성하지 못함
-
-### 목표 구조
+## 파일 구조
 ```
-# START — move_to_initial_state
-# PREPARE <interaction> — gripper open/close + move_to_position (approach)
-# EXECUTE <interaction> — execute_pick/place/push/press (core skill)
-# END — move_to_free_state
+pix2robot_calibrator/
+├── __init__.py                # Pix2RobotCalibrator export
+├── calibrator.py              # Pix2RobotCalibrator 클래스
+└── run_calibration.py         # CLI 진입점
+
+robot_configs/pix2robot_matrices/
+├── robot{N}_pix2robot_data.npz   # homography, table_z, table_depth, points, depth_values, errors
+└── robot{N}_pix2robot_data.json  # 사람이 읽을 수 있는 형식
 ```
 
-For multi-step tasks, repeat PREPARE → EXECUTE for each interaction.
+## 실행 방법
 
-### 변경 방향
-- 디테일한 코드 예시 대신 **구조 규칙**만 간결하게 명시
-- 기존 스킬별 패턴 블록 → 통합된 4단계 구조 설명으로 교체
+### 캘리브레이션
+```bash
+# 새로 캘리브레이션
+python pix2robot_calibrator/run_calibration.py --robot 3
 
-### 파일
-- `code_gen_lerobot/forward_execution/user_prompt.py`
-  - Turn 1: `lerobot_code_gen_prompt()` — "6. Skill Composition Patterns" 섹션 + "7. Executable Code Skeleton" 섹션
-  - Turn 3: `turn3_code_gen_prompt()` — "Skill Composition Patterns" 섹션
+# 기존 데이터에 이어서 추가
+python pix2robot_calibrator/run_calibration.py --robot 3 --resume
+```
+
+**순서**: 카메라 프리뷰 `s`캡처 → 이미지 좌클릭(픽셀) → 로봇 수동 이동 → Enter(기록) → 반복(권장 8~12쌍) → `c`계산 → `s`저장
+
+### 코드에서 사용
+```python
+from pix2robot_calibrator import Pix2RobotCalibrator
+
+cal = Pix2RobotCalibrator(robot_id=3)
+cal.load("robot_configs/pix2robot_matrices/robot3_pix2robot_data.npz")
+
+# x,y만 (z ≈ 0)
+pos = cal.pixel_to_robot(400, 300)
+
+# x,y + 물체 높이 (depth 활용)
+pos = cal.pixel_to_robot(400, 300, depth_m=0.65)
+# → [0.2491, 0.0640, 0.0367]  (높이 3.7cm)
+```
+
+## 파이프라인 연동
+- `_get_frame_for_robot(robot_id)`: pix2robot .npz 존재 시 `frame="base_link"` → 스킬에서 world→robot 변환 생략
+- 소비자 파일(`code_gen_with_skill.py`, `run_detect.py`, `reset_execution/code_gen.py`): pix2robot 우선, 없으면 기존 3단계 fallback

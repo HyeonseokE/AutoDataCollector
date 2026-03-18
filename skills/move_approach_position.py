@@ -33,7 +33,6 @@ def move_approach_position(
     skills,
     object_position: Union[List[float], np.ndarray],
     approach_height: float = 0.10,
-    gripper_offset: float = 0.0,
     duration: Optional[float] = None,
     object_name: Optional[str] = None,
     skill_description: Optional[str] = None,
@@ -57,8 +56,6 @@ def move_approach_position(
                          - 0.10: 일반 접근 (pick/place)
                          - 0.15~0.20: 큰 물체가 있을 때
 
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-
         duration: 이동 시간 (단위: 초). default=None (기본값 사용)
 
         object_name: 접근 대상 물체 이름 (선택). default=None
@@ -81,7 +78,6 @@ def move_approach_position(
     return skills.move_to_position(
         position=[pos[0], pos[1], approach_height],
         duration=duration,
-        gripper_offset=gripper_offset,
         target_name=object_name,
         skill_description=desc,
     )

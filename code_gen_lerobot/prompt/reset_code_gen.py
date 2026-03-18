@@ -1,4 +1,15 @@
+from pathlib import Path
 from typing import Dict, List, Optional
+
+
+def _get_frame_for_robot(robot_id: int) -> str:
+    """pix2robot 캘리브레이션이 있으면 base_link, 없으면 world."""
+    pix2robot_path = (
+        Path(__file__).parent.parent.parent
+        / "robot_configs" / "pix2robot_matrices"
+        / f"robot{robot_id}_pix2robot_data.npz"
+    )
+    return "base_link" if pix2robot_path.exists() else "world"
 
 
 def lerobot_code_gen_prompt(
@@ -24,6 +35,7 @@ def lerobot_code_gen_prompt(
 
     # 로봇 설정 파일 경로
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
+    frame = _get_frame_for_robot(robot_id)
 
     # 객체 위치 포맷팅
     positions_str = "\n".join([
@@ -75,15 +87,11 @@ def lerobot_code_gen_prompt(
        | `gripper_close()` | Close gripper | - |
        | `move_to_initial_state()` | Move to initial/home position | - |
        | `move_to_free_state()` | Move to safe parking position | - |
-       | `move_to_position(position, gripper_offset=0.0, maintain_pitch=False)` | Move end-effector to [x,y,z] with fixed orientation | position: List[float], gripper_offset: float, maintain_pitch: bool |
+       | `move_to_position(position, maintain_pitch=False)` | Move end-effector to [x,y,z] with fixed orientation | position: List[float], maintain_pitch: bool |
        | `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
 
        **Note**: `move_to_position` maintains current wrist_roll during movement.
        The gripper will NOT rotate during position changes (keeps orientation from rotate_90degree).
-
-       **Gripper Offset**: SO-101 has asymmetric gripper (fixed finger at +Y, moving at -Y).
-       Use `gripper_offset=positions["object"]["gripper_offset"]` when approaching to pick an object.
-       The offset value is calculated from object size and provided in positions dict.
 
        **Maintain Pitch**: Use `maintain_pitch=True` when moving while holding an object (between gripper_close and gripper_open).
 
@@ -92,30 +100,27 @@ def lerobot_code_gen_prompt(
 
        ```
        # PICK pattern (to grasp an object at position):
-       # Use gripper_offset from positions dict for pick approaches
        approach_height = 0.08  # 8cm above object
 
-       # positions is a dict: {{name: {{"position": [x,y,z], "gripper_offset": float, ...}}}}
+       # positions is a dict: {{name: {{"position": [x,y,z], ...}}}}
        pick_obj = positions["object_name"]
        pick_pos = pick_obj["position"]
-       pick_offset = pick_obj["gripper_offset"]
        pick_approach = [pick_pos[0], pick_pos[1], pick_pos[2] + approach_height]
 
        skills.gripper_open()
-       skills.move_to_position(pick_approach, gripper_offset=pick_offset)  # approach with offset
-       skills.move_to_position(pick_pos, gripper_offset=pick_offset)       # descend with offset
-       skills.gripper_close()                                               # grasp object
-       skills.move_to_position(pick_approach, maintain_pitch=True)          # lift object (maintain pitch)
+       skills.move_to_position(pick_approach)    # approach
+       skills.move_to_position(pick_pos)          # descend
+       skills.gripper_close()                      # grasp object
+       skills.move_to_position(pick_approach, maintain_pitch=True)  # lift object (maintain pitch)
 
        # PLACE pattern (to release object at target position):
        # Use maintain_pitch=True while holding object
-       # Use same gripper_offset as pick (pick_offset) to place accurately
        place_obj = positions["target_name"]
        place_pos = place_obj["position"]
        place_approach = [place_pos[0], place_pos[1], place_pos[2] + approach_height]
 
-       skills.move_to_position(place_approach, gripper_offset=pick_offset, maintain_pitch=True)  # approach (holding object)
-       skills.move_to_position(place_pos, gripper_offset=pick_offset, maintain_pitch=True)       # descend to target
+       skills.move_to_position(place_approach, maintain_pitch=True)  # approach (holding object)
+       skills.move_to_position(place_pos, maintain_pitch=True)       # descend to target
        skills.gripper_open()                                          # release object
        skills.move_to_position(place_approach)                        # retract upward
        ```
@@ -131,7 +136,7 @@ def execute_task():
 
     skills = LeRobotSkills(
         robot_config="{robot_config}",
-        frame="world",
+        frame="{frame}",
     )
     skills.connect()
 
@@ -143,26 +148,25 @@ def execute_task():
         skills.move_to_initial_state()
 
         # === Object Positions ===
-        # positions is a dict: {{name: {{"position": [x,y,z], "gripper_offset": float, ...}}}}
+        # positions is a dict: {{name: {{"position": [x,y,z], ...}}}}
         pick_obj = positions["object_name"]
         pick_pos = pick_obj["position"]
-        pick_offset = pick_obj["gripper_offset"]
 
         place_obj = positions["target_name"]
         place_pos = place_obj["position"]
 
-        # === PICK sequence (with gripper offset to avoid fixed finger) ===
+        # === PICK sequence ===
         pick_approach = [pick_pos[0], pick_pos[1], pick_pos[2] + approach_height]
         skills.gripper_open()
-        skills.move_to_position(pick_approach, gripper_offset=pick_offset)
-        skills.move_to_position(pick_pos, gripper_offset=pick_offset)
+        skills.move_to_position(pick_approach)
+        skills.move_to_position(pick_pos)
         skills.gripper_close()
         skills.move_to_position(pick_approach, maintain_pitch=True)
 
-        # === PLACE sequence (maintain_pitch + gripper_offset while holding object) ===
+        # === PLACE sequence (maintain_pitch while holding object) ===
         place_approach = [place_pos[0], place_pos[1], place_pos[2] + approach_height]
-        skills.move_to_position(place_approach, gripper_offset=pick_offset, maintain_pitch=True)
-        skills.move_to_position(place_pos, gripper_offset=pick_offset, maintain_pitch=True)
+        skills.move_to_position(place_approach, maintain_pitch=True)
+        skills.move_to_position(place_pos, maintain_pitch=True)
         skills.gripper_open()
         skills.move_to_position(place_approach)
 

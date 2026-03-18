@@ -62,7 +62,6 @@ def stir(
     segments_per_rotation: int = 8,
     clockwise: bool = True,
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     object_name: Optional[str] = None,
     skill_description: Optional[str] = None,
 ) -> bool:
@@ -118,8 +117,6 @@ def stir(
         duration: Duration for the initial descent move (seconds). default=None.
                   - None: use skills internal default.
 
-        gripper_offset: Gripper TCP offset (meters). default=0.0.
-
         object_name: Name of the target container (optional). default=None.
                      - Used for subgoal labels during recording.
                      - Example: "tea cup", "mixing bowl"
@@ -163,7 +160,7 @@ def stir(
     if not skills.move_to_position(
         position=[start_x, start_y, stir_height],
         duration=duration,
-        gripper_offset=gripper_offset,
+
         maintain_pitch=True,
         target_name=object_name,
         skill_description=f"{desc_prefix}: descend to stir height",
@@ -203,7 +200,7 @@ def stir(
             start=seg_start,
             end=seg_end,
             duration=segment_duration,
-            gripper_offset=gripper_offset,
+    
             maintain_pitch=True,
             target_name=object_name,
             skill_description=(

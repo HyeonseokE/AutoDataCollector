@@ -44,7 +44,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         """Moves the arm to a safe parking position. Call as the very last skill after task completion."""
 
     def move_to_position(self, position: list[float], duration: float = None,
-                         gripper_offset: float = 0.0, target_name: str = None) -> bool:
+                         target_name: str = None) -> bool:
         """Moves the end-effector to the given XYZ position in world coordinates.
         Use this for approach movements (moving above an object before pick/place),
         retreat movements (lifting after pick/place), and transit movements between objects.
@@ -60,10 +60,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         Args:
             position: Target position [x, y, z] in meters in world frame.
             duration: Movement duration in seconds. Uses default if None.
-            gripper_offset: Asymmetric gripper collision avoidance offset in meters.
-                When > 0, uses TCP frame for IK computation, positioning the gripper
-                body higher so the fingertip reaches the target position.
-                Always use the detection value: positions["object"]["gripper_offset"].
             target_name: Name of the target object for subgoal labeling in dataset recording.
                 Example: "yellow dice", "blue dish".
 
@@ -85,7 +81,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         """
 
     def execute_pick_object(self, object_position: list[float],
-                            gripper_offset: float = 0.0, object_name: str = None) -> bool:
+                            object_name: str = None) -> bool:
         """Executes a pick (grasp) action at the given object position.
         Must be called AFTER moving to the approach position above the object.
         The robot descends to the grasp height (2.5cm offset from object top),
@@ -99,8 +95,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         Args:
             object_position: Object position [x, y, z] in meters. Pass as-is from
                 positions dictionary. The function internally handles the grasp offset.
-            gripper_offset: Asymmetric gripper offset in meters.
-                Use positions["object"]["gripper_offset"] from detection results.
             object_name: Name of the object being picked for subgoal labeling.
                 Example: "yellow dice", "red cup".
 
@@ -109,7 +103,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         """
 
     def execute_place_object(self, place_position: list[float],
-                             gripper_offset: float = 0.0, is_table: bool = True,
+                             is_table: bool = True,
                              gripper_open_ratio: float = 1.0, target_name: str = None) -> bool:
         """Executes a place (release) action at the given target position.
         Must be called AFTER moving to the approach position above the target.
@@ -126,7 +120,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         Args:
             place_position: Target position [x, y, z] in meters. Pass the target object/surface
                 position as-is. The z coordinate is only used when is_table=False.
-            gripper_offset: Asymmetric gripper offset in meters.
             is_table: True if placing directly on the table surface (z=0),
                 False if placing on top of another object.
             gripper_open_ratio: How much to open the gripper for release (0.0 to 1.0).
@@ -141,7 +134,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
     def execute_press(self, position: list[float], press_depth: float = 0.01,
                       contact_height: float = 0.02, press_duration: float = 0.5,
                       hold_time: float = 0.3, max_press_torque: int = 400,
-                      duration: float = None, gripper_offset: float = 0.0,
+                      duration: float = None,
                       target_name: str = None) -> bool:
         """Executes a 2-phase press action (normal descent + torque-limited press).
         Must be called AFTER closing the gripper and moving to approach position above target.
@@ -156,7 +149,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             hold_time: How long to hold at pressed position in seconds (default 0.3).
             max_press_torque: Torque limit during press phase (0-1000, default 400).
             duration: Duration for the descent phase. Uses default if None.
-            gripper_offset: Asymmetric gripper offset in meters.
             target_name: Name of the target for subgoal labeling.
                 Example: "power button", "microphone".
 
@@ -166,7 +158,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
 
     def execute_push(self, start_position: list[float], end_position: list[float],
                      push_height: float = 0.01, duration: float = None,
-                     gripper_offset: float = 0.0, object_name: str = None) -> bool:
+                     object_name: str = None) -> bool:
         """Pushes an object in a straight line using Cartesian linear motion.
         Must be called AFTER closing the gripper and moving to approach position above start.
         Internally handles everything after approach:
@@ -185,7 +177,6 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                 Set to approximately 1/3 of the object height for good contact.
                 Too low risks table collision; too high misses the object.
             duration: Push movement duration in seconds. None for auto-calculation based on distance.
-            gripper_offset: Asymmetric gripper offset in meters.
             object_name: Name of the object being pushed for subgoal labeling.
                 Example: "bread", "red block".
 

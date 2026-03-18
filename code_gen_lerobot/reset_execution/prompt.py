@@ -11,7 +11,18 @@ Includes:
 """
 
 import json
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+def _get_frame_for_robot(robot_id: int) -> str:
+    """pix2robot 캘리브레이션이 있으면 base_link, 없으면 world."""
+    pix2robot_path = (
+        Path(__file__).parent.parent.parent
+        / "robot_configs" / "pix2robot_matrices"
+        / f"robot{robot_id}_pix2robot_data.npz"
+    )
+    return "base_link" if pix2robot_path.exists() else "world"
 
 
 def lerobot_reset_spec_gen_prompt(
@@ -101,9 +112,9 @@ Generate a specification that restores the environment to its initial state
 | `move_to_free_state` | Move to safe parking position | - |
 | `rotate_90degree` | Rotate gripper 90 deg | direction: "cw" or "ccw" |
 | `gripper_open` | Open the gripper | - |
-| `move_to_position` | Move end-effector to position | object: str, offset_z: float, apply_gripper_offset: bool |
-| `execute_pick_object` | Descend (3cm from top) + gripper_close + save pitch | object: str, apply_gripper_offset: bool |
-| `execute_place_object` | Descend with saved pitch + gripper_open | target: str, apply_gripper_offset: bool, is_table: bool |
+| `move_to_position` | Move end-effector to position | object: str, offset_z: float |
+| `execute_pick_object` | Descend (3cm from top) + gripper_close + save pitch | object: str |
+| `execute_place_object` | Descend with saved pitch + gripper_open | target: str, is_table: bool |
 
 **execute_pick_object**: Call after moving to pick_approach. Descends to 3cm below object top, closes gripper, and **saves current pitch**.
 **execute_place_object**: Call after moving to place_approach. Descends to place height **with saved pitch restored**, then opens gripper.
@@ -161,33 +172,32 @@ def lerobot_reset_code_gen_prompt(
 
     # 로봇 설정 파일 경로
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
+    frame = _get_frame_for_robot(robot_id)
 
-    # Helper to extract position and gripper_offset from extended or legacy format
-    def get_position_and_offset(info):
+    # Helper to extract position from extended or legacy format
+    def get_position(info):
         if info is None:
-            return None, 0.0
+            return None
         elif isinstance(info, dict) and "position" in info:
-            pos = info["position"]
-            offset = info.get("gripper_offset", 0.02)
-            return pos, offset
+            return info["position"]
         elif isinstance(info, (list, tuple)) and len(info) >= 3:
-            return list(info[:3]), 0.02  # default offset
-        return None, 0.0
+            return list(info[:3])
+        return None
 
-    # 타겟 위치 포맷팅 (simple list - target은 gripper_offset 불필요)
+    # 타겟 위치 포맷팅
     target_lines = []
     for name, info in target_positions.items():
-        pos, _ = get_position_and_offset(info)
+        pos = get_position(info)
         if pos is not None:
             target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
     target_str = "\n".join(target_lines)
 
-    # 현재 위치 포맷팅 (extended format - gripper_offset 포함)
+    # 현재 위치 포맷팅
     current_lines = []
     for name, info in current_positions.items():
-        pos, offset = get_position_and_offset(info)
+        pos = get_position(info)
         if pos is not None:
-            current_lines.append(f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], "gripper_offset": {offset:.4f}}},')
+            current_lines.append(f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},')
     current_str = "\n".join(current_lines)
 
     # Forward spec 포맷팅
@@ -268,10 +278,10 @@ Your task is to generate reset code that moves objects from their current positi
 | `gripper_open(skill_description=None)` | Open gripper | skill_description: str |
 | `move_to_initial_state(skill_description=None)` | Move to initial/home position | skill_description: str |
 | `move_to_free_state(skill_description=None)` | Move to safe parking position | skill_description: str |
-| `move_to_position(position, ..., skill_description=None)` | Move end-effector to [x,y,z] | position, gripper_offset, target_name, skill_description: str |
+| `move_to_position(position, ..., skill_description=None)` | Move end-effector to [x,y,z] | position, target_name, skill_description: str |
 | `rotate_90degree(direction, skill_description=None)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW), skill_description: str |
-| `execute_pick_object(object_position, ..., skill_description=None)` | Descend to pick position (3cm from top), close gripper, save pitch | object_position, gripper_offset, **object_name**: str, skill_description: str |
-| `execute_place_object(place_position, ..., skill_description=None)` | Descend to place position with saved pitch, open gripper 70% | place_position, gripper_offset, is_table, gripper_open_ratio, **target_name**: str, skill_description: str |
+| `execute_pick_object(object_position, ..., skill_description=None)` | Descend to pick position (3cm from top), close gripper, save pitch | object_position, **object_name**: str, skill_description: str |
+| `execute_place_object(place_position, ..., skill_description=None)` | Descend to place position with saved pitch, open gripper 70% | place_position, is_table, gripper_open_ratio, **target_name**: str, skill_description: str |
 
 **execute_pick_object**: Call from pick_approach position. Moves TCP to grasp height, closes gripper, and **saves current pitch**.
   - **IMPORTANT**: Pass the object position as-is. The function internally handles the grasp height offset.
@@ -284,7 +294,6 @@ Your task is to generate reset code that moves objects from their current positi
   - **NOTE**: `execute_place_object` does NOT have `object_name` parameter. Use `target_name` instead.
   - Pitch is automatically restored from pick time
 
-**Gripper Offset**: Use `gripper_offset=current_positions["object"]["gripper_offset"]` ONLY for pick-related calls (pick approach, execute_pick_object, lift after pick). Do NOT pass gripper_offset for place or other movements.
 **skill_description (REQUIRED)**: A natural language sentence describing the semantic intent of each skill call.
   - This is recorded as `skill.natural_language` in the dataset for robot policy learning.
   - Describe WHY the robot is performing this action in context of the reset task.
@@ -296,15 +305,14 @@ Your task is to generate reset code that moves objects from their current positi
 ```python
 # PICK pattern — ALWAYS open gripper BEFORE approaching the object
 cx, cy, cz = <current object position x, y, z>
-offset = <gripper_offset from current_positions>
 approach_height = 0.20
 
 skills.gripper_open(skill_description="open gripper to prepare for picking the <object_name>")
-skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>", skill_description="approach above the <object_name> for grasping")
-skills.execute_pick_object([cx, cy, cz], gripper_offset=offset, object_name="<object_name>", skill_description="descend and grasp the <object_name>")
-skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>", skill_description="lift the <object_name> to safe height after grasping")
+skills.move_to_position([cx, cy, approach_height], target_name="<object_name>", skill_description="approach above the <object_name> for grasping")
+skills.execute_pick_object([cx, cy, cz], object_name="<object_name>", skill_description="descend and grasp the <object_name>")
+skills.move_to_position([cx, cy, approach_height], target_name="<object_name>", skill_description="lift the <object_name> to safe height after grasping")
 
-# PLACE ON TABLE pattern — NO gripper_offset, is_table=True
+# PLACE ON TABLE pattern — is_table=True
 tx, ty, tz = <target position x, y, z>
 
 skills.move_to_position([tx, ty, approach_height], target_name="original position", skill_description="move above the target to place the <object_name>")
@@ -322,7 +330,7 @@ def execute_task():
 
     skills = LeRobotSkills(
         robot_config="{robot_config}",
-        frame="world",
+        frame="{frame}",
     )
     skills.connect()
 
@@ -373,7 +381,7 @@ def execute_task():
 
     skills = LeRobotSkills(
         robot_config="robot_configs/robot/so101_robot3.yaml",
-        frame="world",
+        frame="{frame}",
     )
     skills.connect()
 
@@ -382,20 +390,19 @@ def execute_task():
 
         # Current position (from detection) - red cup is on blue box
         current_pos = [0.20, -0.05, 0.05]
-        offset = 0.02  # gripper_offset
 
         # Target position (where to place) - original position on table
         target_pos = [0.15, 0.05, 0.02]
 
         skills.move_to_initial_state(skill_description="move to initial position to start the reset task")
 
-        # === PICK red cup from current position (with gripper_offset) ===
+        # === PICK red cup from current position ===
         skills.gripper_open(skill_description="open gripper to prepare for picking the red cup")
-        skills.move_to_position([current_pos[0], current_pos[1], approach_height], gripper_offset=offset, target_name="red cup", skill_description="approach above the red cup for grasping")
-        skills.execute_pick_object(current_pos, gripper_offset=offset, object_name="red cup", skill_description="descend and grasp the red cup")
-        skills.move_to_position([current_pos[0], current_pos[1], approach_height], gripper_offset=offset, target_name="red cup", skill_description="lift the red cup to safe height after grasping")
+        skills.move_to_position([current_pos[0], current_pos[1], approach_height], target_name="red cup", skill_description="approach above the red cup for grasping")
+        skills.execute_pick_object(current_pos, object_name="red cup", skill_description="descend and grasp the red cup")
+        skills.move_to_position([current_pos[0], current_pos[1], approach_height], target_name="red cup", skill_description="lift the red cup to safe height after grasping")
 
-        # === PLACE red cup at target position (on table, NO gripper_offset) ===
+        # === PLACE red cup at target position (on table) ===
         skills.move_to_position([target_pos[0], target_pos[1], approach_height], target_name="original position", skill_description="move above the original position to place the red cup back")
         skills.execute_place_object(target_pos, is_table=True, gripper_open_ratio=0.7, target_name="original position", skill_description="lower the red cup onto its original position on the table")
         skills.move_to_position([target_pos[0], target_pos[1], approach_height], target_name="original position", skill_description="retreat upward after placing the red cup")
@@ -421,7 +428,7 @@ if __name__ == "__main__":
 7. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
 8. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object (grasp offset handled internally)
 9. Use `approach_height = 0.20` (20cm) for all approach/lift movements
-10. **gripper_offset**: ONLY use for pick-related calls (pick approach, execute_pick_object, lift after pick). Do NOT pass gripper_offset for place or other movements
+10. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement
 11. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 12. Use `is_table=True` when placing on table
 13. Always include try/finally for proper cleanup
@@ -446,7 +453,7 @@ if __name__ == "__main__":
 def turn0_reset_scene_understanding_prompt(
     original_instruction: str,
     reset_mode: str,
-    workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]],
+    workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]] = None,
     original_object_labels: List[str] = None,
 ) -> str:
     """
@@ -458,19 +465,16 @@ def turn0_reset_scene_understanding_prompt(
     Args:
         original_instruction: 원래 forward 태스크 명령
         reset_mode: "original" | "random"
-        workspace_bounds: ((x_min, x_max), (y_min, y_max)) in meters
+        workspace_bounds: (legacy, 미사용)
         original_object_labels: Forward에서 검출된 원래 물체 라벨 리스트
     """
-    (x_min, x_max), (y_min, y_max) = workspace_bounds
-
-    workspace_desc = f"""\
+    workspace_desc = """\
 In Image 1, the robot's reachable workspace is visually marked:
-- CYAN DOTTED ARCS show the robot's min/max reach boundaries (circular around robot base)
-- The DARKENED areas outside the convex hull of reachable points are UNREACHABLE by the robot
-- The BRIGHT area inside is where objects can be placed
-
-Workspace bounds: x=[{x_min:.2f}, {x_max:.2f}], y=[{y_min:.2f}, {y_max:.2f}]m
-All object placements MUST be within this workspace."""
+- The BRIGHT area shows the robot's reachable donut-shaped workspace (between min and max reach from the robot base)
+- The DARKENED areas are UNREACHABLE by the robot (too close to robot base, or too far away)
+- CYAN DOTTED ARCS show the inner (min reach) and outer (max reach) boundaries
+- GREEN RECTANGLE shows the camera FOV safe margin (30px inset) — objects must stay within this rectangle
+All object placements MUST be within the intersection of the bright donut area AND the green rectangle."""
 
     if reset_mode == "original":
         mode_desc = f"""\
@@ -571,52 +575,48 @@ def turn_codegen_reset_prompt(
     current_positions: Dict,
     robot_id: int,
     is_random_reset: bool,
-    workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]],
+    workspace_bounds=None,
     all_points: Dict = None,
 ) -> str:
     """
     CodeGen Turn: Reset 코드 생성 프롬프트 (VLM multi-turn 용).
-
-    기존 lerobot_reset_code_gen_prompt()의 스킬 API/템플릿/가이드라인을
-    multi-turn chat 턴 형식으로 재구성.
 
     Args:
         target_positions: 목표 위치 dict (extended format)
         current_positions: 현재 위치 dict (extended format)
         robot_id: 로봇 번호 (2 or 3)
         is_random_reset: True면 random mode, False면 original mode
-        workspace_bounds: ((x_min, x_max), (y_min, y_max)) in meters
+        workspace_bounds: (legacy, 미사용)
         all_points: VLM Turn 2+에서 검출된 모든 포인트 (optional, for context)
     """
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
-    (x_min, x_max), (y_min, y_max) = workspace_bounds
+    frame = _get_frame_for_robot(robot_id)
 
-    # Helper to extract position and gripper_offset
-    def get_pos_offset(info):
+    # Helper to extract position
+    def get_pos(info):
         if info is None:
-            return None, 0.0
+            return None
         elif isinstance(info, dict) and "position" in info:
-            return info["position"], info.get("gripper_offset", 0.02)
+            return info["position"]
         elif isinstance(info, (list, tuple)) and len(info) >= 3:
-            return list(info[:3]), 0.02
-        return None, 0.0
+            return list(info[:3])
+        return None
 
     # Format target positions
     target_lines = []
     for name, info in target_positions.items():
-        pos, _ = get_pos_offset(info)
+        pos = get_pos(info)
         if pos is not None:
             target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
     target_str = "\n".join(target_lines)
 
-    # Format current positions (with gripper_offset)
+    # Format current positions
     current_lines = []
     for name, info in current_positions.items():
-        pos, offset = get_pos_offset(info)
+        pos = get_pos(info)
         if pos is not None:
             current_lines.append(
-                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], '
-                f'"gripper_offset": {offset:.4f}}},'
+                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
             )
     current_str = "\n".join(current_lines)
 
@@ -637,9 +637,9 @@ Now generate executable Python code for the reset task.
 {task_desc}
 
 ### **WORKSPACE CONSTRAINT**
-As shown by the cyan arcs and bright area in the scene image, all target positions must be within:
-x=[{x_min:.2f}, {x_max:.2f}], y=[{y_min:.2f}, {y_max:.2f}]m.
-Positions outside this range are unreachable.
+The robot's reachable workspace is the intersection of: (1) a donut-shaped reach area, and (2) the camera FOV safe margin (green rectangle).
+All target positions are pre-validated to be within this area.
+Do NOT modify the provided target positions.
 
 ### **Environment States**
 Object position z-coordinate = object height (table surface is z=0).
@@ -665,10 +665,10 @@ Object position z-coordinate = object height (table surface is z=0).
 | `gripper_open(skill_description=None)` | Open gripper | skill_description: str |
 | `move_to_initial_state(skill_description=None)` | Move to initial/home position | skill_description: str |
 | `move_to_free_state(skill_description=None)` | Move to safe parking position | skill_description: str |
-| `move_to_position(position, ..., skill_description=None)` | Move end-effector to [x,y,z] | position, gripper_offset, target_name, skill_description: str |
+| `move_to_position(position, ..., skill_description=None)` | Move end-effector to [x,y,z] | position, target_name, skill_description: str |
 | `rotate_90degree(direction, skill_description=None)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW), skill_description: str |
-| `execute_pick_object(object_position, ..., skill_description=None)` | Descend to pick position (3cm from top), close gripper, save pitch | object_position, gripper_offset, **object_name**: str, skill_description: str |
-| `execute_place_object(place_position, ..., skill_description=None)` | Descend to place position with saved pitch, open gripper 70% | place_position, gripper_offset, is_table, gripper_open_ratio, **target_name**: str, skill_description: str |
+| `execute_pick_object(object_position, ..., skill_description=None)` | Descend to pick position (3cm from top), close gripper, save pitch | object_position, **object_name**: str, skill_description: str |
+| `execute_place_object(place_position, ..., skill_description=None)` | Descend to place position with saved pitch, open gripper 70% | place_position, is_table, gripper_open_ratio, **target_name**: str, skill_description: str |
 
 **execute_pick_object**: Call from pick_approach position. Moves TCP to grasp height, closes gripper, and **saves current pitch**.
   - **IMPORTANT**: Pass the object position as-is. The function internally handles the grasp height offset.
@@ -681,7 +681,6 @@ Object position z-coordinate = object height (table surface is z=0).
   - **NOTE**: `execute_place_object` does NOT have `object_name` parameter. Use `target_name` instead.
   - Pitch is automatically restored from pick time
 
-**Gripper Offset**: Use `gripper_offset=current_positions["object"]["gripper_offset"]` ONLY for pick-related calls (pick approach, execute_pick_object, lift after pick). Do NOT pass gripper_offset for place or other movements.
 **skill_description (REQUIRED)**: A natural language sentence describing the semantic intent of each skill call.
   - Describe WHY the robot is performing this action in context of the reset task.
   - Each call MUST have a unique, descriptive `skill_description`.
@@ -692,15 +691,14 @@ Object position z-coordinate = object height (table surface is z=0).
 ```python
 # PICK pattern — ALWAYS open gripper BEFORE approaching the object
 cx, cy, cz = <current object position x, y, z>
-offset = <gripper_offset from current_positions>
 approach_height = 0.20
 
 skills.gripper_open(skill_description="open gripper to prepare for picking the <object_name>")
-skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>", skill_description="approach above the <object_name> for grasping")
-skills.execute_pick_object([cx, cy, cz], gripper_offset=offset, object_name="<object_name>", skill_description="descend and grasp the <object_name>")
-skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>", skill_description="lift the <object_name> to safe height after grasping")
+skills.move_to_position([cx, cy, approach_height], target_name="<object_name>", skill_description="approach above the <object_name> for grasping")
+skills.execute_pick_object([cx, cy, cz], object_name="<object_name>", skill_description="descend and grasp the <object_name>")
+skills.move_to_position([cx, cy, approach_height], target_name="<object_name>", skill_description="lift the <object_name> to safe height after grasping")
 
-# PLACE ON TABLE pattern — NO gripper_offset, is_table=True
+# PLACE ON TABLE pattern — is_table=True
 tx, ty, tz = <target position x, y, z>
 
 skills.move_to_position([tx, ty, approach_height], target_name="original position", skill_description="move above the target to place the <object_name>")
@@ -718,7 +716,7 @@ def execute_task():
 
     skills = LeRobotSkills(
         robot_config="{robot_config}",
-        frame="world",
+        frame="{frame}",
     )
     skills.connect()
 
@@ -763,7 +761,7 @@ if __name__ == "__main__":
 7. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
 8. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object (grasp offset handled internally)
 9. Use `approach_height = 0.20` (20cm) for all approach/lift movements
-10. **gripper_offset**: ONLY use for pick-related calls (pick approach, execute_pick_object, lift after pick). Do NOT pass gripper_offset for place or other movements
+10. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement
 11. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 12. Use `is_table=True` when placing on table
 13. Always include try/finally for proper cleanup
@@ -799,7 +797,7 @@ def codegen_reset_with_context_prompt(
     current_positions: Dict,
     robot_id: int,
     is_random_reset: bool,
-    workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]],
+    workspace_bounds=None,
     all_points: Dict = None,
 ) -> str:
     """
@@ -807,31 +805,30 @@ def codegen_reset_with_context_prompt(
     Session 1의 누적 토큰 없이 깨끗한 세션에서 코드 생성.
     """
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
-    (x_min, x_max), (y_min, y_max) = workspace_bounds
+    frame = _get_frame_for_robot(robot_id)
 
-    def get_pos_offset(info):
+    def get_pos(info):
         if info is None:
-            return None, 0.0
+            return None
         elif isinstance(info, dict) and "position" in info:
-            return info["position"], info.get("gripper_offset", 0.02)
+            return info["position"]
         elif isinstance(info, (list, tuple)) and len(info) >= 3:
-            return list(info[:3]), 0.02
-        return None, 0.0
+            return list(info[:3])
+        return None
 
     target_lines = []
     for name, info in target_positions.items():
-        pos, _ = get_pos_offset(info)
+        pos = get_pos(info)
         if pos is not None:
             target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
     target_str = "\n".join(target_lines)
 
     current_lines = []
     for name, info in current_positions.items():
-        pos, offset = get_pos_offset(info)
+        pos = get_pos(info)
         if pos is not None:
             current_lines.append(
-                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], '
-                f'"gripper_offset": {offset:.4f}}},'
+                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
             )
     current_str = "\n".join(current_lines)
 
@@ -853,8 +850,9 @@ def codegen_reset_with_context_prompt(
 {task_desc}
 
 ### **WORKSPACE CONSTRAINT**
-All target positions must be within: x=[{x_min:.2f}, {x_max:.2f}], y=[{y_min:.2f}, {y_max:.2f}]m.
-Positions outside this range are unreachable.
+The robot's reachable workspace is the intersection of: (1) a donut-shaped reach area, and (2) the camera FOV safe margin (green rectangle).
+All target positions are pre-validated to be within this area.
+Do NOT modify the provided target positions.
 
 ### **Environment States**
 Object position z-coordinate = object height (table surface is z=0).
@@ -880,32 +878,29 @@ Object position z-coordinate = object height (table surface is z=0).
 | `gripper_open()` | Open gripper | - |
 | `move_to_initial_state()` | Move to initial/home position | - |
 | `move_to_free_state()` | Move to safe parking position | - |
-| `move_to_position(position, ...)` | Move end-effector to [x,y,z] | position, gripper_offset, target_name |
+| `move_to_position(position, ...)` | Move end-effector to [x,y,z] | position, target_name |
 | `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
-| `execute_pick_object(object_position, ...)` | Descend to pick, close gripper, save pitch | object_position, gripper_offset, object_name |
-| `execute_place_object(place_position, ...)` | Descend to place with saved pitch, open gripper | place_position, gripper_offset, is_table, gripper_open_ratio, target_name |
+| `execute_pick_object(object_position, ...)` | Descend to pick, close gripper, save pitch | object_position, object_name |
+| `execute_place_object(place_position, ...)` | Descend to place with saved pitch, open gripper | place_position, is_table, gripper_open_ratio, target_name |
 
 **execute_pick_object**: Pass the object position as-is. The function internally handles the grasp height offset.
 **execute_place_object**: Pass the target position as-is. The function internally calculates the correct release height.
   - is_table=True: place on table, is_table=False: place on another object
   - **ALWAYS use `gripper_open_ratio=0.7`**
 
-**Gripper Offset**: Use `gripper_offset=current_positions["object"]["gripper_offset"]` ONLY for pick-related calls. Do NOT pass gripper_offset for place or other movements.
-
 ### **Skill Composition Patterns** (MUST follow exactly)
 
 ```python
 # PICK pattern — ALWAYS open gripper BEFORE approaching the object
 cx, cy, cz = <current object position x, y, z>
-offset = <gripper_offset from current_positions>
 approach_height = 0.20
 
 skills.gripper_open()
-skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>")
-skills.execute_pick_object([cx, cy, cz], gripper_offset=offset, object_name="<object_name>")
-skills.move_to_position([cx, cy, approach_height], gripper_offset=offset, target_name="<object_name>")
+skills.move_to_position([cx, cy, approach_height], target_name="<object_name>")
+skills.execute_pick_object([cx, cy, cz], object_name="<object_name>")
+skills.move_to_position([cx, cy, approach_height], target_name="<object_name>")
 
-# PLACE ON TABLE pattern — NO gripper_offset, is_table=True
+# PLACE ON TABLE pattern — is_table=True
 tx, ty, tz = <target position x, y, z>
 
 skills.move_to_position([tx, ty, approach_height], target_name="original position")
@@ -923,7 +918,7 @@ def execute_task():
 
     skills = LeRobotSkills(
         robot_config="{robot_config}",
-        frame="world",
+        frame="{frame}",
     )
     skills.connect()
 
@@ -957,6 +952,60 @@ if __name__ == "__main__":
     execute_task()
 ```
 
+### **Unstacking (Disassembling a Stack)**
+
+When objects are stacked (one object sitting on top of another), you MUST unstack from **top to bottom**.
+
+- **How to detect stacking from z-values**:
+  Each object's z-value = the height of its top surface from the table (z=0).
+  When objects are on the table, z ≈ the object's own height.
+  When stacked, z = sum of heights below + own height, so z is much higher than its original z.
+  **The object with the highest z is the topmost** — always pick it first.
+  Example with 3 blocks stacked (A bottom, B middle, C top), each block ~2cm tall:
+    - A (on table): z ≈ 0.02 (its own height ~2cm)
+    - B (on A): z ≈ 0.06 (A's height + B's height ≈ 6cm)
+    - C (on B): z ≈ 0.08 (A's height + B's height + C's height ≈ 8cm)
+  → Pick order: C (z=0.08) → B (z=0.06) → A (z=0.02)
+
+- **Order**: Always pick the topmost object first (highest z). Never pick a lower object while something is on top.
+- **Pick from stack**: Pass the current (elevated) position as-is to `execute_pick_object` — the function handles grasp height internally.
+- **Place on table**: Use `is_table=True` when placing the unstacked object back to its target (table-level) position.
+
+```python
+# UNSTACK pattern — always pick highest-z object first
+# Example: 3 blocks stacked — C(top, z=0.08), B(middle, z=0.06), A(bottom, z=0.02)
+
+# Step 1: Pick the TOP object C (highest z = 0.08)
+skills.gripper_open()
+skills.move_to_position([cx, cy, approach_height], target_name="C")
+skills.execute_pick_object([cx, cy, 0.08], object_name="C")
+skills.move_to_position([cx, cy, approach_height], target_name="C")
+
+skills.move_to_position([c_tx, c_ty, approach_height], target_name="original position")
+skills.execute_place_object([c_tx, c_ty, c_tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
+skills.move_to_position([c_tx, c_ty, approach_height], target_name="original position")
+
+# Step 2: Pick the MIDDLE object B (z = 0.06) — safe because C is removed
+skills.gripper_open()
+skills.move_to_position([bx, by, approach_height], target_name="B")
+skills.execute_pick_object([bx, by, 0.06], object_name="B")
+skills.move_to_position([bx, by, approach_height], target_name="B")
+
+skills.move_to_position([b_tx, b_ty, approach_height], target_name="original position")
+skills.execute_place_object([b_tx, b_ty, b_tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
+skills.move_to_position([b_tx, b_ty, approach_height], target_name="original position")
+
+# Step 3: Pick the BOTTOM object A (z = 0.02) — safe because B and C are removed
+skills.gripper_open()
+skills.move_to_position([ax, ay, approach_height], target_name="A")
+skills.execute_pick_object([ax, ay, 0.02], object_name="A")
+skills.move_to_position([ax, ay, approach_height], target_name="A")
+
+skills.move_to_position([a_tx, a_ty, approach_height], target_name="original position")
+skills.execute_place_object([a_tx, a_ty, a_tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
+skills.move_to_position([a_tx, a_ty, approach_height], target_name="original position")
+```
+
 ### **Guidelines**
 
 1. Generate code that moves each object from current to target position
@@ -965,11 +1014,12 @@ if __name__ == "__main__":
 4. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
 5. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
 6. Use `approach_height = 0.20` (20cm) for all approach/lift movements
-7. **gripper_offset**: ONLY use for pick-related calls
+7. **Pitch Handling**: Pitch is automatically saved at pick and restored at place
 8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 9. Use `is_table=True` when placing on table
 10. Always include try/finally for proper cleanup
 11. Always start with `move_to_initial_state()`, end with `move_to_initial_state()` and `move_to_free_state()`
+12. **Unstacking**: If objects are stacked, always unstack from top to bottom before moving them
 
 ### **Output Format**
 - Provide complete executable Python code

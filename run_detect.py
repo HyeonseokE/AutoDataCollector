@@ -111,16 +111,13 @@ def draw_workspace_overlay(
     # 실제 workspace 기반으로 그리드 범위 계산
     min_reach_cm = workspace.min_reach * 100  # 5cm
     max_reach_cm = workspace.max_reach * 100  # 40.7cm
-    x_min_world_cm = workspace.x_min_world * 100  # 12cm
-
     # Robot base 실제 위치 (World frame, m) - workspace 거리 계산용
-    # robot_y_cm은 이제 World frame Y 좌표 그대로 (반전 없음)
     robot_x_m = robot_x_cm / 100.0
     robot_y_m = robot_y_cm / 100.0
 
     # 유효 범위 계산 (detection world frame)
-    # Robot base 중심으로 reach 범위 + x_min_world 제약
-    x_min = max(x_min_world_cm, robot_x_cm - max_reach_cm)
+    # Robot base 중심으로 reach 범위
+    x_min = robot_x_cm - max_reach_cm
     x_max = robot_x_cm + max_reach_cm
     y_min = robot_y_cm - max_reach_cm
     y_max = robot_y_cm + max_reach_cm
@@ -138,11 +135,7 @@ def draw_workspace_overlay(
         Returns:
             True if reachable
         """
-        # [1] World frame 제약: x >= x_min_world
-        if x_world_m < workspace.x_min_world:
-            return False
-
-        # [2] Robot base로부터의 거리 계산 (XY 평면)
+        # Robot base로부터의 거리 계산 (XY 평면)
         dx = x_world_m - robot_x_m
         dy = y_world_m - robot_y_m
         distance = np.sqrt(dx * dx + dy * dy)
@@ -385,21 +378,7 @@ def draw_workspace_overlay(
     except Exception:
         pass  # robot base가 이미지 밖이면 표시 안함
 
-    # x_min_world 선 그리기 (세로선) - Cyan으로 통일
-    x_min_pixels = []
-    try:
-        for y_cm in np.arange(y_min, y_max, 2):
-            pu, pv = transformer.world_to_pixel(x_min_world_cm, y_cm)
-            if 0 <= pu < image.shape[1] and 0 <= pv < image.shape[0]:
-                cv2.circle(result, (pu, pv), 2, COLOR_CYAN, -1)
-                x_min_pixels.append((pu, pv))
-        # x_min 라벨 위치: 가장 위쪽 점의 오른쪽 (화면 내 보이도록)
-        if x_min_pixels:
-            top_point = min(x_min_pixels, key=lambda p: p[1])
-            label_x = max(5, top_point[0] + 5)  # 최소 5px 이상
-            x_min_label_pos = (label_x, top_point[1] + 10)
-    except Exception:
-        pass
+    x_min_label_pos = None
 
     # Workspace bounds 라벨 표시 (작은 폰트)
     if min_reach_label_pos and 0 <= min_reach_label_pos[0] < image.shape[1]:
@@ -409,10 +388,6 @@ def draw_workspace_overlay(
     if max_reach_label_pos and 0 <= max_reach_label_pos[0] < image.shape[1]:
         cv2.putText(result, f"max_reach({max_reach_cm:.0f}cm)",
                     max_reach_label_pos, FONT_SMALL, FONT_SCALE_SMALL, COLOR_CYAN, FONT_THICKNESS_SMALL)
-
-    if x_min_label_pos and 0 <= x_min_label_pos[0] < image.shape[1]:
-        cv2.putText(result, f"x_min({x_min_world_cm:.0f}cm)",
-                    x_min_label_pos, FONT_SMALL, FONT_SCALE_SMALL, COLOR_CYAN, FONT_THICKNESS_SMALL)
 
     # 범례 추가 - 텍스트 색상으로 의미 매핑
     legend_x = image.shape[1] - 110
@@ -527,15 +502,31 @@ def run_realtime_detection(
     )
     detector.load_model()
 
+    # Pix2Robot 캘리브레이션 로드 (pixel → robot 직접 변환)
     print("[System] Loading calibration...")
-    calibration_file = PROJECT_ROOT / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
+    pix2robot = None
+    try:
+        from pix2robot_calibrator import Pix2RobotCalibrator
+        pix2robot_path = PROJECT_ROOT / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
+        if pix2robot_path.exists():
+            pix2robot = Pix2RobotCalibrator(robot_id=robot_id)
+            if pix2robot.load(str(pix2robot_path)):
+                print(f"[System] Pix2Robot calibration loaded ({len(pix2robot.pixel_points)} points)")
+            else:
+                pix2robot = None
+    except Exception as e:
+        print(f"[System] Pix2Robot not available: {e}")
+
+    # Fallback: 기존 CoordinateTransformer
     transformer = CoordinateTransformer()
-    if calibration_file.exists():
-        transformer.load_calibration(str(calibration_file))
-        transformer.set_camera_intrinsics(camera.get_intrinsics())
-        print("[System] Calibration loaded")
-    else:
-        print("[Warning] No calibration found! Robot coordinates will be unavailable.")
+    if pix2robot is None:
+        calibration_file = PROJECT_ROOT / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
+        if calibration_file.exists():
+            transformer.load_calibration(str(calibration_file))
+            transformer.set_camera_intrinsics(camera.get_intrinsics())
+            print("[System] Fallback: CoordinateTransformer loaded")
+        else:
+            print("[Warning] No calibration found! Robot coordinates will be unavailable.")
 
     # Workspace 로드 (FrameTransformer 포함)
     print("[System] Loading workspace with frame transformer...")
@@ -553,7 +544,7 @@ def run_realtime_detection(
         print(f"[Warning] Frame config not found: {frame_config_path}")
 
     workspace = BaseWorkspace(frame_transformer=frame_transformer)
-    print(f"[System] Workspace loaded: x_min={workspace.x_min_world}m, reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
+    print(f"[System] Workspace loaded: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
 
     # 쿼리 문자열 생성 (Grounding DINO 형식)
     query_string = ". ".join(queries) + "."
@@ -642,91 +633,118 @@ def run_realtime_detection(
                     cx, cy = det.center
 
                     # 로봇 좌표 계산 (매 프레임)
-                    if transformer.is_ready:
+                    robot_coords = None
+                    position_m = None
+
+                    # 1) Pix2Robot 직접 변환 (depth로 물체 높이 추정)
+                    if pix2robot is not None:
+                        try:
+                            obj_depth = camera.get_depth_at_pixel(cx, cy, depth) if depth is not None else None
+                            pos = pix2robot.pixel_to_robot(cx, cy, depth_m=obj_depth)
+                            position_m = np.array(pos)
+                            if unit == "m":
+                                robot_coords = tuple(pos)
+                            else:
+                                robot_coords = (pos[0] * 100.0, pos[1] * 100.0, pos[2] * 100.0)
+                        except Exception:
+                            pass
+
+                    # 2) Fallback: 기존 CoordinateTransformer
+                    if robot_coords is None and transformer.is_ready:
                         depth_m = camera.get_depth_at_pixel(cx, cy, depth)
-                        # 3D 캘리브레이션이 있으면 depth 사용, 없으면 2D fallback
                         world_coords_cm = transformer.pixel_depth_to_world(cx, cy, depth_m)
 
                         if unit == "m":
-                            world_coords = (
+                            robot_coords = (
                                 world_coords_cm[0] / 100.0,
                                 world_coords_cm[1] / 100.0,
                                 world_coords_cm[2] / 100.0
                             )
                         else:
-                            world_coords = (
+                            robot_coords = (
                                 world_coords_cm[0],
                                 world_coords_cm[1],
                                 world_coords_cm[2]
                             )
-
-                        # Workspace 범위 체크 (is_reachable는 meters 단위 필요)
                         position_m = np.array([
                             world_coords_cm[0] / 100.0,
                             world_coords_cm[1] / 100.0,
                             world_coords_cm[2] / 100.0
                         ])
 
-                        # Workspace 범위 체크 (skip_workspace_filter=True면 건너뜀)
-                        if not skip_workspace_filter and not workspace.is_reachable(position_m):
-                            # Workspace 밖 - 검출 결과 무시 (디버그 로그 추가)
-                            # 디버그: 왜 필터링되었는지 출력
-                            frame_info = workspace._transformer.get_frame_info("world") if workspace._transformer else None
-                            if frame_info:
-                                robot_pos = frame_info["robot_position"]
-                                dx = position_m[0] - robot_pos[0]
-                                dy = position_m[1] - robot_pos[1]
-                                dist_from_robot = np.sqrt(dx*dx + dy*dy)
-                                print(f"[DEBUG] {matched_query} filtered: world=({position_m[0]:.3f}, {position_m[1]:.3f}, {position_m[2]:.3f})m, "
-                                      f"robot=({robot_pos[0]:.3f}, {robot_pos[1]:.3f})m, "
-                                      f"dist={dist_from_robot:.3f}m (reach=[{workspace.min_reach:.3f}, {workspace.max_reach:.3f}]m)")
-                            else:
-                                print(f"[DEBUG] {matched_query} filtered: world=({position_m[0]:.3f}, {position_m[1]:.3f}, {position_m[2]:.3f})m (no frame info)")
-                            continue
+                    if robot_coords is None:
+                        continue
 
-                        # 더 높은 confidence일 때 결과 저장
-                        if det.confidence > last_confidences.get(matched_query, 0):
-                            last_positions[matched_query] = world_coords
-                            last_confidences[matched_query] = det.confidence
+                    # Workspace 범위 체크 (skip_workspace_filter=True면 건너뜀)
+                    if not skip_workspace_filter and position_m is not None and not workspace.is_reachable(position_m):
+                        frame_info = workspace._transformer.get_frame_info("world") if workspace._transformer else None
+                        if frame_info:
+                            robot_pos = frame_info["robot_position"]
+                            dx = position_m[0] - robot_pos[0]
+                            dy = position_m[1] - robot_pos[1]
+                            dist_from_robot = np.sqrt(dx*dx + dy*dy)
+                            print(f"[DEBUG] {matched_query} filtered: pos=({position_m[0]:.3f}, {position_m[1]:.3f}, {position_m[2]:.3f})m, "
+                                  f"robot=({robot_pos[0]:.3f}, {robot_pos[1]:.3f})m, "
+                                  f"dist={dist_from_robot:.3f}m (reach=[{workspace.min_reach:.3f}, {workspace.max_reach:.3f}]m)")
+                        else:
+                            print(f"[DEBUG] {matched_query} filtered: pos=({position_m[0]:.3f}, {position_m[1]:.3f}, {position_m[2]:.3f})m")
+                        continue
 
-                            # 실시간 검출 로그 출력
-                            print(f"[Detection] Found '{matched_query}': "
-                                  f"pos=[{world_coords[0]:.4f}, {world_coords[1]:.4f}, {world_coords[2]:.4f}]{unit}, "
-                                  f"conf={det.confidence:.3f}")
+                    world_coords = robot_coords
 
-                            # 픽셀 좌표 저장 (Judge용)
-                            last_pixel_coords[matched_query] = (int(cx), int(cy))
+                    # 더 높은 confidence일 때 결과 저장
+                    if det.confidence > last_confidences.get(matched_query, 0):
+                        last_positions[matched_query] = world_coords
+                        last_confidences[matched_query] = det.confidence
 
-                            # bbox 실제 크기 계산 (depth 기반)
-                            if det.bbox is not None and depth_m is not None and depth_m > 0:
-                                x1, y1, x2, y2 = det.bbox
-                                # bbox 픽셀 좌표 저장
-                                last_bbox_pixels[matched_query] = (int(x1), int(y1), int(x2), int(y2))
+                        # 실시간 검출 로그 출력
+                        print(f"[Detection] Found '{matched_query}': "
+                              f"pos=[{world_coords[0]:.4f}, {world_coords[1]:.4f}, {world_coords[2]:.4f}]{unit}, "
+                              f"conf={det.confidence:.3f}")
 
-                                width_px = x2 - x1
-                                height_px = y2 - y1
-                                # 실제 크기 = (픽셀 크기 * depth) / focal_length
-                                width_m = (width_px * depth_m) / fx
-                                height_m = (height_px * depth_m) / fx
-                                last_bbox_sizes[matched_query] = (width_m, height_m)
+                        # 픽셀 좌표 저장 (Judge용)
+                        last_pixel_coords[matched_query] = (int(cx), int(cy))
 
-                        # bbox 중심점에 마커 표시
-                        cv2.circle(vis_image, (int(cx), int(cy)), 5, (0, 255, 0), -1)
+                        # bbox 실제 크기 계산
+                        if det.bbox is not None:
+                            x1, y1, x2, y2 = det.bbox
+                            last_bbox_pixels[matched_query] = (int(x1), int(y1), int(x2), int(y2))
 
-                        # 좌표 정보를 bbox 중심점 바로 옆에 (x, y, z) 포맷으로 표시 (항상 cm 단위)
-                        coord_text = f"({world_coords_cm[0]:.1f}, {world_coords_cm[1]:.1f}, {world_coords_cm[2]:.1f})cm"
-                        text_x = int(cx) + 10
-                        text_y = int(cy) + 5
+                            if pix2robot is not None:
+                                # Pix2Robot으로 bbox 크기 계산
+                                try:
+                                    r1 = pix2robot.pixel_to_robot(int(x1), int(y1))
+                                    r2 = pix2robot.pixel_to_robot(int(x2), int(y2))
+                                    last_bbox_sizes[matched_query] = (abs(r2[0]-r1[0]), abs(r2[1]-r1[1]))
+                                except Exception:
+                                    pass
+                            elif depth is not None:
+                                depth_m = camera.get_depth_at_pixel(cx, cy, depth)
+                                if depth_m is not None and depth_m > 0:
+                                    width_px = x2 - x1
+                                    height_px = y2 - y1
+                                    width_m = (width_px * depth_m) / fx
+                                    height_m = (height_px * depth_m) / fx
+                                    last_bbox_sizes[matched_query] = (width_m, height_m)
 
-                        # 배경 박스 (가독성)
-                        (text_w, text_h), _ = cv2.getTextSize(coord_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                        cv2.rectangle(vis_image, (text_x - 2, text_y - text_h - 2),
-                                     (text_x + text_w + 2, text_y + 4), (0, 0, 0), -1)
+                    # bbox 중심점에 마커 표시
+                    cv2.circle(vis_image, (int(cx), int(cy)), 5, (0, 255, 0), -1)
 
-                        # 좌표 텍스트
-                        cv2.putText(vis_image, coord_text,
-                                   (text_x, text_y),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    # 좌표 정보 표시 (cm 단위)
+                    coords_cm = (world_coords[0]*100, world_coords[1]*100, world_coords[2]*100) if unit == "m" else world_coords
+                    coord_text = f"({coords_cm[0]:.1f}, {coords_cm[1]:.1f}, {coords_cm[2]:.1f})cm"
+                    text_x = int(cx) + 10
+                    text_y = int(cy) + 5
+
+                    # 배경 박스 (가독성)
+                    (text_w, text_h), _ = cv2.getTextSize(coord_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(vis_image, (text_x - 2, text_y - text_h - 2),
+                                 (text_x + text_w + 2, text_y + 4), (0, 0, 0), -1)
+
+                    # 좌표 텍스트
+                    cv2.putText(vis_image, coord_text,
+                               (text_x, text_y),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
             # Workspace overlay 그리기 (항상 표시)
             vis_image = draw_workspace_overlay(vis_image, transformer, workspace, robot_id=robot_id)
@@ -808,20 +826,6 @@ def run_realtime_detection(
     if return_extended:
         from code_gen_lerobot.reset_execution.workspace import is_grippable
 
-        def calculate_gripper_offset(bbox_size_m, position_world, default_offset=0.02):
-            """
-            Gripper offset 크기 계산.
-
-            SO-101 비대칭 그리퍼 (고정 손가락 + 가동 손가락) 충돌 방지를 위한 오프셋.
-
-            Returns:
-                gripper_offset in meters
-            """
-            # 고정 4.5cm offset 사용
-            FIXED_OFFSET = 0.045  # 4.5cm
-
-            return FIXED_OFFSET
-
         extended_results = {}
         for q in queries:
             pos = last_positions.get(q)
@@ -831,18 +835,11 @@ def run_realtime_detection(
                 bbox_size = last_bbox_sizes.get(q)
                 grippable = is_grippable(bbox_size) if bbox_size else True
 
-                # grippable한 물체만 gripper_offset 계산
-                if grippable:
-                    gripper_offset = calculate_gripper_offset(bbox_size, pos)
-                else:
-                    gripper_offset = 0.0  # 잡을 수 없는 물체는 offset 불필요
-
                 extended_results[q] = {
                     "position": list(pos),
                     "bbox_size_m": list(bbox_size) if bbox_size else None,
                     "confidence": last_confidences.get(q, 0.0),
                     "grippable": grippable,
-                    "gripper_offset": gripper_offset,
                     # Judge용 픽셀 좌표 정보
                     "pixel_coords": last_pixel_coords.get(q),  # (cx, cy)
                     "bbox_pixels": last_bbox_pixels.get(q),  # (x1, y1, x2, y2)

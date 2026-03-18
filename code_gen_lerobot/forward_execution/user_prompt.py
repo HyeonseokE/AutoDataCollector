@@ -4,9 +4,20 @@ Forward Execution Prompts
 LLM prompts for forward task execution (code generation and spec generation).
 """
 
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from .skill_api_doc import ROBOT_API_DOC
+
+
+def _get_frame_for_robot(robot_id: int) -> str:
+    """pix2robot 캘리브레이션이 있으면 base_link, 없으면 world."""
+    pix2robot_path = (
+        Path(__file__).parent.parent.parent
+        / "robot_configs" / "pix2robot_matrices"
+        / f"robot{robot_id}_pix2robot_data.npz"
+    )
+    return "base_link" if pix2robot_path.exists() else "world"
 
 
 def lerobot_code_gen_prompt(
@@ -23,7 +34,7 @@ def lerobot_code_gen_prompt(
     Args:
         instruction: 자연어 목표 (예: "빨간 컵을 파란 상자에 놓아라")
         object_positions: 객체별 정보 딕셔너리
-                         Extended format: {name: {"position": [x,y,z], "gripper_offset": float}}
+                         Extended format: {name: {"position": [x,y,z]}}
         spec: 코드 생성 가이드라인/스펙 (선택)
         robot_id: 로봇 번호 (2 또는 3)
 
@@ -33,15 +44,15 @@ def lerobot_code_gen_prompt(
 
     # 로봇 설정 파일 경로
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
+    frame = _get_frame_for_robot(robot_id)
 
-    # 객체 위치 포맷팅 (extended format with gripper_offset)
+    # 객체 위치 포맷팅 (extended format)
     positions_lines = []
     for name, info in object_positions.items():
         if info is not None:
             pos = info["position"]
-            offset = info.get("gripper_offset", 0.0)
             positions_lines.append(
-                f'    "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], "gripper_offset": {offset:.3f}}},'
+                f'    "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
             )
     positions_str = "\n".join(positions_lines)
 
@@ -93,10 +104,10 @@ def lerobot_code_gen_prompt(
        | `gripper_open()` | Open gripper | - |
        | `move_to_initial_state()` | Move to initial/home position | - |
        | `move_to_free_state()` | Move to safe parking position | - |
-       | `move_to_position(position, ...)` | Move end-effector to [x,y,z] | position, gripper_offset, target_name |
+       | `move_to_position(position, ...)` | Move end-effector to [x,y,z] | position, target_name |
        | `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
-       | `execute_pick_object(object_position, ...)` | Descend to pick position (2.5cm from top), close gripper, save pitch | object_position, gripper_offset, object_name |
-       | `execute_place_object(place_position, ...)` | Descend to place position with saved pitch, open gripper 70% | place_position, gripper_offset, is_table, gripper_open_ratio, target_name |
+       | `execute_pick_object(object_position, ...)` | Descend to pick position (2.5cm from top), close gripper, save pitch | object_position, object_name |
+       | `execute_place_object(place_position, ...)` | Descend to place position with saved pitch, open gripper 70% | place_position, is_table, gripper_open_ratio, target_name |
        | `execute_press(position, ...)` | 2-phase press: descend to contact, then press with torque limit | position, press_depth, contact_height, hold_time, target_name |
        | `execute_push(start_position, end_position, ...)` | Descend → run-up → linear push → retreat (all-in-one) | start_position, end_position, push_height, object_name |
 
@@ -110,6 +121,7 @@ def lerobot_code_gen_prompt(
          - Pitch is automatically restored from the saved value at pick time
          - **target_name**: Pass the target name for subgoal labeling (e.g., "blue dish")
        **execute_press**: Call from approach position with gripper closed. 2-phase descent: normal speed to contact surface, then slow press with torque limit (400/1000).
+
          - `contact_height`: surface height of the button/switch (meters, e.g., object's z value)
          - `press_depth`: how far to push below contact surface (meters, default 0.01 = 1cm)
          - `hold_time`: seconds to hold pressed state (default 0.3)
@@ -122,7 +134,6 @@ def lerobot_code_gen_prompt(
          - **Push distance guide**: 3–5cm is usually sufficient. Do NOT use large distances (e.g., 10cm+) unless explicitly instructed.
          - **World frame directions**: +x = forward (away from robot), -x = backward (toward robot), +y = right, -y = left.
 
-       **Gripper Offset**: Use `gripper_offset=positions["object"]["gripper_offset"]` ONLY for pick-related calls (pick approach, execute_pick_object, lift after pick). Do NOT pass gripper_offset for place or other movements.
        **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
 
     6. **Skill Composition Patterns**:
@@ -131,16 +142,14 @@ def lerobot_code_gen_prompt(
        # PICK pattern:
        pick_obj = positions["object_name"]
        pick_pos = pick_obj["position"]  # [x, y, z] where z = object height
-       offset = pick_obj["gripper_offset"]
        approach_height = 0.20  # 20cm above object
 
-       # PICK pattern (gripper_offset applied for TCP frame alignment):
        skills.gripper_open()
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
-       skills.execute_pick_object(pick_pos, gripper_offset=offset, object_name="object_name")
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
+       skills.execute_pick_object(pick_pos, object_name="object_name")
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
 
-       # PLACE on OBJECT pattern (NO gripper_offset — use default gripper frame):
+       # PLACE on OBJECT pattern:
        place_obj = positions["target_object"]
        place_pos = place_obj["position"]  # target object position
 
@@ -153,12 +162,11 @@ def lerobot_code_gen_prompt(
        # Determine offset direction from scene analysis — approach from the obstacle-free side.
        lat_obj = positions["object_name"]
        lat_pos = lat_obj["position"]
-       offset = lat_obj["gripper_offset"]
 
        skills.gripper_open()
-       skills.move_to_position([lat_pos[0] + offset_x, lat_pos[1] + offset_y, lat_pos[2]], gripper_offset=offset, target_name="object_name")
-       skills.execute_pick_object(lat_pos, gripper_offset=offset, object_name="object_name")
-       skills.move_to_position([lat_pos[0], lat_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
+       skills.move_to_position([lat_pos[0] + offset_x, lat_pos[1] + offset_y, lat_pos[2]], target_name="object_name")
+       skills.execute_pick_object(lat_pos, object_name="object_name")
+       skills.move_to_position([lat_pos[0], lat_pos[1], approach_height], target_name="object_name")
 
        # PUSH pattern (close gripper, approach above contact point, execute_push handles the rest):
        # push_height ≈ 1/3 of object height. Push distance: 3–5cm is usually sufficient.
@@ -193,7 +201,7 @@ def execute_task():
 
     skills = LeRobotSkills(
         robot_config="{robot_config}",
-        frame="world",
+        frame="{frame}",
     )
     skills.connect()
 
@@ -205,18 +213,17 @@ def execute_task():
         # === Object Positions ===
         pick_obj = positions["object_name"]
         pick_pos = pick_obj["position"]
-        offset = pick_obj["gripper_offset"]
 
         place_obj = positions["target_name"]
         place_pos = place_obj["position"]
 
-        # === PICK (with gripper_offset for TCP frame) ===
+        # === PICK ===
         skills.gripper_open()
-        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
-        skills.execute_pick_object(pick_pos, gripper_offset=offset, object_name="object_name")
-        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
+        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
+        skills.execute_pick_object(pick_pos, object_name="object_name")
+        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
 
-        # === PLACE on object (NO gripper_offset) ===
+        # === PLACE on object ===
         skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_name")
         skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_name")
         skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_name")
@@ -281,6 +288,7 @@ def turn3_code_gen_prompt(
     """
 
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
+    frame = _get_frame_for_robot(robot_id)
     robot_api_doc = ROBOT_API_DOC
 
     # all_points를 자연어로 포맷팅
@@ -325,7 +333,6 @@ Use the scene understanding, detected objects, and grasp/place points from our p
 positions = {{
     "object_name": {{
         "position": [x, y, z],          # default point (grasp center)
-        "gripper_offset": float,
         "points": {{                      # all detected critical points
             "<label_1>": [x, y, z],
             "<label_2>": [x, y, z],
@@ -337,7 +344,6 @@ positions = {{
 ```
 - `position`: default grasp point in world coordinates (meters).
 - `points`: all detected critical points for this object. Choose the best point for the task.
-- `gripper_offset`: asymmetric gripper collision avoidance offset in meters. Use ONLY for pick-related calls.
 - **CRITICAL**: You MUST use ONLY the exact key names from the `positions` dictionary provided earlier in the conversation. Do NOT invent new key names.
 
 **Available Robot API Skills**:
@@ -353,16 +359,15 @@ positions = {{
 approach_height = 0.20
 skills.move_to_initial_state()
 
-# PICK — with gripper_offset for TCP frame alignment
+# PICK
 pick_obj = positions["object_name"]
 pick_pos = pick_obj["position"]
-offset = pick_obj["gripper_offset"]
 skills.gripper_open()
-skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
-skills.execute_pick_object(pick_pos, gripper_offset=offset, object_name="object_name")
-skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
+skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
+skills.execute_pick_object(pick_pos, object_name="object_name")
+skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
 
-# PLACE ON OBJECT — NO gripper_offset (is_table=False)
+# PLACE ON OBJECT (is_table=False)
 place_obj = positions["target_object"]
 place_pos = place_obj["position"]
 skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object")
@@ -375,11 +380,10 @@ skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_na
 # Determine offset direction from scene analysis — approach from obstacle-free side
 lat_obj = positions["object_name"]
 lat_pos = lat_obj["position"]
-offset = lat_obj["gripper_offset"]
 skills.gripper_open()
-skills.move_to_position([lat_pos[0] + offset_x, lat_pos[1] + offset_y, lat_pos[2]], gripper_offset=offset, target_name="object_name")
-skills.execute_pick_object(lat_pos, gripper_offset=offset, object_name="object_name")
-skills.move_to_position([lat_pos[0], lat_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
+skills.move_to_position([lat_pos[0] + offset_x, lat_pos[1] + offset_y, lat_pos[2]], target_name="object_name")
+skills.execute_pick_object(lat_pos, object_name="object_name")
+skills.move_to_position([lat_pos[0], lat_pos[1], approach_height], target_name="object_name")
 
 # PUSH — close gripper, approach above contact point, execute_push handles descent + push + retreat
 # execute_push internally: descends to pre-contact (3cm behind start), pushes linearly to end, retreats to approach_height.
@@ -408,7 +412,7 @@ skills.move_to_free_state()
 from skills.skills_lerobot import LeRobotSkills
 
 def execute_task():
-    skills = LeRobotSkills(robot_config="{robot_config}", frame="world")
+    skills = LeRobotSkills(robot_config="{robot_config}", frame="{frame}")
     skills.connect()
     try:
         # START → PICK → PLACE → END
@@ -428,7 +432,7 @@ if __name__ == "__main__":
 5. **Stacking**: Compute accumulated stack height. Place z = sum of all stacked objects' heights. Example: place C on A→B stack → `[A_pos[0], A_pos[1], A_pos[2] + B_pos[2]]`.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
-8. **gripper_offset**: ONLY use for pick-related calls (pick approach, execute_pick_object, lift after pick). Do NOT pass gripper_offset for place or other movements.
+8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
 
 **Output**: Complete executable Python code (no code blocks, plain text).
 
@@ -458,6 +462,7 @@ def codegen_with_context_prompt(
     robot_id: int = 3,
     all_points: list = None,
     context_summary: str = "",
+    positions: dict = None,
 ) -> str:
     """
     새로운 chat session에서 컨텍스트 요약과 함께 코드를 생성하는 프롬프트.
@@ -465,6 +470,7 @@ def codegen_with_context_prompt(
     """
 
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
+    frame = _get_frame_for_robot(robot_id)
     robot_api_doc = ROBOT_API_DOC
 
     # all_points를 자연어로 포맷팅
@@ -493,6 +499,26 @@ Choose the most appropriate point for the task. Access via `positions["object"][
 {points_desc}
 """
 
+    # 실제 positions dict를 코드로 포맷팅
+    positions_concrete = ""
+    if positions:
+        pos_lines = []
+        for name, info in positions.items():
+            if isinstance(info, dict) and "position" in info:
+                pos = info["position"]
+                pts = info.get("points", {})
+                pts_str = ", ".join(
+                    f'"{k}": [{v[0]:.4f}, {v[1]:.4f}, {v[2]:.4f}]'
+                    for k, v in pts.items()
+                ) if pts else ""
+                pos_lines.append(
+                    f'    "{name}": {{\n'
+                    f'        "position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],\n'
+                    f'        "points": {{{pts_str}}},\n'
+                    f'    }},'
+                )
+        positions_concrete = "\n".join(pos_lines)
+
     prompt = f"""### Scene Context (from prior analysis session)
 
 {context_summary}
@@ -508,25 +534,16 @@ Generate executable Python code to complete the following task using the LeRobot
 - Always open the gripper before approaching the grasp pose.
 - Ensure the target position is reachable within the workspace and has enough clearance to avoid collisions.
 {points_section}
-**The `positions` dictionary** will be provided at runtime as a global variable with this structure:
+**The `positions` dictionary** is provided at runtime as a global variable. Here are the actual detected values:
 ```python
 positions = {{
-    "object_name": {{
-        "position": [x, y, z],          # default point (grasp center)
-        "gripper_offset": float,
-        "points": {{                      # all detected critical points
-            "<label_1>": [x, y, z],
-            "<label_2>": [x, y, z],
-            ...
-        }}
-    }},
-    ...
+{positions_concrete}
 }}
 ```
 - `position`: default grasp point in world coordinates (meters).
 - `points`: all detected critical points for this object. Choose the best point for the task.
-- `gripper_offset`: asymmetric gripper collision avoidance offset in meters. Use ONLY for pick-related calls.
-- **CRITICAL**: You MUST use ONLY the exact key names from the detected objects. Do NOT invent new key names.
+- **CRITICAL**: You MUST use ONLY the exact key names shown above. Do NOT invent new key names.
+- **CRITICAL**: Do NOT redefine or hardcode the `positions` dictionary in your code. It is already available as a global variable at runtime. Access it directly (e.g., `positions["corn"]`).
 
 **Available Robot API Skills**:
 
@@ -541,16 +558,15 @@ positions = {{
 approach_height = 0.20
 skills.move_to_initial_state()
 
-# PICK — with gripper_offset for TCP frame alignment
+# PICK
 pick_obj = positions["object_name"]
 pick_pos = pick_obj["position"]
-offset = pick_obj["gripper_offset"]
 skills.gripper_open()
-skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
-skills.execute_pick_object(pick_pos, gripper_offset=offset, object_name="object_name")
-skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
+skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
+skills.execute_pick_object(pick_pos, object_name="object_name")
+skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
 
-# PLACE ON OBJECT — NO gripper_offset (is_table=False)
+# PLACE ON OBJECT (is_table=False)
 place_obj = positions["target_object"]
 place_pos = place_obj["position"]
 skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object")
@@ -563,11 +579,10 @@ skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_na
 # Determine offset direction from scene analysis — approach from obstacle-free side
 lat_obj = positions["object_name"]
 lat_pos = lat_obj["position"]
-offset = lat_obj["gripper_offset"]
 skills.gripper_open()
-skills.move_to_position([lat_pos[0] + offset_x, lat_pos[1] + offset_y, lat_pos[2]], gripper_offset=offset, target_name="object_name")
-skills.execute_pick_object(lat_pos, gripper_offset=offset, object_name="object_name")
-skills.move_to_position([lat_pos[0], lat_pos[1], approach_height], gripper_offset=offset, target_name="object_name")
+skills.move_to_position([lat_pos[0] + offset_x, lat_pos[1] + offset_y, lat_pos[2]], target_name="object_name")
+skills.execute_pick_object(lat_pos, object_name="object_name")
+skills.move_to_position([lat_pos[0], lat_pos[1], approach_height], target_name="object_name")
 
 # PUSH — close gripper, approach above contact point, execute_push handles descent + push + retreat
 push_obj = positions["object_name"]
@@ -594,7 +609,7 @@ skills.move_to_free_state()
 from skills.skills_lerobot import LeRobotSkills
 
 def execute_task():
-    skills = LeRobotSkills(robot_config="{robot_config}", frame="world")
+    skills = LeRobotSkills(robot_config="{robot_config}", frame="{frame}")
     skills.connect()
     try:
         # START → PICK → PLACE → END
@@ -614,7 +629,7 @@ if __name__ == "__main__":
 5. **Stacking**: Compute accumulated stack height. Place z = sum of all stacked objects' heights. Example: place C on A→B stack → `[A_pos[0], A_pos[1], A_pos[2] + B_pos[2]]`.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
-8. **gripper_offset**: ONLY use for pick-related calls (pick approach, execute_pick_object, lift after pick). Do NOT pass gripper_offset for place or other movements.
+8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
 
 **Output**: Complete executable Python code (no code blocks, plain text).
 
@@ -681,9 +696,9 @@ Your task is to analyze the goal and break it down into a sequence of skill acti
    | `move_to_free_state` | Move to safe parking position | - |
    | `rotate_90degree` | Rotate gripper 90° | direction: "cw" or "ccw" |
    | `gripper_open` | Open the gripper | - |
-   | `move_to_position` | Move end-effector to position | object: str, approach_height: float, gripper_offset: bool |
-   | `execute_pick_object` | Descend (2.5cm from top) + gripper_close + save pitch | object: str, gripper_offset: bool |
-   | `execute_place_object` | Descend with saved pitch + gripper_open | target: str, gripper_offset: bool, is_table: bool |
+   | `move_to_position` | Move end-effector to position | object: str, approach_height: float |
+   | `execute_pick_object` | Descend (2.5cm from top) + gripper_close + save pitch | object: str |
+   | `execute_place_object` | Descend with saved pitch + gripper_open | target: str, is_table: bool |
    | `execute_press` | 2-phase press with torque limit | position, contact_height, press_depth, hold_time, target_name |
    | `execute_push` | Descend → run-up → linear push → retreat (all-in-one) | start_position, end_position, push_height, object_name |
 
@@ -718,12 +733,12 @@ Specification: {{
   "steps": [
     {{"step": 1, "action": "move_to_initial_state"}},
     {{"step": 2, "action": "gripper_open"}},
-    {{"step": 3, "action": "move_to_position", "object": "red cup", "approach_height": 0.20, "gripper_offset": true}},
-    {{"step": 4, "action": "execute_pick_object", "object": "red cup", "gripper_offset": true}},
+    {{"step": 3, "action": "move_to_position", "object": "red cup", "approach_height": 0.20}},
+    {{"step": 4, "action": "execute_pick_object", "object": "red cup"}},
     {{"step": 5, "action": "move_to_position", "object": "red cup", "approach_height": 0.20}},
-    {{"step": 6, "action": "move_to_position", "target": "carrier", "approach_height": 0.20, "gripper_offset": true}},
-    {{"step": 7, "action": "execute_place_object", "target": "carrier", "gripper_offset": true, "is_table": true}},
-    {{"step": 8, "action": "move_to_position", "target": "carrier", "approach_height": 0.20, "gripper_offset": true}},
+    {{"step": 6, "action": "move_to_position", "target": "carrier", "approach_height": 0.20}},
+    {{"step": 7, "action": "execute_place_object", "target": "carrier", "is_table": true}},
+    {{"step": 8, "action": "move_to_position", "target": "carrier", "approach_height": 0.20}},
     {{"step": 9, "action": "move_to_free_state"}}
   ]
 }}
@@ -736,12 +751,12 @@ Specification: {{
   "steps": [
     {{"step": 1, "action": "move_to_initial_state"}},
     {{"step": 2, "action": "gripper_open"}},
-    {{"step": 3, "action": "move_to_position", "object": "red dice", "approach_height": 0.20, "gripper_offset": true}},
-    {{"step": 4, "action": "execute_pick_object", "object": "red dice", "gripper_offset": true}},
+    {{"step": 3, "action": "move_to_position", "object": "red dice", "approach_height": 0.20}},
+    {{"step": 4, "action": "execute_pick_object", "object": "red dice"}},
     {{"step": 5, "action": "move_to_position", "object": "red dice", "approach_height": 0.20}},
-    {{"step": 6, "action": "move_to_position", "target": "blue box", "approach_height": 0.20, "gripper_offset": true}},
-    {{"step": 7, "action": "execute_place_object", "target": "blue box", "gripper_offset": true, "is_table": false}},
-    {{"step": 8, "action": "move_to_position", "target": "blue box", "approach_height": 0.20, "gripper_offset": true}},
+    {{"step": 6, "action": "move_to_position", "target": "blue box", "approach_height": 0.20}},
+    {{"step": 7, "action": "execute_place_object", "target": "blue box", "is_table": false}},
+    {{"step": 8, "action": "move_to_position", "target": "blue box", "approach_height": 0.20}},
     {{"step": 9, "action": "move_to_free_state"}}
   ]
 }}

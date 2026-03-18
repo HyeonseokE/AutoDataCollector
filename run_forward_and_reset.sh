@@ -79,7 +79,8 @@ ROBOT_ID=2
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=10
+NUM_EPISODES=3
+NUM_RANDOM_SEEDS=3 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false
@@ -88,12 +89,11 @@ USE_SERVER=false
 # Reset execution 설정
 # ============================================================
 EXECUTE_RESET=true # Reset 실행 여부
-RESET_MODE="original" # Reset_mode:("original": 원래 위치로 복귀, "random": 랜덤 위치로 배치)
 
 # ============================================================
 # Judge execution 설정
 # ============================================================
-SKIP_JUDGE=true
+SKIP_JUDGE=false
 
 # ============================================================
 # Dataset Recording 설정
@@ -311,7 +311,7 @@ echo "Save Dir: $SAVE_DIR"
 echo ""
 echo "--- Feature Toggles ---"
 echo "Execute Reset: $EXECUTE_RESET"
-echo "Reset Mode: $RESET_MODE"
+echo "Random Seeds: $NUM_RANDOM_SEEDS"
 echo "Skip Judge: $SKIP_JUDGE"
 echo "Use Server: $USE_SERVER"
 echo "Record Dataset: $RECORD_DATASET"
@@ -404,7 +404,7 @@ python execution_forward_and_reset.py \
     --judge-model "$JUDGE_MODEL" \
     --timeout "$DETECTION_TIMEOUT" \
     --judge-timeout "$JUDGE_TIMEOUT" \
-    --reset-mode "$RESET_MODE" \
+    --num-random-seeds "$NUM_RANDOM_SEEDS" \
     --save "$SAVE_DIR" \
     --num-episodes "$NUM_EPISODES" \
     $CODEGEN_S2_ARG \

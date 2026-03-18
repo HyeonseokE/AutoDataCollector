@@ -49,7 +49,7 @@ class ExecutionContext:
     """
 
     instruction: str = ""
-    object_positions: Dict[str, Any] = field(default_factory=dict)  # Extended format: {name: {"position": [...], "gripper_offset": float}}
+    object_positions: Dict[str, Any] = field(default_factory=dict)  # Extended format: {name: {"position": [...]}}
     generated_spec: Dict[str, Any] = field(default_factory=dict)
     generated_code: str = ""
     execution_success: bool = False
@@ -167,8 +167,7 @@ class ExecutionContext:
             elif isinstance(info, dict) and "position" in info:
                 # Extended format
                 pos = info["position"]
-                offset = info.get("gripper_offset", 0.0)
-                lines.append(f"  - {name}: pos=[{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], offset={offset*1000:.1f}mm")
+                lines.append(f"  - {name}: pos=[{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
             elif isinstance(info, (list, tuple)) and len(info) >= 3:
                 # Legacy format
                 lines.append(f"  - {name}: [{info[0]:.4f}, {info[1]:.4f}, {info[2]:.4f}]")
@@ -204,7 +203,7 @@ def save_forward_context(
 
     Args:
         instruction: Natural language goal
-        object_positions: Object positions in extended format {name: {"position": [x,y,z], "gripper_offset": float}}
+        object_positions: Object positions in extended format {name: {"position": [x,y,z]}}
         generated_spec: Generated spec (step-by-step plan)
         generated_code: Generated Python code
         execution_success: Whether execution succeeded

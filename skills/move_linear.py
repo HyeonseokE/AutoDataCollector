@@ -56,7 +56,6 @@ def _cartesian_ik_trajectory(
     waypoints_base: np.ndarray,
     current_joints: np.ndarray,
     maintain_pitch: bool,
-    gripper_offset: float,
 ):
     """
     Cartesian waypoints → per-waypoint IK → joint trajectory.
@@ -66,16 +65,11 @@ def _cartesian_ik_trajectory(
         waypoints_base: (N, 3) base_link frame 좌표
         current_joints: 현재 joint positions (radians, 5축)
         maintain_pitch: pitch 유지 여부
-        gripper_offset: gripper offset (>0이면 TCP kinematics 사용)
 
     Returns:
         joint_trajectory: (N, 5) radians
     """
-    # Select kinematics
-    if gripper_offset > 0:
-        kinematics = skills.planner_tcp.kinematics
-    else:
-        kinematics = skills.planner.kinematics
+    kinematics = skills.planner.kinematics
 
     # Get current pitch for constraint
     target_pitch = None
@@ -124,7 +118,6 @@ def move_linear(
     start: Union[List[float], np.ndarray],
     end: Union[List[float], np.ndarray],
     duration: Optional[float] = None,
-    gripper_offset: float = 0.0,
     maintain_pitch: bool = True,
     num_waypoints: int = 20,
     target_name: Optional[str] = None,
@@ -152,10 +145,6 @@ def move_linear(
                   - None: 거리 기반 자동 계산 (5cm/s 기준, 최소 2초)
                   - 작을수록 빠르게 이동 (단, 너무 빠르면 추종 오차 증가)
                   - 접촉 동작에서는 2~5초 권장
-
-        gripper_offset: gripper TCP offset (단위: meters). default=0.0
-                        - 0.0: gripper_frame_link 기준 IK
-                        - >0: TCP frame (gripper 끝에서 -4cm) 기준 IK
 
         maintain_pitch: 이동 중 pitch 유지 여부. default=True
                         - True: 이동 시작 시점의 gripper pitch를 전 구간 유지
@@ -204,10 +193,7 @@ def move_linear(
     ])
 
     # 3. Reachability check (first and last)
-    if gripper_offset > 0:
-        kinematics = skills.planner_tcp.kinematics
-    else:
-        kinematics = skills.planner.kinematics
+    kinematics = skills.planner.kinematics
 
     for label_check, wp in [("start", waypoints_base[0]), ("end", waypoints_base[-1])]:
         if not kinematics.is_position_reachable(wp):
@@ -225,7 +211,6 @@ def move_linear(
         joint_trajectory = _cartesian_ik_trajectory(
             skills, waypoints_base, current_joints,
             maintain_pitch=maintain_pitch,
-            gripper_offset=gripper_offset,
         )
     except RuntimeError as e:
         skills._log(f"ERROR: {e}")

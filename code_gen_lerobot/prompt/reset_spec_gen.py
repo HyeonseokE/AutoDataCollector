@@ -54,7 +54,7 @@ Your task is to analyze the goal and break it down into a sequence of skill acti
 3. **Available Primitive Skills**:
    | Skill | Description | Parameters |
    |-------|-------------|------------|
-   | `move_to_position` | Move end-effector to object position (fixed orientation, no rotation) | object: str, apply_gripper_offset: bool (optional) |
+   | `move_to_position` | Move end-effector to object position (fixed orientation, no rotation) | object: str |
    | `gripper_open` | Open the gripper | - |
    | `gripper_close` | Close the gripper | - |
    | `move_to_initial_state` | Move to home position | - |
@@ -64,8 +64,7 @@ Your task is to analyze the goal and break it down into a sequence of skill acti
    **Note**: `move_to_position` maintains current wrist_roll during movement.
    The gripper will NOT rotate during position changes (keeps orientation from rotate_90degree).
 
-   **Gripper Offset**: SO-101 has asymmetric gripper (fixed finger at +Y, moving at -Y).
-   Use `apply_gripper_offset: true` when approaching to pick an object to avoid collision with fixed finger.
+   **Note**: SO-101 has asymmetric gripper (fixed finger at +Y, moving at -Y).
 
 4. **Available Object Names**:
    {object_names}
@@ -96,9 +95,9 @@ Specification: {{
   "steps": [
     {{"step": 1, "action": "move_to_initial_state"}},
     {{"step": 2, "action": "gripper_open"}},
-    {{"step": 3, "action": "move_to_position", "object": "red cup", "apply_gripper_offset": true}},
+    {{"step": 3, "action": "move_to_position", "object": "red cup"}},
     {{"step": 4, "action": "gripper_close"}},
-    {{"step": 5, "action": "move_to_position", "target": "blue box", "apply_gripper_offset": true}},
+    {{"step": 5, "action": "move_to_position", "target": "blue box"}},
     {{"step": 6, "action": "gripper_open"}},
     {{"step": 7, "action": "move_to_initial_state"}},
     {{"step": 8, "action": "move_to_free_state"}}
@@ -113,9 +112,9 @@ Specification: {{
   "steps": [
     {{"step": 1, "action": "move_to_initial_state"}},
     {{"step": 2, "action": "gripper_open"}},
-    {{"step": 3, "action": "move_to_position", "object": "yellow dice", "apply_gripper_offset": true}},
+    {{"step": 3, "action": "move_to_position", "object": "yellow dice"}},
     {{"step": 4, "action": "gripper_close"}},
-    {{"step": 5, "action": "move_to_position", "target": "drawer", "apply_gripper_offset": true}},
+    {{"step": 5, "action": "move_to_position", "target": "drawer"}},
     {{"step": 6, "action": "gripper_open"}},
     {{"step": 7, "action": "move_to_initial_state"}},
     {{"step": 8, "action": "move_to_free_state"}}
@@ -130,13 +129,13 @@ Specification: {{
   "steps": [
     {{"step": 1, "action": "move_to_initial_state"}},
     {{"step": 2, "action": "gripper_open"}},
-    {{"step": 3, "action": "move_to_position", "object": "red dice", "apply_gripper_offset": true}},
+    {{"step": 3, "action": "move_to_position", "object": "red dice"}},
     {{"step": 4, "action": "gripper_close"}},
-    {{"step": 5, "action": "move_to_position", "target": "plate", "apply_gripper_offset": true}},
+    {{"step": 5, "action": "move_to_position", "target": "plate"}},
     {{"step": 6, "action": "gripper_open"}},
-    {{"step": 7, "action": "move_to_position", "object": "green dice", "apply_gripper_offset": true}},
+    {{"step": 7, "action": "move_to_position", "object": "green dice"}},
     {{"step": 8, "action": "gripper_close"}},
-    {{"step": 9, "action": "move_to_position", "target": "plate", "apply_gripper_offset": true}},
+    {{"step": 9, "action": "move_to_position", "target": "plate"}},
     {{"step": 10, "action": "gripper_open"}},
     {{"step": 11, "action": "move_to_initial_state"}},
     {{"step": 12, "action": "move_to_free_state"}}

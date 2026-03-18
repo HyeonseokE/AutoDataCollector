@@ -27,7 +27,6 @@ from .workspace import (
     classify_objects,
     generate_random_positions,
     ResetWorkspace,
-    compute_workspace_bounds,
     draw_workspace_on_image,
 )
 
@@ -74,7 +73,7 @@ def lerobot_reset_code_gen(
                         - Recording 카메라와 공유하여 리소스 충돌 방지
         current_positions: 미리 감지된 현재 위치 (multi-robot 공유 감지용)
                           - 제공되면 내부 detection을 건너뛰고 이 위치 사용
-                          - extended format: {name: {"position": [...], "gripper_offset": float, ...}}
+                          - extended format: {name: {"position": [...], ...}}
 
     Returns:
         Tuple[str, Dict, Dict, Dict]: (리셋 코드, 원래 위치, 현재 위치, 타겟 위치)
@@ -187,9 +186,9 @@ def lerobot_reset_code_gen(
     for name, info in extended_detections.items():
         if info:
             pos = info["position"]
-            bbox = info.get("bbox_size_m")
+            bbox = info.get("bbox_px")
             grippable = info.get("grippable", True)
-            bbox_str = f"[{bbox[0]*100:.1f}x{bbox[1]*100:.1f}cm]" if bbox else "[?x?]"
+            bbox_str = f"[{bbox[0]}x{bbox[1]}px]" if bbox else "[?x?]"
             grip_str = "grippable" if grippable else "OBSTACLE"
             print(f"    + {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] {bbox_str} ({grip_str})")
         else:
@@ -203,7 +202,7 @@ def lerobot_reset_code_gen(
     sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
     from lerobot_cap.workspace import BaseWorkspace
     workspace = BaseWorkspace()
-    print(f"  Workspace: x_min_world={workspace.x_min_world:.2f}m, reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
+    print(f"  Workspace: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
 
     for obj_name, obj_info in extended_detections.items():
         if obj_info is None:
@@ -218,7 +217,7 @@ def lerobot_reset_code_gen(
                 f"is OUTSIDE workspace!"
             )
             print(f"{RED}{warning_msg}{RESET_COLOR}")
-            print(f"{RED}  Workspace: x_min_world={workspace.x_min_world:.2f}m, reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m{RESET_COLOR}")
+            print(f"{RED}  Workspace: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m{RESET_COLOR}")
             assert False, f"Object '{obj_name}' is outside workspace bounds"
         else:
             print(f"  {LIGHT_GREEN}✓ '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m - OK{RESET_COLOR}")
@@ -431,12 +430,18 @@ def _compute_bbox_size_m(
         py2 = int(ymax * img_h / 1000)
 
         try:
-            # pixel → world (cm) → meters
-            wx1, wy1, _ = coord_transformer.pixel_to_world_2d(px1, py1)
-            wx2, wy2, _ = coord_transformer.pixel_to_world_2d(px2, py2)
-
-            width_m = abs(wx2 - wx1) / 100.0
-            height_m = abs(wy2 - wy1) / 100.0
+            # Pix2Robot 직접 변환 (coord_transformer가 Pix2RobotCalibrator인 경우)
+            if hasattr(coord_transformer, 'pixel_to_robot'):
+                r1 = coord_transformer.pixel_to_robot(px1, py1)
+                r2 = coord_transformer.pixel_to_robot(px2, py2)
+                width_m = abs(r2[0] - r1[0])
+                height_m = abs(r2[1] - r1[1])
+            else:
+                # Fallback: 기존 pixel → world (cm) → meters
+                wx1, wy1, _ = coord_transformer.pixel_to_world_2d(px1, py1)
+                wx2, wy2, _ = coord_transformer.pixel_to_world_2d(px2, py2)
+                width_m = abs(wx2 - wx1) / 100.0
+                height_m = abs(wy2 - wy1) / 100.0
             sizes[label] = (width_m, height_m)
         except Exception as e:
             print(f"  [BBoxSize] Failed for '{label}': {e}")
@@ -616,14 +621,32 @@ def lerobot_reset_code_gen_multi_turn(
     print(f"\n{YELLOW}" + _log("Preparing workspace bounds", step="Setup") + f"{RESET_COLOR}")
 
     if workspace is None:
-        workspace = ResetWorkspace()
+        # KinematicsEngine 로드하여 IK 검증 가능한 workspace 생성
+        _kin_engine = None
+        try:
+            from lerobot_cap.kinematics.engine import KinematicsEngine
+            urdf_path = Path(__file__).parent.parent.parent / "assets" / "urdf" / f"so101_robot{robot_id}.urdf"
+            if urdf_path.exists():
+                _kin_engine = KinematicsEngine(str(urdf_path))
+        except Exception as e:
+            print(f"  [Workspace] KinematicsEngine not available: {e}")
+        workspace = ResetWorkspace(kinematics_engine=_kin_engine)
 
-    # Auto-compute workspace bounds
-    ws_bounds = compute_workspace_bounds(workspace)
-    print(f"  Workspace bounds: x=[{ws_bounds[0][0]:.2f}, {ws_bounds[0][1]:.2f}], "
-          f"y=[{ws_bounds[1][0]:.2f}, {ws_bounds[1][1]:.2f}]")
+    print(f"  Workspace: {workspace}")
 
-    # CoordinateTransformer 로드 (if not provided)
+    # Pix2Robot 캘리브레이션 로드 (우선) → fallback: CoordinateTransformer
+    if coord_transformer is None:
+        try:
+            from pix2robot_calibrator import Pix2RobotCalibrator
+            pix2robot_path = Path(__file__).parent.parent.parent / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
+            if pix2robot_path.exists():
+                _p2r = Pix2RobotCalibrator(robot_id=robot_id)
+                if _p2r.load(str(pix2robot_path)):
+                    coord_transformer = _p2r
+                    print(f"  Pix2Robot calibration loaded ({len(_p2r.pixel_points)} points)")
+        except Exception:
+            pass
+
     if coord_transformer is None:
         try:
             from object_detection.localization.coordinate_transform import CoordinateTransformer
@@ -633,20 +656,19 @@ def lerobot_reset_code_gen_multi_turn(
                 if not coord_transformer.is_ready:
                     coord_transformer = None
                 else:
-                    print(f"  CoordinateTransformer loaded")
+                    print(f"  Fallback: CoordinateTransformer loaded")
         except Exception as e:
             print(f"  CoordinateTransformer not available: {e}")
 
-    # Workspace 시각화 이미지 생성
+    # Workspace 시각화 이미지 생성 (pix2robot 기반)
     reset_dir = Path(current_state_image_path).parent
     annotated_image_path = None
-    if coord_transformer is not None:
-        current_img = cv2.imread(current_state_image_path)
-        if current_img is not None:
-            annotated = draw_workspace_on_image(current_img, ws_bounds, coord_transformer)
-            annotated_image_path = str(reset_dir / "workspace_annotated.jpg")
-            cv2.imwrite(annotated_image_path, annotated)
-            print(f"  Workspace annotated image: {annotated_image_path}")
+    current_img = cv2.imread(current_state_image_path)
+    if current_img is not None:
+        annotated = draw_workspace_on_image(current_img, robot_id=robot_id)
+        annotated_image_path = str(reset_dir / "workspace_annotated.jpg")
+        cv2.imwrite(annotated_image_path, annotated)
+        print(f"  Workspace annotated image: {annotated_image_path}")
 
     # ── Step 2: Gemini chat 시작 ──
     print(f"\n{YELLOW}" + _log("Starting Gemini chat", step="Chat") + f"{RESET_COLOR}")
@@ -659,7 +681,6 @@ def lerobot_reset_code_gen_multi_turn(
     turn0_text = turn0_reset_scene_understanding_prompt(
         original_instruction=original_instruction,
         reset_mode=reset_mode,
-        workspace_bounds=ws_bounds,
         original_object_labels=original_labels,
     )
     if original_labels:
@@ -798,20 +819,21 @@ def lerobot_reset_code_gen_multi_turn(
     print(f"\n{YELLOW}" + _log("Building positions (pixel → world)", step="Positions") + f"{RESET_COLOR}")
     current_positions = _points_to_positions(all_points, robot_id=robot_id, camera=camera)
 
-    # BBox → meters size
-    bbox_sizes = {}
-    if coord_transformer is not None:
-        bbox_sizes = _compute_bbox_size_m(valid_objects, img_w, img_h, coord_transformer)
+    # BBox 픽셀 크기 추출 + grippable 판정
+    bbox_px_map = {}
+    for obj in valid_objects:
+        label = obj.get("label", "")
+        box = obj.get("box_2d", [])
+        if len(box) == 4 and label:
+            ymin, xmin, ymax, xmax = box
+            w_px = int((xmax - xmin) * img_w / 1000)
+            h_px = int((ymax - ymin) * img_h / 1000)
+            bbox_px_map[label] = (max(w_px, 10), max(h_px, 10))
 
-    # Enrich positions with bbox_size_m and grippable flag
-    from .workspace import is_grippable, GRIPPER_MAX_OPEN_WIDTH
+    from .workspace import is_grippable
     for label, info in current_positions.items():
-        if label in bbox_sizes:
-            info["bbox_size_m"] = list(bbox_sizes[label])
-            info["grippable"] = is_grippable(bbox_sizes[label])
-        else:
-            info["bbox_size_m"] = [0.03, 0.03]
-            info["grippable"] = True
+        info["bbox_px"] = bbox_px_map.get(label, (30, 30))
+        info["grippable"] = is_grippable(info["bbox_px"])
 
     # Classify objects
     grippable_objects, obstacle_objects = classify_objects(current_positions)
@@ -847,6 +869,7 @@ def lerobot_reset_code_gen_multi_turn(
             obstacle_objects=obstacle_objects,
             initial_positions=mapped_initial if mapped_initial else original_positions,
             workspace=workspace,
+            pix2robot=coord_transformer if hasattr(coord_transformer, 'robot_to_pixel') else None,
             seed=random_seed,
         )
         print(f"  Random target positions generated:")
@@ -901,7 +924,6 @@ def lerobot_reset_code_gen_multi_turn(
             },
             robot_id=robot_id,
             is_random_reset=(reset_mode == "random"),
-            workspace_bounds=ws_bounds,
             all_points=all_points,
         )},
         turn_label="CodeGen (Reset)")

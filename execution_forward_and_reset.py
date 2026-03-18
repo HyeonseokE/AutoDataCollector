@@ -127,7 +127,7 @@ class ForwardAndResetPipeline:
         llm_model: str = "gpt-4o-mini",
         judge_model: str = "gpt-4o",
         judge_timeout_ms: int = 5000,
-        reset_mode: str = "original",
+        num_random_seeds: int = 1,
         verbose: bool = True,
         # Recording options
         record_dataset: bool = False,
@@ -147,7 +147,7 @@ class ForwardAndResetPipeline:
             llm_model: 코드 생성용 LLM 모델 (예: "gpt-4o-mini", "gemini-1.5-flash")
             judge_model: Judge VLM 모델
             judge_timeout_ms: Judge UI 타임아웃 (밀리초)
-            reset_mode: Reset 모드 ("original": 초기 위치, "random": 랜덤 위치)
+            num_random_seeds: 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치)
             verbose: 상세 출력 여부
             record_dataset: LeRobot 데이터셋 레코딩 활성화
             dataset_repo_id: 데이터셋 저장 경로 (예: "user/my_dataset")
@@ -159,7 +159,7 @@ class ForwardAndResetPipeline:
         self.llm_model = llm_model
         self.judge_model = judge_model
         self.judge_timeout_ms = judge_timeout_ms
-        self.reset_mode = reset_mode
+        self.num_random_seeds = num_random_seeds
         self.verbose = verbose
 
         # Multi-turn options
@@ -437,8 +437,7 @@ class ForwardAndResetPipeline:
         # Note: Workspace filtering is done at detection level (run_detect.py)
         self.extended_detections = extended_results
 
-        # Return extended format: {name: {"position": [x,y,z], "gripper_offset": float, ...}}
-        # This includes gripper_offset calculated from bbox size
+        # Return extended format: {name: {"position": [x,y,z], ...}}
         return extended_results
 
     def generate_forward_code(
@@ -451,7 +450,7 @@ class ForwardAndResetPipeline:
 
         Args:
             instruction: 자연어 목표
-            positions: Extended format {name: {"position": [x,y,z], "gripper_offset": float, ...}}
+            positions: Extended format {name: {"position": [x,y,z], ...}}
             image_path: 초기 이미지 경로 (multi-turn 모드에서 필수)
 
         Returns:
@@ -916,7 +915,7 @@ class ForwardAndResetPipeline:
             visualize_detection=visualize_detection,
             llm_model=self.llm_model,
             robot_id=self.robot_id,
-            reset_mode=self.reset_mode,
+            reset_mode="original",
             current_episode=self.current_episode,
             total_episodes=self.total_episodes,
             current_positions=current_positions,
@@ -961,7 +960,7 @@ class ForwardAndResetPipeline:
             initial_state_image_path=self.forward_initial_image_path,
             llm_model=self.llm_model,
             robot_id=self.robot_id,
-            reset_mode=self.reset_mode,
+            reset_mode="original",
             camera=active_camera,
             current_episode=self.current_episode,
             total_episodes=self.total_episodes,
@@ -1033,7 +1032,7 @@ class ForwardAndResetPipeline:
                 'reasoning': '',
             },
             'reset': {
-                'mode': self.reset_mode,
+                'mode': 'original',
                 'current_positions': {},
                 'target_positions': {},
                 'code': '',
@@ -1042,7 +1041,7 @@ class ForwardAndResetPipeline:
             'reset_judge': {
                 'prediction': 'UNCERTAIN',
                 'reasoning': '',
-                'reset_mode': self.reset_mode,
+                'reset_mode': "original",
             },
             'saved_files': {},
         }
@@ -1173,11 +1172,7 @@ class ForwardAndResetPipeline:
                     print(f"  {YELLOW}[Warning] Frame config not found: {frame_config_path}{RESET}")
 
                 workspace = BaseWorkspace(frame_transformer=frame_transformer)
-                print(f"  Workspace: x_min_world={workspace.x_min_world:.2f}m, reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
-
-                # 경계값 정의
-                X_WORKSPACE_MIN = workspace.x_min_world  # workspace 최소값 (기본 0.12m)
-                X_WARNING_MAX = 0.14  # 이 값 미만이면 경고 (경계 근처)
+                print(f"  Workspace: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
 
                 critical_error = False
                 for obj_name, obj_info in self.detected_positions.items():
@@ -1187,20 +1182,8 @@ class ForwardAndResetPipeline:
                     if pos is None:
                         continue
                     position_m = np.array([pos[0], pos[1], pos[2]])
-                    x_pos = pos[0]
 
-                    # Case 1: x < x_min_world (12cm) → workspace 밖, 파이프라인 종료
-                    if x_pos < X_WORKSPACE_MIN:
-                        print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
-                        print(f"{RED}  x={x_pos:.3f}m < {X_WORKSPACE_MIN}m (workspace limit) - OUTSIDE WORKSPACE!{RESET}")
-                        print(f"{RED}  Pipeline will be terminated.{RESET}")
-                        critical_error = True
-                    # Case 2: 12cm <= x < 14cm → 경계 근처, 경고만 출력
-                    elif x_pos < X_WARNING_MAX:
-                        print(f"{YELLOW}[WARNING] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
-                        print(f"{YELLOW}  x={x_pos:.3f}m is near workspace boundary ({X_WORKSPACE_MIN}m), continuing...{RESET}")
-                    # Case 3: 기타 workspace 검사 (reach limits 등)
-                    elif not workspace.is_reachable(position_m):
+                    if not workspace.is_reachable(position_m):
                         print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
                         print(f"{RED}  Outside reach limits: [{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m{RESET}")
                         critical_error = True
@@ -1503,7 +1486,22 @@ class ForwardAndResetPipeline:
                 # Reset 로깅 시작
                 reset_logger.start()
 
-                mode_str = "RANDOM RESET" if self.reset_mode == "random" else "RESET TO ORIGINAL"
+                # 배치 전환: forward 완료 후, reset 전에 랜덤 위치 생성
+                if hasattr(self, '_pending_batch_setup') and self._pending_batch_setup is not None:
+                    setup = self._pending_batch_setup
+                    self._pending_batch_setup = None
+                    batch_idx = setup["batch_index"]
+                    print(f"\n{MAGENTA}{BOLD}" + self._log(f"[Batch {batch_idx+1}] Generating random positions...") + f"{RESET}")
+                    try:
+                        self._setup_random_batch(
+                            instruction=setup["instruction"],
+                            objects=setup["objects"],
+                            save_dir=setup["save_dir"],
+                        )
+                    except Exception as e:
+                        print(f"{RED}[Error] Batch setup failed: {e}{RESET}")
+
+                mode_str = "RESET TO BATCH POSITIONS"
                 print(f"\n{CYAN}{BOLD}" + self._log(mode_str) + f"{RESET}")
                 print(CYAN + "-" * 70 + RESET)
 
@@ -1511,16 +1509,13 @@ class ForwardAndResetPipeline:
                 self.shutdown_camera()
 
                 # Step 1 & 2: Reset 코드 생성
-                # multi-turn: VLM crop-then-point (이미지 캡처 → VLM 검출)
-                # single-turn: Grounding DINO detection + 단일 LLM
                 multi_turn_str = "multi-turn VLM" if self.multi_turn else "single-turn"
-                print(f"\n{YELLOW}" + self._log(f"Generating reset code ({self.reset_mode} mode, {multi_turn_str})...", step="Step 1/4") + f"{RESET}")
+                print(f"\n{YELLOW}" + self._log(f"Generating reset code ({multi_turn_str})...", step="Step 1/4") + f"{RESET}")
                 try:
-                    # original 모드: 첫 에피소드의 위치를 사용 (누적 오차 방지)
-                    # random 모드: 현재 에피소드의 검출 위치 사용
-                    if self.reset_mode == "original" and self.first_episode_positions is not None:
+                    # 항상 배치 기준 위치(first_episode_positions)로 복귀
+                    if self.first_episode_positions is not None:
                         reset_original_positions = self.first_episode_positions
-                        print(f"  Using first episode positions for 'original' reset")
+                        print(f"  Using batch positions for reset")
                     else:
                         reset_original_positions = self.detected_positions
 
@@ -1564,7 +1559,7 @@ class ForwardAndResetPipeline:
                     reset_positions_data = {
                         "current_positions": current_positions,
                         "target_positions": target_positions,
-                        "reset_mode": self.reset_mode,
+                        "reset_mode": "original",
                     }
                     with open(reset_positions_path, 'w') as f:
                         json.dump(reset_positions_data, f, indent=2, default=str)
@@ -1641,7 +1636,7 @@ class ForwardAndResetPipeline:
                     if not skip_judge:
                         print(f"\n{CYAN}" + self._log("Evaluating reset result...", tag="Judge") + f"{RESET}")
                         reset_judge_result = self.run_reset_judge(
-                            reset_mode=self.reset_mode,
+                            reset_mode="original",
                             current_positions=current_positions,
                             target_positions=target_positions,
                             executed_code=reset_code,
@@ -1669,7 +1664,7 @@ class ForwardAndResetPipeline:
                         # Reset Judge UI 표시
                         if self.reset_initial_image is not None and self.reset_final_image is not None:
                             self.show_reset_judge_ui(
-                                reset_mode=self.reset_mode,
+                                reset_mode="original",
                                 prediction=rj_pred,
                                 reasoning=rj_reasoning,
                                 current_positions=current_positions,
@@ -1678,7 +1673,7 @@ class ForwardAndResetPipeline:
 
                         # Reset judge 로그 저장 (judge 완료 후)
                         reset_log = {
-                            'reset_mode': self.reset_mode,
+                            'reset_mode': "original",
                             'current_positions': current_positions,
                             'target_positions': target_positions,
                             'prediction': result['reset_judge'].get('prediction', 'UNCERTAIN'),
@@ -2039,6 +2034,118 @@ class ForwardAndResetPipeline:
 
         print(CYAN + "=" * 70 + RESET)
 
+    def _setup_random_batch(
+        self,
+        instruction: str,
+        objects: list,
+        save_dir: str,
+    ):
+        """
+        새 배치 시작: 랜덤 위치 생성 → 물체 이동 → batch 위치 저장.
+
+        generate_random_positions로 새 위치를 만들고,
+        reset 코드를 생성/실행하여 물체를 이동시킨 뒤,
+        그 위치를 first_episode_positions로 저장합니다.
+        """
+        import cv2
+        from pathlib import Path
+        from code_gen_lerobot.reset_execution.workspace import (
+            generate_random_positions, classify_objects, ResetWorkspace,
+        )
+
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+        # 현재 물체 위치 기반으로 랜덤 타겟 생성
+        if self.first_episode_positions is None:
+            print("  [Batch Setup] No positions available, skipping")
+            return
+
+        # classify (grippable vs obstacle)
+        grippable, obstacles = classify_objects(self.first_episode_positions)
+
+        # pix2robot 로드
+        pix2robot = None
+        try:
+            from pix2robot_calibrator import Pix2RobotCalibrator
+            calib_path = Path(__file__).parent / "robot_configs" / "pix2robot_matrices" / f"robot{self.robot_id}_pix2robot_data.npz"
+            if calib_path.exists():
+                pix2robot = Pix2RobotCalibrator(robot_id=self.robot_id)
+                if not pix2robot.load(str(calib_path)):
+                    pix2robot = None
+        except Exception:
+            pass
+
+        # KinematicsEngine 로드
+        kin_engine = None
+        try:
+            from lerobot_cap.kinematics.engine import KinematicsEngine
+            urdf_path = Path(__file__).parent / "assets" / "urdf" / f"so101_robot{self.robot_id}.urdf"
+            if urdf_path.exists():
+                kin_engine = KinematicsEngine(str(urdf_path))
+        except Exception:
+            pass
+
+        workspace = ResetWorkspace(kinematics_engine=kin_engine)
+
+        # 랜덤 위치 생성
+        random_targets = generate_random_positions(
+            grippable_objects=grippable,
+            obstacle_objects=obstacles,
+            initial_positions=self.first_episode_positions,
+            workspace=workspace,
+            pix2robot=pix2robot,
+        )
+
+        if not random_targets:
+            print("  [Batch Setup] Failed to generate random positions")
+            return
+
+        print(f"  [Batch Setup] Random target positions:")
+        for name, pos in random_targets.items():
+            print(f"    {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
+
+        # 새 위치를 first_episode_positions에 반영 (extended format 유지)
+        new_positions = {}
+        for name, pos in random_targets.items():
+            orig = self.first_episode_positions.get(name, {})
+            if isinstance(orig, dict):
+                new_positions[name] = {**orig, "position": pos}
+                if "points" in orig:
+                    # points도 새 position으로 업데이트
+                    new_positions[name]["points"] = {
+                        pt_name: pos for pt_name in orig["points"]
+                    }
+            else:
+                new_positions[name] = pos
+
+        # obstacle은 그대로 유지
+        for name, info in obstacles.items():
+            new_positions[name] = self.first_episode_positions.get(name, info)
+
+        # 물체 이동을 위한 reset 코드 생성/실행
+        # 현재 위치 → random_targets로 이동
+        print(f"  [Batch Setup] Executing setup reset...")
+        try:
+            reset_code, _, current_positions, target_positions = self.generate_reset_code(
+                original_instruction=instruction,
+                original_positions=new_positions,  # 새 위치가 target
+                current_state_image_path=None,
+            )
+            if reset_code:
+                self.execute_code(reset_code, new_positions)
+                print(f"  [Batch Setup] Setup reset executed")
+        except Exception as e:
+            print(f"  [Batch Setup] Setup reset failed: {e}")
+
+        # 새 배치 위치를 기준으로 저장
+        self.first_episode_positions = new_positions
+        print(f"  [Batch Setup] Batch positions updated")
+
+        # 로그 저장
+        import json
+        with open(str(Path(save_dir) / "batch_positions.json"), 'w') as f:
+            json.dump({"target_positions": random_targets}, f, indent=2, default=str)
+
     def run_multiple_episodes(
         self,
         num_episodes: int,
@@ -2102,22 +2209,41 @@ class ForwardAndResetPipeline:
         # Set total episodes for logging
         self.total_episodes = num_episodes
 
+        # 배치 계산
+        episodes_per_seed = max(1, num_episodes // self.num_random_seeds)
+
         print("\n" + MAGENTA + "=" * 70 + RESET)
         print(MAGENTA + BOLD + f"  MULTI-EPISODE SESSION: {num_episodes} Episodes  ".center(70) + RESET)
         print(MAGENTA + "=" * 70 + RESET)
         print(f"  Instruction: {instruction}")
         print(f"  Objects: {objects}")
+        if self.num_random_seeds > 1:
+            print(f"  Random Seeds: {self.num_random_seeds} batches × {episodes_per_seed} episodes")
         print(f"  Save Dir: {session_dir}")
         print(MAGENTA + "=" * 70 + RESET)
 
+        # 배치 전환 추적
+        self._pending_batch_setup = None  # 다음 reset에서 적용할 배치 setup 정보
+
         for episode_idx in range(num_episodes):
             episode_num = episode_idx + 1
+            batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
+            is_batch_start = (episode_idx % episodes_per_seed == 0)
 
             # Set current episode for logging
             self.current_episode = episode_num
 
+            # 배치 전환 예약: forward 완료 후 reset 전에 실행됨
+            if is_batch_start and self.num_random_seeds > 1 and batch_index < self.num_random_seeds:
+                self._pending_batch_setup = {
+                    "batch_index": batch_index,
+                    "instruction": instruction,
+                    "objects": objects,
+                    "save_dir": str(Path(session_dir) / f"batch_{batch_index+1:02d}_setup"),
+                }
+
             print("\n" + CYAN + "=" * 70 + RESET)
-            print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Starting Episode  ".center(70) + RESET)
+            print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Starting Episode (Batch {batch_index+1})  ".center(70) + RESET)
             print(CYAN + "=" * 70 + RESET)
 
             # 에피소드별 저장 디렉토리
@@ -2342,11 +2468,10 @@ def main():
     )
 
     parser.add_argument(
-        "--reset-mode",
-        type=str,
-        default="original",
-        choices=["original", "random"],
-        help="Reset mode: 'original' (restore to initial) or 'random' (shuffle to new positions)"
+        "--num-random-seeds",
+        type=int,
+        default=1,
+        help="Number of random position batches (1=keep initial positions, N>1=N different random layouts)"
     )
 
     parser.add_argument(
@@ -2460,7 +2585,7 @@ def main():
         llm_model=args.llm,
         judge_model=args.judge_model,
         judge_timeout_ms=int(args.judge_timeout * 1000),  # 초 → 밀리초 변환
-        reset_mode=args.reset_mode,
+        num_random_seeds=args.num_random_seeds,
         verbose=True,
         # LeRobot 데이터셋 레코딩 옵션
         record_dataset=args.record,

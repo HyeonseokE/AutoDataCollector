@@ -79,7 +79,7 @@ ROBOT_ID=2
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=5
+NUM_EPISODES=50
 NUM_RANDOM_SEEDS=5 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)

@@ -268,9 +268,15 @@ class ForwardAndResetPipeline:
 
     def _can_reuse_code(self, cached_code: Optional[str], cached_keys: List[str],
                         new_positions: Dict) -> bool:
-        """캐싱된 코드를 재사용할 수 있는지 확인 (key 일치 검사)"""
-        if cached_code is None or not cached_keys:
+        """캐싱된 코드를 재사용할 수 있는지 확인 (key 일치 검사)
+
+        cached_keys가 비어있으면 코드가 positions를 참조하지 않는 것이므로
+        (좌표 하드코딩 등) 무조건 재사용 가능.
+        """
+        if cached_code is None:
             return False
+        if not cached_keys:
+            return True
         return set(cached_keys) <= set(new_positions.keys())
 
     def initialize_camera(self) -> bool:
@@ -470,6 +476,7 @@ class ForwardAndResetPipeline:
         image_path: str = None,
         skip_codegen: bool = False,
         canonical_labels: List[str] = None,
+        canonical_point_labels: Dict[str, List[str]] = None,
     ) -> str:
         """Forward 코드 생성
 
@@ -479,6 +486,7 @@ class ForwardAndResetPipeline:
             image_path: 초기 이미지 경로 (multi-turn 모드에서 필수)
             skip_codegen: True면 검출만 수행, 코드 생성 스킵 (multi-turn 전용)
             canonical_labels: 코드 재사용 시 강제할 라벨 목록 (multi-turn 전용)
+            canonical_point_labels: 코드 재사용 시 강제할 point 라벨 {obj: [labels]}
 
         Returns:
             생성된 Python 코드 문자열 (skip_codegen=True면 빈 문자열)
@@ -488,6 +496,7 @@ class ForwardAndResetPipeline:
                 instruction, positions, image_path,
                 skip_codegen=skip_codegen,
                 canonical_labels=canonical_labels,
+                canonical_point_labels=canonical_point_labels,
             )
         else:
             return self._generate_forward_code_single(instruction, positions)
@@ -519,6 +528,7 @@ class ForwardAndResetPipeline:
         image_path: str = None,
         skip_codegen: bool = False,
         canonical_labels: List[str] = None,
+        canonical_point_labels: Dict[str, List[str]] = None,
     ) -> str:
         """Multi-turn 코드 생성 (4-turn LLM 대화)
 
@@ -528,6 +538,7 @@ class ForwardAndResetPipeline:
         Args:
             skip_codegen: True면 T0~T2(검출)만 수행하고 코드 생성(T3) 스킵
             canonical_labels: 코드 재사용 시 T1에서 강제할 라벨 목록
+            canonical_point_labels: 코드 재사용 시 T2에서 강제할 point 라벨 {obj: [labels]}
         """
         from code_gen_lerobot.code_gen_with_skill import lerobot_code_gen_multi_turn
 
@@ -559,6 +570,7 @@ class ForwardAndResetPipeline:
             codegen_model=self.codegen_model,
             skip_codegen=skip_codegen,
             canonical_labels=canonical_labels,
+            canonical_point_labels=canonical_point_labels,
         )
 
         # multi-turn 정보 저장
@@ -580,6 +592,30 @@ class ForwardAndResetPipeline:
                 self._last_skill_sequence = LeRobotSkills._last_instance.skill_sequence
         except Exception:
             pass
+
+    @staticmethod
+    def _patch_reset_code_targets(code: str, new_targets: Dict) -> str:
+        """Reset 코드 내 target_positions 블록의 좌표만 새 값으로 치환.
+
+        target_positions = { ... } 블록을 찾아 그 안의 좌표만 교체.
+        current_positions 등 다른 블록은 건드리지 않음.
+        """
+        import re
+
+        block_match = re.search(r'(target_positions\s*=\s*\{)(.*?)(\})', code, re.DOTALL)
+        if not block_match:
+            return code
+
+        block_body = block_match.group(2)
+        for name, info in new_targets.items():
+            pos = info.get("position") if isinstance(info, dict) else info
+            if pos is None or len(pos) < 3:
+                continue
+            pattern = rf'("{name}":\s*\[)[^\]]+(\])'
+            replacement = rf'\g<1>{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}\2'
+            block_body = re.sub(pattern, replacement, block_body)
+
+        return code[:block_match.start()] + block_match.group(1) + block_body + block_match.group(3) + code[block_match.end():]
 
     def dry_run_code(self, code: str, positions: Dict) -> bool:
         """생성된 코드를 IK 검증만으로 가상 실행 (로봇 연결 없음).
@@ -1204,12 +1240,13 @@ class ForwardAndResetPipeline:
                 use_cached = self.cached_forward_code is not None
                 if use_cached:
                     print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code, T3 skipped)...", step="Step 3/5") + f"{RESET}")
-                    # T0~T2만 수행 (positions 갱신)
+                    # T0~T2만 수행 (positions 갱신) — point 라벨도 강제
                     self.generate_forward_code(
                         instruction, self.detected_positions,
                         image_path=str(initial_path),
                         skip_codegen=True,
                         canonical_labels=self.cached_forward_keys,
+                        canonical_point_labels=getattr(self, '_cached_point_labels', None),
                     )
                     # key 일치 확인
                     if self._can_reuse_code(self.cached_forward_code, self.cached_forward_keys, self.detected_positions):
@@ -1488,28 +1525,6 @@ class ForwardAndResetPipeline:
                 except Exception as e:
                     print(f"  [SkillLabeler] Warning: {e}")
 
-            # 레코딩 모드: 에피소드 종료 + 시각화 (forward 직후 즉시)
-            if self.record_dataset:
-                self._end_episode_recording(discard=False)
-
-                # Skill recording 시각화 저장
-                try:
-                    from record_dataset.visualize_skills import generate_skill_visualizations
-                    dataset = self.dataset_recorder._dataset
-                    dataset._ensure_hf_dataset_loaded()
-                    episode_df = dataset.hf_dataset.to_pandas()
-                    saved_viz = generate_skill_visualizations(
-                        dataframe=episode_df,
-                        save_dir=forward_dir,
-                        episode_index=self.dataset_recorder.episode_count - 1,
-                    )
-                    if saved_viz:
-                        print(f"  Skill visualizations saved: {len(saved_viz)} files")
-                except Exception as e:
-                    import traceback
-                    print(f"  Warning: Skill visualization failed: {e}")
-                    traceback.print_exc()
-
             if forward_success:
                 print(f"  {GREEN}Forward execution SUCCESS{RESET}")
             else:
@@ -1517,9 +1532,7 @@ class ForwardAndResetPipeline:
 
             # Step 5: Context 저장
             print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 5/5") + f"{RESET}")
-            # Note: spec은 현재 code_gen에서 직접 생성하므로 빈 dict 사용
-            # 향후 spec_gen을 사용하는 경우 여기서 spec도 저장
-            self.generated_spec = {}  # TODO: spec_gen 통합 시 채우기
+            self.generated_spec = {}
             self.save_execution_context(
                 instruction=instruction,
                 positions=self.detected_positions,
@@ -1538,16 +1551,16 @@ class ForwardAndResetPipeline:
 
             # Step 1: Final 이미지 캡처
             print(f"\n{YELLOW}" + self._log("Capturing final state...", step="Step 1/3", tag="Judge") + f"{RESET}")
-            time.sleep(1.0)  # 로봇 동작 완료 대기
+            time.sleep(1.0)
             self.capture_final_image()
             if self.final_image is not None:
                 print("  Final image captured")
-                # [즉시 저장] Final 이미지
                 final_path = Path(forward_dir) / "final_state.jpg"
-                cv2.imwrite(str(final_path), self.final_image)  # Already BGR
+                cv2.imwrite(str(final_path), self.final_image)
                 print(f"  Final image saved: {final_path}")
 
             # Step 2: Judge 실행
+            judge_prediction = "UNCERTAIN"
             if not skip_judge:
                 print(f"\n{YELLOW}" + self._log(f"Running VLM Judge ({self.judge_model})...", step="Step 2/3", tag="Judge") + f"{RESET}")
                 if self.initial_image is not None and self.final_image is not None:
@@ -1558,15 +1571,38 @@ class ForwardAndResetPipeline:
                     )
                     result['judge'] = judge_result
 
-                    prediction = judge_result.get('prediction', 'UNCERTAIN')
+                    judge_prediction = judge_result.get('prediction', 'UNCERTAIN')
                     reasoning = judge_result.get('reasoning', '')
 
-                    # 색상 코딩
-                    pred_color = GREEN if prediction == "TRUE" else RED if prediction == "FALSE" else YELLOW
-                    print(f"  Prediction: {pred_color}{prediction}{RESET}")
+                    pred_color = GREEN if judge_prediction == "TRUE" else RED if judge_prediction == "FALSE" else YELLOW
+                    print(f"  Prediction: {pred_color}{judge_prediction}{RESET}")
                     print(f"  Reasoning: {reasoning[:100]}...")
                 else:
                     print(f"  {YELLOW}Skipped (missing images){RESET}")
+
+            # 레코딩 모드: Judge 결과에 따라 에피소드 저장/폐기
+            if self.record_dataset:
+                should_discard = (judge_prediction != "TRUE") and not skip_judge
+                self._end_episode_recording(discard=should_discard)
+
+                if not should_discard:
+                    # Skill recording 시각화 저장 (성공한 에피소드만)
+                    try:
+                        from record_dataset.visualize_skills import generate_skill_visualizations
+                        dataset = self.dataset_recorder._dataset
+                        dataset._ensure_hf_dataset_loaded()
+                        episode_df = dataset.hf_dataset.to_pandas()
+                        saved_viz = generate_skill_visualizations(
+                            dataframe=episode_df,
+                            save_dir=forward_dir,
+                            episode_index=self.dataset_recorder.episode_count - 1,
+                        )
+                        if saved_viz:
+                            print(f"  Skill visualizations saved: {len(saved_viz)} files")
+                    except Exception as e:
+                        import traceback
+                        print(f"  Warning: Skill visualization failed: {e}")
+                        traceback.print_exc()
 
                 # Step 3: Judge UI 표시 (타임아웃 적용)
                 print(f"\n{YELLOW}" + self._log(f"Displaying result ({self.judge_timeout_ms/1000:.1f}s timeout)...", step="Step 3/3", tag="Judge") + f"{RESET}")
@@ -1596,20 +1632,28 @@ class ForwardAndResetPipeline:
             else:
                 print(f"\n{YELLOW}" + self._log("Judge skipped (--skip-judge)", step="Step 2/3", tag="Judge") + f"{RESET}")
 
-            # 코드 캐시 갱신
+            # 코드 캐시 갱신: 실행 성공이면 캐싱 (Judge FALSE면 무효화)
             judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-            should_cache = forward_success and (judge_pred == 'TRUE' or skip_judge)
+            should_cache = forward_success and judge_pred != 'FALSE'
             if should_cache:
                 if self.cached_forward_code is None:
                     self.cached_forward_code = self.generated_code
                     self.cached_forward_keys = self._extract_position_keys(self.generated_code)
+                    # point labels 캐시: {obj: [label1, label2, ...]}
+                    self._cached_point_labels = {}
+                    for name, info in self.detected_positions.items():
+                        if isinstance(info, dict) and "points" in info:
+                            self._cached_point_labels[name] = list(info["points"].keys())
                     print(f"  {GREEN}[CodeReuse] Forward code cached (keys: {self.cached_forward_keys}){RESET}")
+                    if self._cached_point_labels:
+                        print(f"  {GREEN}[CodeReuse] Point labels cached: {self._cached_point_labels}{RESET}")
             elif not forward_success or judge_pred == 'FALSE':
                 if self.cached_forward_code is not None:
                     reason = "execution failed" if not forward_success else "Judge=FALSE"
                     print(f"  {YELLOW}[CodeReuse] Cache invalidated ({reason}){RESET}")
                 self.cached_forward_code = None
                 self.cached_forward_keys = []
+                self._cached_point_labels = None
 
             # Forward 로깅 종료
             forward_log_path = forward_logger.stop()
@@ -1639,10 +1683,16 @@ class ForwardAndResetPipeline:
                     s_positions = pending["seed_positions"]
                     s_dir = pending["session_dir"]
 
-                    # seed_positions[0] 설정 (아직 없으면)
+                    # seed_positions[0] 설정 + 과거 시드에 등록 (아직 없으면)
                     if s_positions[0] is None and self.first_episode_positions is not None:
                         import copy
                         s_positions[0] = copy.deepcopy(self.first_episode_positions)
+                        # 초기 위치를 과거 시드로 등록 (겹침 방지 + 시각화)
+                        from code_gen_lerobot.reset_execution.workspace import is_grippable as _is_grip_
+                        self._all_previous_seed_positions.append(
+                            {name: info for name, info in self.first_episode_positions.items()
+                             if isinstance(info, dict) and _is_grip_(info.get("bbox_px"))}
+                        )
 
                     print(f"\n{MAGENTA}{BOLD}  [Seed Transition] Generating seed_{seed_idx}...{RESET}")
                     next_seed = self._generate_seed_positions(s_dir, seed_idx)
@@ -1686,11 +1736,7 @@ class ForwardAndResetPipeline:
                             self.reset_initial_image = reset_current_frame
                             self.reset_initial_resolution = (reset_current_frame.shape[1], reset_current_frame.shape[0])
 
-                    # Reset 코드 재사용 판단
-                    use_cached_reset = self.cached_reset_code is not None
-                    if use_cached_reset:
-                        print(f"  {GREEN}[CodeReuse] Attempting reset code reuse (T3 skipped){RESET}")
-
+                    # Reset 코드는 매번 좌표가 달라지므로(현재위치→타겟위치 하드코딩) 항상 새로 생성
                     reset_code, _, current_positions, target_positions = self.generate_reset_code(
                         original_instruction=instruction,
                         original_positions=reset_original_positions,
@@ -1699,28 +1745,7 @@ class ForwardAndResetPipeline:
                         detection_timeout=detection_timeout,
                         visualize_detection=visualize_detection,
                         current_state_image_path=reset_current_state_image_path,
-                        skip_codegen=use_cached_reset,
-                        canonical_labels=self.cached_reset_keys if use_cached_reset else None,
                     )
-
-                    if use_cached_reset:
-                        if self._can_reuse_code(self.cached_reset_code, self.cached_reset_keys, current_positions):
-                            reset_code = self.cached_reset_code
-                            print(f"  {GREEN}[CodeReuse] Using cached reset code (keys matched){RESET}")
-                        else:
-                            missing = set(self.cached_reset_keys) - set(current_positions.keys())
-                            print(f"  {YELLOW}[CodeReuse] Reset key mismatch ({missing}), regenerating{RESET}")
-                            self.cached_reset_code = None
-                            self.cached_reset_keys = []
-                            reset_code, _, current_positions, target_positions = self.generate_reset_code(
-                                original_instruction=instruction,
-                                original_positions=reset_original_positions,
-                                forward_spec=self.generated_spec,
-                                forward_code=self.generated_code,
-                                detection_timeout=detection_timeout,
-                                visualize_detection=visualize_detection,
-                                current_state_image_path=reset_current_state_image_path,
-                            )
 
                     result['reset']['current_positions'] = current_positions
                     result['reset']['target_positions'] = target_positions
@@ -1864,21 +1889,9 @@ class ForwardAndResetPipeline:
                     else:
                         print(f"\n{CYAN}" + self._log("Reset Judge skipped (--skip-judge)", tag="Judge") + f"{RESET}")
 
-                    # Reset 코드 캐시 갱신
-                    rj_pred = result['reset_judge'].get('prediction', 'UNCERTAIN')
-                    reset_exec_ok = result['reset']['execution_success']
-                    reset_should_cache = reset_exec_ok and (rj_pred == 'TRUE' or skip_judge)
-                    if reset_should_cache:
-                        if self.cached_reset_code is None:
-                            self.cached_reset_code = result['reset']['code']
-                            self.cached_reset_keys = self._extract_position_keys(result['reset']['code'])
-                            print(f"  {GREEN}[CodeReuse] Reset code cached (keys: {self.cached_reset_keys}){RESET}")
-                    elif not reset_exec_ok or rj_pred == 'FALSE':
-                        if self.cached_reset_code is not None:
-                            reason = "execution failed" if not reset_exec_ok else "Judge=FALSE"
-                            print(f"  {YELLOW}[CodeReuse] Reset cache invalidated ({reason}){RESET}")
-                        self.cached_reset_code = None
-                        self.cached_reset_keys = []
+                    # Reset 코드를 dry_run 검증용으로 캐싱 (재사용은 하지 않음)
+                    if result['reset']['execution_success'] and result['reset']['code']:
+                        self.cached_reset_code = result['reset']['code']
 
                 except Exception as e:
                     print(f"{RED}[Error] Reset failed: {e}{RESET}")
@@ -2279,7 +2292,10 @@ class ForwardAndResetPipeline:
             for name, info in prev_positions.items():
                 all_initial[f"{name}_seed{i}"] = info
 
-        # 랜덤 위치 생성 (최대 10회 재시도)
+        # 랜덤 위치 생성 + dry_run 검증 (최대 10회 재시도)
+        reset_code = self.cached_reset_code
+        accepted_positions = None
+
         for attempt in range(10):
             random_targets = generate_random_positions(
                 grippable_objects=grippable,
@@ -2288,14 +2304,31 @@ class ForwardAndResetPipeline:
                 workspace=workspace,
                 pix2robot=pix2robot,
             )
-            if random_targets:
+            if not random_targets:
+                print(f"  [SeedGen] Attempt {attempt+1}: position generation failed, retrying...")
+                continue
+
+            candidate = self._build_batch_positions(random_targets, obstacles, pix2robot=pix2robot)
+
+            # dry_run 검증: 캐싱된 reset 코드의 target 좌표를 새 seed로 치환 후 IK 가상 실행
+            if reset_code is not None:
+                print(f"  [SeedGen] Attempt {attempt+1}: dry-run validating...")
+                patched_code = self._patch_reset_code_targets(reset_code, candidate)
+                if self.dry_run_code(patched_code, candidate):
+                    print(f"  [SeedGen] Attempt {attempt+1}: dry-run PASSED")
+                    accepted_positions = candidate
+                    break
+                else:
+                    print(f"  [SeedGen] Attempt {attempt+1}: dry-run FAILED, retrying...")
+            else:
+                # reset 코드 없으면 기본 IK 검증만으로 채택
+                accepted_positions = candidate
                 break
-            print(f"  [SeedGen] Attempt {attempt+1}: generation failed, retrying...")
         else:
-            print(f"  [SeedGen] All attempts failed")
+            print(f"  [SeedGen] All 10 attempts failed")
             return None
 
-        new_positions = self._build_batch_positions(random_targets, obstacles)
+        new_positions = accepted_positions
 
         print(f"  [SeedGen] seed_{seed_index} positions:")
         for name, info in new_positions.items():
@@ -2335,13 +2368,12 @@ class ForwardAndResetPipeline:
         시드 위치 시각화: workspace 위에 과거/현재 시드 bbox를 그림.
 
         - workspace 도넛 마스크 + 가장자리 마진
-        - 과거 시드: 회색 bbox (seed 번호 라벨)
-        - 초기 위치: 파란색 bbox
+        - 과거 시드 (초기 포함): 회색 계열 bbox (seed 번호 라벨)
         - 장애물: 빨간색 bbox
         - 새 시드: 초록색 bbox (굵게)
         """
         import cv2
-        from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image, _get_bbox_px
+        from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image, _get_bbox_px, is_grippable as _is_grippable
 
         # 초기 이미지 로드
         if self.forward_initial_image_path and Path(self.forward_initial_image_path).exists():
@@ -2353,7 +2385,6 @@ class ForwardAndResetPipeline:
         result = draw_workspace_on_image(base_img, robot_id=self.robot_id, pix2robot_calibrator=pix2robot)
 
         def _draw_bbox(img, center_px, bbox_px, color, thickness, label=""):
-            """중심 + bbox 크기로 사각형 그리기"""
             hw, hh = bbox_px[0] // 2, bbox_px[1] // 2
             cu, cv = int(center_px[0]), int(center_px[1])
             cv2.rectangle(img, (cu - hw, cv - hh), (cu + hw, cv + hh), color, thickness)
@@ -2361,36 +2392,22 @@ class ForwardAndResetPipeline:
                 cv2.putText(img, label, (cu - hw, cv - hh - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
 
-        # 초기 위치 (파란색)
-        if self.first_episode_positions:
-            for name, info in self.first_episode_positions.items():
-                if not isinstance(info, dict):
-                    continue
-                pos = info.get("position")
-                bbox = _get_bbox_px(info)
-                if pos and pix2robot:
-                    try:
-                        px = pix2robot.robot_to_pixel(pos[0], pos[1])
-                        _draw_bbox(result, px, bbox, (255, 150, 0), 1, f"init:{name}")  # 파란색
-                    except Exception:
-                        pass
-
         # 장애물 (빨간색)
         if self.first_episode_positions:
             for name, info in self.first_episode_positions.items():
                 if not isinstance(info, dict):
                     continue
-                if not info.get("grippable", True):
+                if not _is_grippable(info.get("bbox_px")):
                     pos = info.get("position")
                     bbox = _get_bbox_px(info)
                     if pos and pix2robot:
                         try:
                             px = pix2robot.robot_to_pixel(pos[0], pos[1])
-                            _draw_bbox(result, px, bbox, (0, 0, 255), 2, f"obs:{name}")  # 빨간색
+                            _draw_bbox(result, px, bbox, (0, 0, 255), 2, f"obs:{name}")
                         except Exception:
                             pass
 
-        # 과거 시드 (회색, seed 번호 표시)
+        # 과거 시드 — 모두 회색 계열 (초기 위치 = s0)
         PAST_COLORS = [
             (150, 150, 150),  # 회색
             (180, 130, 180),  # 보라
@@ -2412,13 +2429,12 @@ class ForwardAndResetPipeline:
                     except Exception:
                         pass
 
-        # 새 시드 (초록색, 굵게) — grippable 객체만
-        from code_gen_lerobot.reset_execution.workspace import is_grippable as _is_grippable
+        # 새 시드 (초록색, 굵게) — grippable만
         for name, info in new_positions.items():
             if not isinstance(info, dict):
                 continue
             if not _is_grippable(info.get("bbox_px")):
-                continue  # 장애물은 건너뜀
+                continue
             pos = info.get("position")
             bbox = _get_bbox_px(info)
             if pos and pix2robot:
@@ -2437,13 +2453,19 @@ class ForwardAndResetPipeline:
         cv2.imwrite(out_path, result)
         print(f"  [SeedGen] Visualization saved: {out_path}")
 
-    def _build_batch_positions(self, random_targets: Dict, obstacles: Dict) -> Dict:
-        """랜덤 타겟과 obstacle을 합쳐 positions dict 구성."""
+    def _build_batch_positions(self, random_targets: Dict, obstacles: Dict, pix2robot=None) -> Dict:
+        """랜덤 타겟과 obstacle을 합쳐 positions dict 구성. pixel 필드도 갱신."""
         new_positions = {}
         for name, pos in random_targets.items():
             orig = self.first_episode_positions.get(name, {})
             if isinstance(orig, dict):
                 new_positions[name] = {**orig, "position": pos}
+                # pixel 필드를 새 position에 맞게 갱신
+                if pix2robot is not None:
+                    try:
+                        new_positions[name]["pixel"] = list(pix2robot.robot_to_pixel(pos[0], pos[1]))
+                    except Exception:
+                        pass
                 if "points" in orig:
                     new_positions[name]["points"] = {
                         pt_name: pos for pt_name in orig["points"]
@@ -2545,13 +2567,6 @@ class ForwardAndResetPipeline:
 
             # Set current episode for logging
             self.current_episode = episode_num
-
-            # 배치 전환 시 코드 캐시 초기화
-            if is_batch_start and batch_index > 0:
-                self.cached_forward_code = None
-                self.cached_forward_keys = []
-                self.cached_reset_code = None
-                self.cached_reset_keys = []
 
             print("\n" + CYAN + "=" * 70 + RESET)
             print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Starting Episode (Batch {batch_index+1})  ".center(70) + RESET)

@@ -1147,7 +1147,7 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        GRIPPER_MAX_RATIO = 0.30
+        GRIPPER_MAX_RATIO = 0.25
         clamped_ratio = min(ratio, GRIPPER_MAX_RATIO)
         target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
@@ -1173,7 +1173,7 @@ class LeRobotSkills:
         Args:
             duration: Movement duration in seconds (default: 1.5)
         """
-        GRIPPER_CLOSE_RATIO = 0.95
+        GRIPPER_CLOSE_RATIO = 0.99
         target_pos = self.gripper_open_pos + (self.gripper_close_pos - self.gripper_open_pos) * GRIPPER_CLOSE_RATIO
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
 

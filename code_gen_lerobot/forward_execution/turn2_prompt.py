@@ -8,7 +8,7 @@ Crops are generated from bboxes detected in Turn 1, and this prompt is called on
 """
 
 
-def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False) -> str:
+def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False, canonical_point_labels: dict = None) -> str:
     """
     Turn 2: exact location for each critical manipulation point on the cropped image of the target object.
 
@@ -16,12 +16,14 @@ def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False) -
         object_label: label of the object detected in Turn 1 (e.g., "red block")
         has_side_view: If True, two crop images are provided (overhead + side-view)
                        and the output includes points for both views.
+        canonical_point_labels: {object_label: ["grasp center", "plate center", ...]}
+                               이전 에피소드에서 사용된 point 라벨. 제공되면 동일 라벨 강제.
 
     Returns:
         prompt string corpus for turn 2
     """
     if has_side_view:
-        return f"""
+        prompt = f"""
 Now I am showing you **two cropped close-up images** of the object "{object_label}":
 1. **Crop 1 (Overhead view)** — cropped from the overhead camera image.
 2. **Crop 2 (Side view)** — cropped from the side camera image.
@@ -59,9 +61,8 @@ Return a JSON block:
 - **Labels must be consistent** between overhead and sideview — the same physical point must have the same label in both views.
 - Both `overhead_critical_points` and `sideview_critical_points` must contain the **same set of points** (same labels, same roles), just with different coordinates for each view.
 """.strip()
-
-    # ── Original single-view prompt (has_side_view=False) ──
-    return f"""
+    else:
+        prompt = f"""
 Now I am showing you a **cropped close-up image** of the object "{object_label}" from the overhead camera.
 
 Based on your analysis above, identify critical points on this object.
@@ -91,6 +92,14 @@ Return a JSON block:
 - Look carefully at the cropped image and provide accurate coordinates.
 - Coordinates are normalized 0–1000 relative to this cropped image.
 """.strip()
+
+    # canonical point labels가 있으면 강제 추가
+    if canonical_point_labels and object_label in canonical_point_labels:
+        labels = canonical_point_labels[object_label]
+        labels_str = ", ".join(f'"{l}"' for l in labels)
+        prompt += f"\n\n**CRITICAL: You MUST use exactly these point labels for this object: [{labels_str}]. Do NOT rename, paraphrase, or add/remove labels.**"
+
+    return prompt
 
 
 # ──────────────────────────────────────────────

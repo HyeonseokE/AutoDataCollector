@@ -122,10 +122,14 @@ def generate_skill_visualizations(
 
     frames = np.arange(len(df))
 
-    # === Skill transition boundaries (natural_language 기준) ===
+    # === Skill transition boundaries ===
+    # natural_language가 없으면 skill.type을 대신 사용
+    has_nl = "skill.natural_language" in df.columns
+    nl_col = "skill.natural_language" if has_nl else "skill.type"
+
     nl_transitions = [0]
     for i in range(1, len(df)):
-        if df["skill.natural_language"].iloc[i] != df["skill.natural_language"].iloc[i - 1]:
+        if df[nl_col].iloc[i] != df[nl_col].iloc[i - 1]:
             nl_transitions.append(i)
     nl_transitions.append(len(df))
 
@@ -147,11 +151,11 @@ def generate_skill_visualizations(
     gs = GridSpec(5, 1, figure=fig, height_ratios=[2.0, 1.2, 1, 1.5, 1.5], hspace=0.3)
     fig.suptitle(f"Skill Recording Analysis (Episode {episode_index}, {len(df)} frames)", fontsize=14)
 
-    # 1a: Natural language timeline
+    # 1a: Natural language timeline (fallback to skill.type if not available)
     ax = fig.add_subplot(gs[0])
-    _draw_colored_bar(ax, df, "skill.natural_language", nl_transitions, _TYPE_COLORS,
+    _draw_colored_bar(ax, df, nl_col, nl_transitions, _TYPE_COLORS,
                       fontsize=6, type_column="skill.type")
-    ax.set_title("skill.natural_language", fontsize=10)
+    ax.set_title(nl_col, fontsize=10)
 
     # 1b: Skill type (colored regions)
     ax = fig.add_subplot(gs[1], sharex=fig.axes[0])
@@ -228,11 +232,11 @@ def generate_skill_visualizations(
     gs = GridSpec(7, 1, figure=fig, height_ratios=[1] + [2] * 6, hspace=0.25)
     fig.suptitle("Goal Joint vs Observation State (All 6 Axes)", fontsize=14)
 
-    # Row 0: skill.natural_language bar
+    # Row 0: skill.natural_language bar (fallback to skill.type)
     ax_skill = fig.add_subplot(gs[0])
-    _draw_colored_bar(ax_skill, df, "skill.natural_language", nl_transitions, _TYPE_COLORS,
+    _draw_colored_bar(ax_skill, df, nl_col, nl_transitions, _TYPE_COLORS,
                       fontsize=6, type_column="skill.type")
-    ax_skill.set_title("skill.natural_language", fontsize=10)
+    ax_skill.set_title(nl_col, fontsize=10)
 
     # Row 1-6: each joint
     for idx, name in enumerate(joint_names):
@@ -260,7 +264,7 @@ def generate_skill_visualizations(
         start, end = nl_transitions[i], nl_transitions[i + 1]
         sl = df.iloc[start]
         rows.append([
-            sl["skill.natural_language"],
+            sl[nl_col],
             sl["skill.type"],
             f"{start}-{end - 1}",
             str(end - start),

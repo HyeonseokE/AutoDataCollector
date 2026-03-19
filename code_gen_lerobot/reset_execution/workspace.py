@@ -95,7 +95,7 @@ class ResetWorkspace(BaseWorkspace):
         obstacles: List[dict],
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
-        max_attempts: int = 100,
+        max_attempts: int = 500,
         bbox_margin_px: int = 10,
     ) -> Optional[List[float]]:
         """
@@ -264,7 +264,7 @@ def generate_random_positions(
     workspace: ResetWorkspace = None,
     pix2robot=None,
     seed: int = None,
-    max_attempts: int = 100,
+    max_attempts: int = 500,
     bbox_margin_px: int = 10,
 ) -> Dict[str, List[float]]:
     """
@@ -330,7 +330,7 @@ def generate_random_positions(
             "is_fixed": True,
         })
 
-    # 2) Grippable 객체의 현재 위치 (이동 전까지 장애물)
+    # 2) Grippable 객체의 현재 위치 (이동 전까지 장애물, 50% 겹침 허용)
     for name, info in grippable_objects.items():
         if info is None:
             continue
@@ -341,12 +341,13 @@ def generate_random_positions(
         occupied.append({
             "name": name,
             "center_px": center_px,
-            "half_w_px": bbox_px[0] // 2 + bbox_margin_px,
-            "half_h_px": bbox_px[1] // 2 + bbox_margin_px,
+            "half_w_px": int((bbox_px[0] // 2 + bbox_margin_px) * 0.5),
+            "half_h_px": int((bbox_px[1] // 2 + bbox_margin_px) * 0.5),
             "is_fixed": False,
         })
 
-    # 3) 초기 위치도 장애물로 추가 (랜덤 위치가 원래 자리와 겹치지 않도록)
+    # 3) 초기 위치 + 과거 시드 위치를 장애물로 추가
+    #    과거 시드("_seed" 포함)는 50% 겹침 허용 (반경 절반)
     for name, info in initial_positions.items():
         if info is None:
             continue
@@ -355,11 +356,12 @@ def generate_random_positions(
         if center_px is None:
             continue
         bbox_px = _get_bbox_px(init_info)
+        scale = 0.5  # grippable 위치는 50% 겹침 허용 (과거 시드 + 초기 + 현재)
         occupied.append({
             "name": f"{name}_initial",
             "center_px": center_px,
-            "half_w_px": bbox_px[0] // 2 + bbox_margin_px,
-            "half_h_px": bbox_px[1] // 2 + bbox_margin_px,
+            "half_w_px": int((bbox_px[0] // 2 + bbox_margin_px) * scale),
+            "half_h_px": int((bbox_px[1] // 2 + bbox_margin_px) * scale),
             "is_fixed": True,
         })
 

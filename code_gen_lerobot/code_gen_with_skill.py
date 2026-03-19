@@ -469,6 +469,7 @@ def lerobot_code_gen_multi_turn(
     codegen_model: str = None,
     skip_codegen: bool = False,
     canonical_labels: List[str] = None,
+    canonical_point_labels: Dict[str, List[str]] = None,
 ) -> Tuple[str, Dict, Dict]:
     """
     Crop-then-Point 멀티턴 LLM 코드 생성 파이프라인
@@ -683,7 +684,7 @@ def lerobot_code_gen_multi_turn(
 
         # Send crop(s) + pointing prompt
         turn2_msg = {
-            "text": turn2_crop_pointing_prompt(label, has_side_view=obj_has_sv),
+            "text": turn2_crop_pointing_prompt(label, has_side_view=obj_has_sv, canonical_point_labels=canonical_point_labels),
             "image_path": crop_path,
         }
         if obj_has_sv and sv_crop_path:
@@ -717,7 +718,10 @@ def lerobot_code_gen_multi_turn(
             print(f"    [Warning] No recognized point keys for '{label}'")
             continue
 
-        for pt in oh_points:
+        # canonical point labels가 있으면 VLM 출력 라벨을 강제 교체
+        canonical_pts = canonical_point_labels.get(label, []) if canonical_point_labels else []
+
+        for pt_idx, pt in enumerate(oh_points):
             point_2d = pt.get("point_2d", [])
             if len(point_2d) != 2:
                 continue
@@ -727,9 +731,15 @@ def lerobot_code_gen_multi_turn(
             px = crop_x1 + crop_px
             py = crop_y1 + crop_py
 
+            # VLM 라벨을 canonical으로 강제 교체 (인덱스 매칭)
+            pt_label = pt.get("label", "")
+            if canonical_pts and pt_idx < len(canonical_pts) and pt_label != canonical_pts[pt_idx]:
+                print(f"    [LabelFix] '{pt_label}' → '{canonical_pts[pt_idx]}'")
+                pt_label = canonical_pts[pt_idx]
+
             entry = {
                 "object_label": label,
-                "label": pt.get("label", ""),
+                "label": pt_label,
                 "role": pt.get("role", "interaction"),
                 "reasoning": pt.get("reasoning", ""),
                 "point_2d": point_2d,
@@ -737,8 +747,7 @@ def lerobot_code_gen_multi_turn(
                 "crop_px": crop_px, "crop_py": crop_py,
             }
 
-            # Match side-view point by label
-            pt_label = pt.get("label", "")
+            # Match side-view point by label (pt_label은 위에서 canonical 교체 완료)
             sv_match = sv_by_label.get(pt_label)
             if sv_match:
                 sv_pt_2d = sv_match.get("point_2d", [])

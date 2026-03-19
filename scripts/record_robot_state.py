@@ -49,20 +49,39 @@ def extract_robot_id(config_path: str) -> str:
     return f"robot{match.group(1)}" if match else "robot3"
 
 
+def get_available_robot_ids():
+    """robot_configs/robot/ 디렉토리에서 사용 가능한 robot ID 목록을 반환."""
+    config_dir = PROJECT_ROOT / "robot_configs" / "robot"
+    ids = []
+    for f in sorted(config_dir.glob("so101_robot*.yaml")):
+        match = re.search(r'robot(\d+)', f.stem)
+        if match:
+            ids.append(int(match.group(1)))
+    return sorted(ids)
+
+
 def interactive_input():
     """대화형 모드: 사용자로부터 robot ID와 state type을 입력받음."""
     print("\n" + "=" * 60)
     print("         ROBOT STATE RECORDING - Interactive Mode")
     print("=" * 60)
 
+    # 사용 가능한 robot ID 탐색
+    available_ids = get_available_robot_ids()
+    if not available_ids:
+        print("  Error: robot_configs/robot/ 에 설정 파일이 없습니다.")
+        sys.exit(1)
+
+    ids_str = ", ".join(str(i) for i in available_ids)
+
     # Robot ID 입력
     while True:
         try:
-            robot_input = input("\n  Robot ID를 입력하세요 (2 또는 3): ").strip()
+            robot_input = input(f"\n  Robot ID를 입력하세요 ({ids_str}): ").strip()
             robot_id = int(robot_input)
-            if robot_id in [2, 3]:
+            if robot_id in available_ids:
                 break
-            print("  Error: 2 또는 3만 입력 가능합니다.")
+            print(f"  Error: {ids_str} 중 하나만 입력 가능합니다.")
         except ValueError:
             print("  Error: 숫자를 입력해주세요.")
 
@@ -228,7 +247,6 @@ def main():
         print("         Press Enter when ready to save.\n")
 
         import select
-        import sys
         import time
 
         # For non-blocking input check

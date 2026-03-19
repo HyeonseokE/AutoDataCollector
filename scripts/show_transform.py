@@ -24,8 +24,8 @@ def main():
     parser.add_argument("--x", type=float, required=True, help="World X position (meters)")
     parser.add_argument("--y", type=float, required=True, help="World Y position (meters)")
     parser.add_argument("--z", type=float, required=True, help="World Z position (meters)")
-    parser.add_argument("--robot", type=int, choices=[2, 3], default=None,
-                        help="Robot number (2 or 3). If not specified, shows both.")
+    parser.add_argument("--robot", type=int, default=None,
+                        help="Robot number. If not specified, shows all.")
     parser.add_argument("--all", action="store_true", help="Show transformation for all robots")
 
     args = parser.parse_args()

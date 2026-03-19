@@ -483,7 +483,6 @@ def main():
         "--robot", "-r",
         type=int,
         default=3,
-        choices=[2, 3],
         help="Robot number (default: 3)"
     )
 

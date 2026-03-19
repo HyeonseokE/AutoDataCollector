@@ -21,8 +21,8 @@ def main():
         description="Pix2Robot 캘리브레이션: 픽셀(u,v) → 로봇(x,y,z) 직접 변환"
     )
     parser.add_argument(
-        "--robot", type=int, required=True, choices=[2, 3],
-        help="로봇 번호 (2 또는 3)",
+        "--robot", type=int, required=True,
+        help="로봇 번호 (예: 0, 2, 3)",
     )
     parser.add_argument(
         "--resume", action="store_true",

@@ -185,8 +185,8 @@ def main():
         description="Compute world-to-robot transformation from matching points"
     )
     parser.add_argument(
-        "--robot", type=int, required=True, choices=[2, 3],
-        help="Robot number (2 or 3)"
+        "--robot", type=int, required=True,
+        help="Robot number (e.g., 0, 2, 3)"
     )
     parser.add_argument(
         "--input", type=str, default=None,

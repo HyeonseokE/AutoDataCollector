@@ -90,8 +90,8 @@ def main():
         description="Collect ONE matching point pair for world-to-robot extrinsic calibration"
     )
     parser.add_argument(
-        "--robot", type=int, required=True, choices=[2, 3],
-        help="Robot number (2 or 3)"
+        "--robot", type=int, required=True,
+        help="Robot number (e.g., 0, 2, 3)"
     )
     parser.add_argument(
         "--x", type=float, required=True,

@@ -436,7 +436,7 @@ def main():
     parser = argparse.ArgumentParser(description="Execute Subgoal Predictions on Robot")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--instruction", "-i", type=str, required=True, help="Task instruction")
-    parser.add_argument("--robot", type=int, default=3, choices=[2, 3], help="Robot ID")
+    parser.add_argument("--robot", type=int, default=3, help="Robot ID")
     parser.add_argument("--duration", type=float, default=3.0, help="Movement duration per subgoal")
     parser.add_argument("--dry-run", action="store_true", help="Predict without executing")
     parser.add_argument("--save-vis", type=str, default=None, help="Save visualization to path")

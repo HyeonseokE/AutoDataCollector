@@ -311,6 +311,7 @@ class DatasetRecorder:
             skill_data = {
                 "skill.natural_language": skill_info["label"],
                 "skill.type": skill_info["type"],
+                "skill.verification_question": skill_info["verification_question"],
                 "skill.progress": np.array([skill_info["progress"]], dtype=np.float32),
                 "skill.goal_position.joint": skill_info["goal_joint"],
                 "skill.goal_position.world_xyzrpy": skill_info["goal_world_xyzrpy"],
@@ -321,6 +322,7 @@ class DatasetRecorder:
             skill_data = {
                 "skill.natural_language": skill_label if skill_label else "",
                 "skill.type": "",
+                "skill.verification_question": "",
                 "skill.progress": np.array([0.0], dtype=np.float32),
                 "skill.goal_position.joint": np.zeros(6, dtype=np.float32),
                 "skill.goal_position.world_xyzrpy": np.zeros(6, dtype=np.float32),

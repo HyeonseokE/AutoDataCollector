@@ -102,6 +102,7 @@ class RecordingContext:
     # Skill-level subgoal info
     _current_skill_label: Optional[str] = None
     _current_skill_type: Optional[str] = None
+    _current_verification_question: Optional[str] = None
     _current_goal_joint: Optional[np.ndarray] = None
     _current_goal_world_xyzrpy: Optional[np.ndarray] = None
     _current_goal_robot_xyzrpy: Optional[np.ndarray] = None
@@ -418,11 +419,13 @@ class RecordingContext:
         goal_robot_xyzrpy: np.ndarray,
         goal_gripper: float,
         start_state: np.ndarray,
+        verification_question: str = None,
     ) -> None:
         """스킬 정보 설정 (스킬 시작 시 호출)"""
         with cls._lock:
             cls._current_skill_label = label
             cls._current_skill_type = skill_type
+            cls._current_verification_question = verification_question or ""
             cls._current_goal_joint = np.asarray(goal_joint, dtype=np.float32)
             cls._current_goal_world_xyzrpy = np.asarray(goal_world_xyzrpy, dtype=np.float32)
             cls._current_goal_robot_xyzrpy = np.asarray(goal_robot_xyzrpy, dtype=np.float32)
@@ -437,6 +440,7 @@ class RecordingContext:
         with cls._lock:
             cls._current_skill_label = None
             cls._current_skill_type = None
+            cls._current_verification_question = None
             cls._current_goal_joint = None
             cls._current_goal_world_xyzrpy = None
             cls._current_goal_robot_xyzrpy = None
@@ -476,6 +480,7 @@ class RecordingContext:
         return {
             "label": cls._current_skill_label or "",
             "type": cls._current_skill_type or "",
+            "verification_question": cls._current_verification_question or "",
             "progress": cls.get_skill_progress(current_state=current_state),
             "goal_joint": cls._current_goal_joint if cls._current_goal_joint is not None else np.zeros(6, dtype=np.float32),
             "goal_world_xyzrpy": cls._current_goal_world_xyzrpy if cls._current_goal_world_xyzrpy is not None else np.zeros(6, dtype=np.float32),

@@ -423,16 +423,9 @@ class LeRobotSkills:
         kinematics=None,
         target_name: str = None,
         position: list = None,
+        verification_question: str = None,
     ) -> None:
-        """스킬 레코딩 정보 설정 (헬퍼)
-
-        Args:
-            goal_joint_5: 목표 arm joint (radians, 5축)
-            goal_gripper: 목표 gripper (normalized, -100~+100)
-            target_name: 대상 물체 이름 (시퀀스 기록용)
-            position: 목표 위치 [x, y, z] (시퀀스 기록용)
-        """
-        # 스킬 시퀀스에 기록 (후처리 라벨링용)
+        """스킬 레코딩 정보 설정 (헬퍼)"""
         self.skill_sequence.append({
             "label": label,
             "type": skill_type,
@@ -443,10 +436,7 @@ class LeRobotSkills:
         if not HAS_RECORDING_CONTEXT or not RecordingContext.is_active():
             return
 
-        # Capture start_state (6 joints, normalized) for state-based progress
         start_state = self.robot.read_positions(normalize=True).copy()
-
-        # arm joints: radians → normalized (observation.state/action과 동일 단위)
         goal_arm_normalized = self._radians_to_normalized(goal_joint_5)
         goal_joint_6 = np.concatenate([goal_arm_normalized, [goal_gripper]])
         world_xyzrpy, robot_xyzrpy = self._compute_goal_xyzrpy(goal_joint_5, kinematics)
@@ -459,6 +449,7 @@ class LeRobotSkills:
             goal_robot_xyzrpy=robot_xyzrpy,
             goal_gripper=goal_gripper,
             start_state=start_state,
+            verification_question=verification_question,
         )
 
     def _clear_skill_recording(self) -> None:
@@ -922,7 +913,7 @@ class LeRobotSkills:
             return {q: None for q in queries}
         
     # ========== Primitive Skills ==========
-    def move_to_initial_state(self, duration: Optional[float] = None, skill_description: Optional[str] = None) -> bool:
+    def move_to_initial_state(self, duration: Optional[float] = None, skill_description: Optional[str] = None, verification_question: Optional[str] = None) -> bool:
         """
         Move robot to recorded initial (home) state including gripper.
 
@@ -945,6 +936,7 @@ class LeRobotSkills:
             skill_type="move_initial",
             goal_joint_5=goal_joint_rad,
             goal_gripper=self.initial_state_gripper,
+            verification_question=verification_question,
         )
 
         self._log(f"\nMoving to Initial State...")
@@ -975,6 +967,7 @@ class LeRobotSkills:
         target_pitch: Optional[float] = None,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
     ) -> bool:
         """
         Move end-effector to target position with orientation constraints.
@@ -1126,6 +1119,7 @@ class LeRobotSkills:
             kinematics=active_planner.kinematics,
             target_name=target_name,
             position=position.tolist() if hasattr(position, 'tolist') else list(position),
+            verification_question=verification_question,
         )
 
         # Execute trajectory with active kinematics for correct error measurement
@@ -1139,7 +1133,7 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
 
-    def gripper_open(self, duration: float = 2.0, ratio: float = 1.0, skill_description: Optional[str] = None):
+    def gripper_open(self, duration: float = 2.0, ratio: float = 1.0, skill_description: Optional[str] = None, verification_question: Optional[str] = None):
         """
         Open gripper with recording support.
 
@@ -1157,6 +1151,7 @@ class LeRobotSkills:
             skill_type="gripper_open",
             goal_joint_5=current_arm_rad,
             goal_gripper=target_pos,
+            verification_question=verification_question,
         )
 
         try:
@@ -1166,7 +1161,7 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
 
-    def gripper_close(self, duration: float = 1.5, skill_description: Optional[str] = None):
+    def gripper_close(self, duration: float = 1.5, skill_description: Optional[str] = None, verification_question: Optional[str] = None):
         """
         Close gripper with recording support.
 
@@ -1182,6 +1177,7 @@ class LeRobotSkills:
             skill_type="gripper_close",
             goal_joint_5=current_arm_rad,
             goal_gripper=target_pos,
+            verification_question=verification_question,
         )
 
         try:
@@ -1191,7 +1187,7 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
     
-    def rotate_90degree(self, direction: int = 1, duration: float = 2.0, skill_description: Optional[str] = None) -> bool:
+    def rotate_90degree(self, direction: int = 1, duration: float = 2.0, skill_description: Optional[str] = None, verification_question: Optional[str] = None) -> bool:
         """
         Rotate gripper (wrist_roll) by 90 degrees.
 
@@ -1234,6 +1230,7 @@ class LeRobotSkills:
             skill_type="rotate",
             goal_joint_5=target_joints,
             goal_gripper=self.current_gripper_pos,
+            verification_question=verification_question,
         )
 
         # Convert to normalized
@@ -1266,7 +1263,7 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
 
-    def move_to_free_state(self, duration: Optional[float] = None, skill_description: Optional[str] = None) -> bool:
+    def move_to_free_state(self, duration: Optional[float] = None, skill_description: Optional[str] = None, verification_question: Optional[str] = None) -> bool:
         """
         Move robot to recorded free state for safe parking.
 
@@ -1292,6 +1289,7 @@ class LeRobotSkills:
             skill_type="move_free",
             goal_joint_5=goal_joint_rad,
             goal_gripper=self.free_state_gripper,
+            verification_question=verification_question,
         )
 
         self._log(f"\n{'='*60}")
@@ -1337,6 +1335,7 @@ class LeRobotSkills:
         object_position: Union[List[float], np.ndarray],
         object_name: Optional[str] = None,
         skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
     ) -> bool:
         """
         Execute pick at object position (called from pick_approach position).
@@ -1393,6 +1392,7 @@ class LeRobotSkills:
         gripper_open_ratio: float = 1.0,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
     ) -> bool:
         """
         Execute place at target position (called from place_approach position).
@@ -1469,6 +1469,7 @@ class LeRobotSkills:
         duration: Optional[float] = None,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
     ) -> bool:
         """
         Press a target (button, switch) with 2-phase descent and torque limiting.
@@ -1513,6 +1514,7 @@ class LeRobotSkills:
         duration: Optional[float] = None,
         object_name: Optional[str] = None,
         skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
     ) -> bool:
         """
         Push an object in a straight line (Cartesian linear path).

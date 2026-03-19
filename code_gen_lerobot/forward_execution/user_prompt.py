@@ -254,6 +254,9 @@ if __name__ == "__main__":
    - **ALWAYS use `gripper_open_ratio=0.7`** in `execute_place_object()` to open gripper 70%
    - Always include try/finally for proper cleanup
    - **ALWAYS pass `target_name` or `object_name` parameters** for subgoal labeling in dataset recording
+   - **ALWAYS pass `skill_description` and `verification_question`** for every skill call:
+     - `skill_description`: concise sentence describing what this action does (e.g., "Move gripper above chocolate_pie_1 to prepare for picking")
+     - `verification_question`: Yes/No question to visually verify the outcome (e.g., "Is the gripper positioned above chocolate_pie_1?")
 
 3. **Output Format:**
    - Do not use code blocks in your final answer
@@ -630,6 +633,9 @@ if __name__ == "__main__":
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
+9. **ALWAYS** pass `skill_description` and `verification_question` for every skill call:
+   - `skill_description`: concise sentence describing the action (e.g., "Move gripper above chocolate_pie_1")
+   - `verification_question`: Yes/No question to verify the outcome (e.g., "Is the gripper above chocolate_pie_1?")
 
 **Output**: Complete executable Python code (no code blocks, plain text).
 

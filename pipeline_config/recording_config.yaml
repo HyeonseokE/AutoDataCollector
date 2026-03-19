@@ -53,7 +53,8 @@ cameras:
 ## skill.* feature 개별 on/off 설정
 ## false로 설정하면 해당 feature가 dataset에 기록되지 않음
 skill_features:
-  natural_language: false   # skill.natural_language (자연어 스킬 설명)
+  natural_language: true    # skill.natural_language (자연어 스킬 설명)
+  verification_question: true  # skill.verification_question (스킬 성공 확인 질문)
   type: true               # skill.type (move_to, pick, place 등)
   progress: true           # skill.progress (0.0~1.0 진행률)
   goal_position:

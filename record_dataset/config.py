@@ -139,6 +139,7 @@ OBSERVATION_FEATURE_KEYS = [
 # Skill feature keys
 SKILL_FEATURE_KEYS = [
     "skill.natural_language",
+    "skill.verification_question",
     "skill.type",
     "skill.progress",
     "skill.goal_position.joint",
@@ -188,6 +189,7 @@ def load_skill_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
 
         return {
             "skill.natural_language": sf.get("natural_language", True),
+            "skill.verification_question": sf.get("verification_question", True),
             "skill.type": sf.get("type", True),
             "skill.progress": sf.get("progress", True),
             "skill.goal_position.joint": gp.get("joint", True),
@@ -352,6 +354,7 @@ def build_dataset_features(
     # Skill-level subgoal labels (enabled인 것만 추가)
     skill_schemas = {
         "skill.natural_language": {"dtype": "string", "shape": (1,), "names": None},
+        "skill.verification_question": {"dtype": "string", "shape": (1,), "names": None},
         "skill.type": {"dtype": "string", "shape": (1,), "names": None},
         "skill.progress": {"dtype": "float32", "shape": (1,), "names": None},
         "skill.goal_position.joint": {"dtype": "float32", "shape": (NUM_JOINTS,), "names": JOINT_NAMES},
@@ -400,6 +403,11 @@ DATASET_FEATURES = {
 
     # Skill-level subgoal labels
     "skill.natural_language": {
+        "dtype": "string",
+        "shape": (1,),
+        "names": None,
+    },
+    "skill.verification_question": {
         "dtype": "string",
         "shape": (1,),
         "names": None,

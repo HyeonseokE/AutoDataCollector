@@ -1549,20 +1549,6 @@ class ForwardAndResetPipeline:
             forward_success = self.execute_code(self.generated_code, self.detected_positions)
             result['forward']['execution_success'] = forward_success
 
-            # 후처리: 스킬 라벨 생성
-            if hasattr(self, '_last_skill_sequence') and self._last_skill_sequence:
-                try:
-                    from record_dataset.postprocess import generate_skill_labels
-                    skill_labels_path = str(Path(forward_dir) / "skill_labels.json")
-                    generate_skill_labels(
-                        instruction=instruction,
-                        skill_sequence=self._last_skill_sequence,
-                        llm_model=self.judge_model,  # 빠른 모델 사용
-                        save_path=skill_labels_path,
-                    )
-                except Exception as e:
-                    print(f"  [SkillLabeler] Warning: {e}")
-
             if forward_success:
                 print(f"  {GREEN}Forward execution SUCCESS{RESET}")
             else:

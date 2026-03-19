@@ -38,7 +38,7 @@ class BaseWorkspace:
         self,
         kinematics_engine: Optional["KinematicsEngine"] = None,
         frame_transformer: Optional["FrameTransformer"] = None,
-        min_reach: float = 0.15,
+        min_reach: float = 0.20,
         max_reach: float = 0.407,
         z_floor: float = -0.02,  # 캘리브레이션 오차 허용 (-2cm)
     ):
@@ -53,8 +53,9 @@ class BaseWorkspace:
             z_floor: 바닥 높이
         """
         if kinematics_engine is not None:
-            self.min_reach = kinematics_engine.min_reach
-            self.max_reach = kinematics_engine.max_reach
+            # KinematicsEngine의 reach를 기본 안전 범위로 clamp
+            self.min_reach = max(kinematics_engine.min_reach, min_reach)
+            self.max_reach = min(kinematics_engine.max_reach, max_reach)
             self._kinematics = kinematics_engine
         else:
             self.min_reach = min_reach
@@ -96,11 +97,7 @@ class BaseWorkspace:
         Returns:
             True if within reach
         """
-        # Use kinematics engine if available
-        if self._kinematics is not None:
-            return self._kinematics.is_position_reachable(position_base, margin)
-
-        # Otherwise use simple reach check
+        # 항상 workspace의 clamp된 reach 범위 사용
         x, y, z = position_base
 
         # Z floor check

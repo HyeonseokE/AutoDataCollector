@@ -46,7 +46,6 @@ class ResetWorkspace(BaseWorkspace):
         kinematics_engine: Optional["KinematicsEngine"] = None,
         frame_transformer=None,
         z_fixed: float = 0.01,
-        min_displacement_px: int = 50,
     ):
         """
         Initialize ResetWorkspace.
@@ -55,12 +54,10 @@ class ResetWorkspace(BaseWorkspace):
             kinematics_engine: KinematicsEngine 인스턴스
             frame_transformer: FrameTransformer 인스턴스
             z_fixed: 고정 Z 높이 (테이블 표면, meters)
-            min_displacement_px: 초기 위치에서 최소 이동 거리 (pixels)
         """
         super().__init__(kinematics_engine, frame_transformer)
 
         self.z_fixed = z_fixed
-        self.min_displacement_px = min_displacement_px
 
     def is_valid(self, position: np.ndarray) -> bool:
         """
@@ -76,38 +73,39 @@ class ResetWorkspace(BaseWorkspace):
 
     def _check_ik_feasible(self, position: np.ndarray) -> bool:
         """
-        해당 위치에서 approach(z=0.20) + pick/place(z=0.025) 높이 모두 IK가 풀리는지 검증.
-        KinematicsEngine이 없으면 검증 건너뜀 (True 반환).
+        해당 위치에서 approach(z=0.20) + pick(z=0.025) IK 기본 검증.
+        상세 검증은 dry_run_code()에서 실제 생성 코드로 수행.
         """
         if self._kinematics is None:
             return True
 
-        check_heights = [0.20, 0.025]  # approach, pick/place
-        for z in check_heights:
-            pos = np.array([position[0], position[1], z])
-            _, success = self._kinematics.inverse_kinematics_position_only(
-                pos, max_iterations=50,
-            )
-            if not success:
-                return False
-        return True
+        # approach 높이
+        pos_approach = np.array([position[0], position[1], 0.20])
+        _, success = self._kinematics.inverse_kinematics_position_only(pos_approach, max_iterations=50)
+        if not success:
+            return False
+
+        # pick 높이
+        pos_pick = np.array([position[0], position[1], 0.025])
+        _, success = self._kinematics.inverse_kinematics_position_only(pos_pick, max_iterations=50)
+        return success
 
     def generate_random_position(
         self,
         obstacles: List[dict],
-        initial_pos: Optional[List[float]] = None,
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
         max_attempts: int = 100,
-        bbox_margin_px: int = 30,
+        bbox_margin_px: int = 10,
     ) -> Optional[List[float]]:
         """
-        단일 객체용 랜덤 위치 생성 (reach 기반 + 픽셀 bbox 충돌 검증).
+        단일 객체용 랜덤 위치 생성 (reach + FOV + bbox 충돌 + 기본 IK 검증).
+        초기 위치 이격은 초기 위치를 장애물에 등록하여 bbox 충돌로 처리.
+        상세 IK 검증(pitch 포함)은 dry_run_code()에서 실제 코드로 수행.
 
         Args:
-            obstacles: 피해야 할 장애물들
+            obstacles: 피해야 할 장애물들 (현재 물체 + 장애물 + 초기 위치 포함)
                 [{"center_px": [u,v], "half_w_px": int, "half_h_px": int}, ...]
-            initial_pos: 초기 위치 [x,y,z] (이 위치에서 min_displacement_from_initial 이상 떨어져야 함)
             obj_bbox_px: 이 객체의 bbox 픽셀 크기 (w_px, h_px). None이면 (30, 30) 사용.
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
@@ -126,24 +124,16 @@ class ResetWorkspace(BaseWorkspace):
         obj_half_h = obj_bbox_px[1] // 2 + bbox_margin_px
 
         for _ in range(max_attempts):
-            # Reach 링 내에서 극좌표 랜덤 샘플링
-            angle = np.random.uniform(0, 2 * np.pi)
+            # 전방 도넛 영역 내에서 직접 샘플링 (x>0, reach 범위 내)
+            angle = np.random.uniform(-np.pi / 2, np.pi / 2)  # 전방만 (-90°~+90°)
             r = np.sqrt(np.random.uniform(r_min**2, r_max**2))
             x = r * np.cos(angle)
             y = r * np.sin(angle)
             z = self.z_fixed
 
-            # x > 0 제한 (로봇 전방만)
-            if x <= 0:
-                continue
-
             candidate = [x, y, z]
 
-            # 조건 1: 기본 도달 가능 여부 (reach limits)
-            if not self.is_reachable(np.array(candidate)):
-                continue
-
-            # 조건 2: IK 검증 (approach + pick/place 높이)
+            # 조건 2: 기본 IK 검증 (approach + pick 높이)
             if not self._check_ik_feasible(np.array(candidate)):
                 continue
 
@@ -161,17 +151,7 @@ class ResetWorkspace(BaseWorkspace):
                     cv - obj_half_h < edge_margin or cv + obj_half_h >= img_h - edge_margin):
                     continue
 
-                # 초기 위치에서 충분히 떨어졌는지
-                if initial_pos is not None:
-                    try:
-                        iu, iv = pix2robot.robot_to_pixel(initial_pos[0], initial_pos[1])
-                        dist_px = np.sqrt((cu - iu)**2 + (cv - iv)**2)
-                        if dist_px < self.min_displacement_px:
-                            continue
-                    except Exception:
-                        pass
-
-                # bbox 충돌 검사
+                # bbox 충돌 검사 (장애물 + 현재 위치 + 초기 위치 모두 포함)
                 collision = False
                 for occ in obstacles:
                     ou, ov = occ["center_px"]
@@ -285,7 +265,7 @@ def generate_random_positions(
     pix2robot=None,
     seed: int = None,
     max_attempts: int = 100,
-    bbox_margin_px: int = 30,
+    bbox_margin_px: int = 10,
 ) -> Dict[str, List[float]]:
     """
     랜덤 위치 생성 (픽셀 bbox 기반 충돌 검증).
@@ -366,6 +346,23 @@ def generate_random_positions(
             "is_fixed": False,
         })
 
+    # 3) 초기 위치도 장애물로 추가 (랜덤 위치가 원래 자리와 겹치지 않도록)
+    for name, info in initial_positions.items():
+        if info is None:
+            continue
+        init_info = info if isinstance(info, dict) else {"position": info}
+        center_px = _get_center_px(init_info, pix2robot)
+        if center_px is None:
+            continue
+        bbox_px = _get_bbox_px(init_info)
+        occupied.append({
+            "name": f"{name}_initial",
+            "center_px": center_px,
+            "half_w_px": bbox_px[0] // 2 + bbox_margin_px,
+            "half_h_px": bbox_px[1] // 2 + bbox_margin_px,
+            "is_fixed": True,
+        })
+
     # 결과 저장
     target_positions = {}
 
@@ -373,27 +370,16 @@ def generate_random_positions(
         if obj_info is None:
             continue
 
-        # 초기 위치
-        initial_info = initial_positions.get(obj_name)
-        if initial_info is None:
-            initial_pos = None
-        elif isinstance(initial_info, dict) and "position" in initial_info:
-            initial_pos = initial_info["position"]
-        elif isinstance(initial_info, (list, tuple)) and len(initial_info) >= 3:
-            initial_pos = list(initial_info[:3])
-        else:
-            initial_pos = None
-
         # 이 객체의 bbox 픽셀 크기
         obj_bbox_px = _get_bbox_px(obj_info if isinstance(obj_info, dict) else {})
 
-        # 자기 자신은 장애물에서 제거
+        # 자기 자신의 현재 위치만 장애물에서 제거 (이동할 거니까)
+        # 초기 위치는 유지 (초기 위치와 겹치면 안 됨)
         obstacles_for_this = [occ for occ in occupied if occ["name"] != obj_name]
 
-        # 랜덤 위치 생성
+        # 랜덤 위치 생성 (기본 IK + FOV + bbox 충돌 검증)
         position = workspace.generate_random_position(
             obstacles=obstacles_for_this,
-            initial_pos=initial_pos,
             obj_bbox_px=obj_bbox_px,
             pix2robot=pix2robot,
             max_attempts=max_attempts,
@@ -417,19 +403,10 @@ def generate_random_positions(
                 except Exception:
                     pass
         else:
-            # Fallback
+            # Fallback: reach 중앙
             print(f"[Warning] Could not find valid position for '{obj_name}'")
-            if initial_pos is not None:
-                offset = np.random.uniform(-0.03, 0.03, 2)
-                fallback_pos = [
-                    initial_pos[0] + offset[0],
-                    initial_pos[1] + offset[1],
-                    workspace.z_fixed,
-                ]
-            else:
-                r_mid = (workspace.min_reach + workspace.max_reach) / 2
-                fallback_pos = [r_mid, 0.0, workspace.z_fixed]
-            target_positions[obj_name] = fallback_pos
+            r_mid = (workspace.min_reach + workspace.max_reach) / 2
+            target_positions[obj_name] = [r_mid, 0.0, workspace.z_fixed]
 
     return target_positions
 

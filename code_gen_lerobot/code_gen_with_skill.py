@@ -288,6 +288,7 @@ def _points_to_positions(
     all_points: list,
     robot_id: int = 3,
     camera=None,
+    valid_objects: list = None,
 ) -> Dict:
     """
     Crop-then-point 결과에서 object별 모든 point를 pixel→world 변환.
@@ -299,9 +300,10 @@ def _points_to_positions(
         all_points: [{"object_label", "label", "role", "px", "py"}, ...]
         robot_id: 로봇 번호
         camera: depth 카메라 (3D 변환용)
+        valid_objects: Turn 1 bbox 결과 [{"box_2d": [...], "label": str}, ...]
 
     Returns:
-        {object_label: {"position": [x,y,z], "pixel": [px,py],
+        {object_label: {"position": [x,y,z], "pixel": [px,py], "bbox_px": (w,h),
                          "points": {"label": [x,y,z], ...}}}
     """
     # Object별로 모든 point 수집 + grasp point 선택
@@ -405,6 +407,20 @@ def _points_to_positions(
                 print(f"    pixel→world fallback failed ({px},{py}): {e}")
         return [0.0, 0.0, 0.03], False
 
+    # bbox_px 맵 구축 (valid_objects에서 추출)
+    bbox_px_map = {}
+    if valid_objects:
+        # 이미지 크기 기본값 (640x480)
+        img_w, img_h = 640, 480
+        for obj in valid_objects:
+            label = obj.get("label", "")
+            box = obj.get("box_2d", [])
+            if len(box) == 4 and label:
+                ymin, xmin, ymax, xmax = box
+                w_px = int((xmax - xmin) * img_w / 1000)
+                h_px = int((ymax - ymin) * img_h / 1000)
+                bbox_px_map[label] = (max(w_px, 10), max(h_px, 10))
+
     # positions 구성
     positions = {}
     for obj_label, grasp_pt in grasp_by_object.items():
@@ -415,6 +431,7 @@ def _points_to_positions(
         positions[obj_label] = {
             "position": world_pos,
             "pixel": [gpx, gpy],
+            "bbox_px": bbox_px_map.get(obj_label, (30, 30)),
         }
         if not success:
             positions[obj_label]["_needs_world_coords"] = True
@@ -450,6 +467,8 @@ def lerobot_code_gen_multi_turn(
     cad_image_dirs: List[str] = None,
     side_view_image: str = None,
     codegen_model: str = None,
+    skip_codegen: bool = False,
+    canonical_labels: List[str] = None,
 ) -> Tuple[str, Dict, Dict]:
     """
     Crop-then-Point 멀티턴 LLM 코드 생성 파이프라인
@@ -535,8 +554,13 @@ def lerobot_code_gen_multi_turn(
     if has_side_view:
         print(f"    Dual-view mode: overhead + side-view ({side_view_image})")
 
+    turn1_text = turn1_detect_task_relevant_objects_prompt(has_side_view=has_side_view)
+    if canonical_labels:
+        label_list = ", ".join(f'"{l}"' for l in canonical_labels)
+        turn1_text += f"\n\n**IMPORTANT: You MUST use exactly these labels: [{label_list}]. Do NOT rename or paraphrase them.**"
+        print(f"    [CodeReuse] Enforcing canonical labels: {canonical_labels}")
     turn1_msg = {
-        "text": turn1_detect_task_relevant_objects_prompt(has_side_view=has_side_view),
+        "text": turn1_text,
         "image_path": image_path,
     }
     if has_side_view:
@@ -746,7 +770,7 @@ def lerobot_code_gen_multi_turn(
 
     # Positions 구성 (pixel → world)
     print(f"\n{YELLOW}" + _log("Building positions...", step="Positions") + f"{RESET}")
-    positions = _points_to_positions(all_points, robot_id=robot_id, camera=camera)
+    positions = _points_to_positions(all_points, robot_id=robot_id, camera=camera, valid_objects=valid_objects)
 
     # Fallback
     if fallback_positions:
@@ -835,25 +859,32 @@ def lerobot_code_gen_multi_turn(
     else:
         print(f"\n{YELLOW}" + _log("Waypoint Trajectory — skipped (< 2 points)", step="TurnTest") + f"{RESET}")
 
-    # ── Context Summary Turn (Session 1 마지막) ──
-    print(f"\n{YELLOW}" + _log("Context Summary (handoff)", step="Summary") + f"{RESET}")
-    summary_resp = gemini_chat_send(chat, gen_config,
-        {"text": context_summary_prompt()},
-        turn_label="Context Summary")
-    print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
+    # ── skip_codegen 모드: T0~T2 검출만 수행, 코드 생성 스킵 ──
+    if skip_codegen:
+        print(f"\n{LIGHT_GREEN}" + _log("Code generation SKIPPED (reusing cached code)", step="CodeGen") + f"{RESET}")
+        code = ""
+        codegen_resp = ""
+        summary_resp = ""
+    else:
+        # ── Context Summary Turn (Session 1 마지막) ──
+        print(f"\n{YELLOW}" + _log("Context Summary (handoff)", step="Summary") + f"{RESET}")
+        summary_resp = gemini_chat_send(chat, gen_config,
+            {"text": context_summary_prompt()},
+            turn_label="Context Summary")
+        print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
 
-    # ── Code Generation (새 Session 2) ──
-    session2_model = codegen_model or llm_model
-    print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET}")
-    codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
-    codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
-        {"text": codegen_with_context_prompt(
-            instruction=instruction, robot_id=robot_id,
-            all_points=all_points, context_summary=summary_resp,
-            positions=positions)},
-        turn_label="Code Gen")
-    code = extract_code_from_response(codegen_resp)
-    assert code, "Failed to extract code from Code Gen response"
+        # ── Code Generation (새 Session 2) ──
+        session2_model = codegen_model or llm_model
+        print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET}")
+        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
+        codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
+            {"text": codegen_with_context_prompt(
+                instruction=instruction, robot_id=robot_id,
+                all_points=all_points, context_summary=summary_resp,
+                positions=positions)},
+            turn_label="Code Gen")
+        code = extract_code_from_response(codegen_resp)
+        assert code, "Failed to extract code from Code Gen response"
 
     # multi_turn_info (하위호환: execution_forward_and_reset.py가 사용하는 키 유지)
     turn2_compat = {

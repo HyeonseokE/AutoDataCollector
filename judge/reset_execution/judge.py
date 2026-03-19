@@ -53,10 +53,15 @@ class ResetJudge:
         self.verbose = verbose
         self.use_server = use_server
 
-        if use_server:
+        self.is_gemini = "gemini" in model.lower()
+
+        if use_server or self.is_gemini:
             self.client = None
             if verbose:
-                print("[ResetJudge] Using SSH server for VLM inference")
+                if use_server:
+                    print("[ResetJudge] Using SSH server for VLM inference")
+                else:
+                    print(f"[ResetJudge] Using Vertex AI Gemini ({model})")
         else:
             try:
                 from openai import OpenAI
@@ -101,7 +106,7 @@ class ResetJudge:
                 'reset_mode': str,
             }
         """
-        if not self.use_server and self.client is None:
+        if not self.use_server and not self.is_gemini and self.client is None:
             return {
                 'prediction': 'UNCERTAIN',
                 'reasoning': 'VLM client not initialized',
@@ -197,8 +202,8 @@ class ResetJudge:
         final_image_b64: str,
     ) -> str:
         """VLM API 호출"""
-        # vLLM 서버 사용 (vlm.py 모듈 활용)
-        if self.use_server:
+        # vLLM 서버 또는 Gemini 사용 (vlm.py 모듈 활용)
+        if self.use_server or self.is_gemini:
             from ..vlm import vlm_response
 
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -206,13 +211,14 @@ class ResetJudge:
             response = vlm_response(
                 prompt=full_prompt,
                 images_b64=[initial_image_b64, final_image_b64],
+                model=self.model,
                 max_tokens=1000,
                 temperature=self.temperature,
-                use_server=True,
+                use_server=True if self.use_server else None,
             )
 
             if response is None:
-                raise RuntimeError("VLM server request failed")
+                raise RuntimeError("VLM request failed")
 
             return response
 

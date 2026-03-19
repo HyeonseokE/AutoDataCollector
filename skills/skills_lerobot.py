@@ -1139,7 +1139,7 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
 
-    def gripper_open(self, duration: float = 1.5, ratio: float = 1.0, skill_description: Optional[str] = None):
+    def gripper_open(self, duration: float = 2.0, ratio: float = 1.0, skill_description: Optional[str] = None):
         """
         Open gripper with recording support.
 

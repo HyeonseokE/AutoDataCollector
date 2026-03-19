@@ -58,11 +58,16 @@ class TaskJudge:
         self.verbose = verbose
         self.use_server = use_server
 
-        # SSH 서버 모드에서는 OpenAI 클라이언트 불필요
-        if use_server:
+        # Gemini 모델은 Vertex AI 사용 (OpenAI 클라이언트 불필요)
+        self.is_gemini = "gemini" in model.lower()
+
+        if use_server or self.is_gemini:
             self.client = None
             if verbose:
-                print("[TaskJudge] Using SSH server for VLM inference")
+                if use_server:
+                    print("[TaskJudge] Using SSH server for VLM inference")
+                else:
+                    print(f"[TaskJudge] Using Vertex AI Gemini ({model})")
         else:
             # OpenAI 클라이언트 초기화
             try:
@@ -103,7 +108,7 @@ class TaskJudge:
                 'error': str | None,
             }
         """
-        if not self.use_server and self.client is None:
+        if not self.use_server and not self.is_gemini and self.client is None:
             return {
                 'prediction': 'UNCERTAIN',
                 'reasoning': 'VLM client not initialized',
@@ -197,23 +202,23 @@ class TaskJudge:
         Returns:
             VLM 응답 문자열
         """
-        # vLLM 서버 사용 (vlm.py 모듈 활용)
-        if self.use_server:
+        # vLLM 서버 또는 Gemini 사용 (vlm.py 모듈 활용)
+        if self.use_server or self.is_gemini:
             from ..vlm import vlm_response
 
-            # 시스템 프롬프트와 사용자 프롬프트 결합
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
             response = vlm_response(
                 prompt=full_prompt,
                 images_b64=[initial_image_b64, final_image_b64],
+                model=self.model,
                 max_tokens=1000,
                 temperature=self.temperature,
-                use_server=True,
+                use_server=True if self.use_server else None,
             )
 
             if response is None:
-                raise RuntimeError("VLM server request failed")
+                raise RuntimeError("VLM request failed")
 
             return response
 

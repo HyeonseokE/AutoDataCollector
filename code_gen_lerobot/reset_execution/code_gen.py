@@ -548,6 +548,8 @@ def lerobot_reset_code_gen_multi_turn(
     current_episode: int = 1,
     total_episodes: int = 1,
     codegen_model: str = None,
+    skip_codegen: bool = False,
+    canonical_labels: List[str] = None,
 ) -> Tuple[str, Dict, Dict, Dict, Dict]:
     """
     VLM Multi-Turn Reset 코드 생성 파이프라인.
@@ -698,11 +700,13 @@ def lerobot_reset_code_gen_multi_turn(
 
     # ── Turn 1: BBox Detection (Reset 전용 — Forward 라벨 강제 사용) ──
     print(f"\n{YELLOW}" + _log("Turn 1 — BBox Detection", step="Turn1") + f"{RESET_COLOR}")
+    # canonical_labels가 있으면 (코드 재사용 모드) 그것을 우선 사용
+    enforced_labels = canonical_labels if canonical_labels else (original_labels if original_labels else None)
     turn1_text = turn1_reset_bbox_detection_prompt(
-        original_object_labels=original_labels if original_labels else None,
+        original_object_labels=enforced_labels,
     )
-    if original_labels:
-        print(f"  Enforcing Forward labels in Turn 1: {original_labels}")
+    if enforced_labels:
+        print(f"  Enforcing labels in Turn 1: {enforced_labels}")
     turn1_resp = gemini_chat_send(chat, gen_config,
         {
             "text": turn1_text,
@@ -901,35 +905,40 @@ def lerobot_reset_code_gen_multi_turn(
         elif isinstance(info, (list, tuple)) and len(info) >= 3:
             print(f"    + {name}: [{info[0]:.4f}, {info[1]:.4f}, {info[2]:.4f}]")
 
-    # ── Context Summary Turn (Session 1 마지막) ──
-    from .prompt import reset_context_summary_prompt, codegen_reset_with_context_prompt
-    print(f"\n{YELLOW}" + _log("Context Summary (handoff)", step="Summary") + f"{RESET_COLOR}")
-    summary_resp = gemini_chat_send(chat, gen_config,
-        {"text": reset_context_summary_prompt()},
-        turn_label="Context Summary (Reset)")
-    print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
+    # ── skip_codegen 모드: T0~T2 검출만 수행, 코드 생성 스킵 ──
+    if skip_codegen:
+        print(f"\n{LIGHT_GREEN}" + _log("Code generation SKIPPED (reusing cached code)", step="CodeGen") + f"{RESET_COLOR}")
+        code = ""
+    else:
+        # ── Context Summary Turn (Session 1 마지막) ──
+        from .prompt import reset_context_summary_prompt, codegen_reset_with_context_prompt
+        print(f"\n{YELLOW}" + _log("Context Summary (handoff)", step="Summary") + f"{RESET_COLOR}")
+        summary_resp = gemini_chat_send(chat, gen_config,
+            {"text": reset_context_summary_prompt()},
+            turn_label="Context Summary (Reset)")
+        print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
 
-    # ── Code Generation (새 Session 2) ──
-    session2_model = codegen_model or llm_model
-    print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET_COLOR}")
-    codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
-    codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
-        {"text": codegen_reset_with_context_prompt(
-            context_summary=summary_resp,
-            target_positions=target_positions,
-            current_positions={
-                name: grippable_objects[name]
-                for name in grippable_objects
-                if name in target_positions
-            },
-            robot_id=robot_id,
-            is_random_reset=(reset_mode == "random"),
-            all_points=all_points,
-        )},
-        turn_label="CodeGen (Reset)")
+        # ── Code Generation (새 Session 2) ──
+        session2_model = codegen_model or llm_model
+        print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET_COLOR}")
+        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
+        codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
+            {"text": codegen_reset_with_context_prompt(
+                context_summary=summary_resp,
+                target_positions=target_positions,
+                current_positions={
+                    name: grippable_objects[name]
+                    for name in grippable_objects
+                    if name in target_positions
+                },
+                robot_id=robot_id,
+                is_random_reset=(reset_mode == "random"),
+                all_points=all_points,
+            )},
+            turn_label="CodeGen (Reset)")
 
-    code = extract_code_from_response(codegen_resp)
-    assert code, "Failed to extract code from CodeGen response"
+        code = extract_code_from_response(codegen_resp)
+        assert code, "Failed to extract code from CodeGen response"
 
     # Summary
     print(GRAY + "=" * line_width + RESET_COLOR)

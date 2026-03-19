@@ -168,6 +168,93 @@ def _call_openai_vlm(
         return None
 
 
+def _is_gemini_model(model: str) -> bool:
+    """Gemini 모델 여부 판단"""
+    return "gemini" in model.lower()
+
+
+def _call_gemini_vlm(
+    prompt: str,
+    images_b64: List[str],
+    model: str = "gemini-2.0-flash",
+    max_tokens: int = 1000,
+    temperature: float = 0.0,
+    check_time: bool = True,
+) -> Optional[str]:
+    """
+    Vertex AI Gemini VLM 호출 (base64 이미지 지원)
+
+    Args:
+        prompt: 텍스트 프롬프트
+        images_b64: base64 인코딩된 이미지 리스트
+        model: Gemini 모델명
+        max_tokens: 최대 생성 토큰 수
+        temperature: 샘플링 온도
+        check_time: 시간 출력 여부
+
+    Returns:
+        생성된 텍스트 또는 실패 시 None
+    """
+    import base64 as b64_mod
+
+    try:
+        import vertexai
+        from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
+        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+    except ImportError as e:
+        print(f"[Gemini VLM] Failed to import Vertex AI SDK: {e}")
+        return None
+
+    # Vertex AI 초기화
+    project_id = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
+    location = os.getenv("VERTEX_LOCATION", "us-central1")
+    if "gemini-3" in model.lower():
+        location = "global"
+    vertexai.init(project=project_id, location=location)
+
+    gemini_model = GenerativeModel(model)
+    gen_config = GenerationConfig(
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+    )
+
+    # 컨텐츠 구성: 텍스트 + base64 이미지들
+    contents = [prompt]
+    for img_b64 in images_b64:
+        img_bytes = b64_mod.b64decode(img_b64)
+        contents.append(Part.from_data(data=img_bytes, mime_type="image/jpeg"))
+
+    start_time = time.time()
+
+    try:
+        # 재시도 로직 (rate limit / 503)
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                response = gemini_model.generate_content(
+                    contents,
+                    generation_config=gen_config,
+                )
+                break
+            except (ResourceExhausted, ServiceUnavailable) as e:
+                if attempt == max_retries:
+                    raise
+                delay = 30 * (2 ** attempt)
+                print(f"  [Gemini VLM] Rate limit, retrying in {delay}s...")
+                time.sleep(delay)
+
+        if check_time:
+            elapsed = time.time() - start_time
+            print(f"[Gemini VLM] Model: {model}, Response time: {elapsed:.2f}s")
+
+        return response.text
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"[Gemini VLM] Error ({elapsed:.2f}s): {e}")
+        return None
+
+
 def vlm_response(
     prompt: str,
     images_b64: List[str],
@@ -180,41 +267,27 @@ def vlm_response(
     """
     VLM 응답 생성 (메인 인터페이스)
 
-    code_gen_lerobot/llm.py의 llm_response()와 동일한 패턴.
-
-    Args:
-        prompt: 텍스트 프롬프트 (시스템 프롬프트 + 유저 프롬프트 결합)
-        images_b64: base64 인코딩된 이미지 리스트
-        model: 모델명 (서버 모드에서는 환경변수 VLM_MODEL_NAME 사용)
-        max_tokens: 최대 생성 토큰 수
-        temperature: 샘플링 온도
-        check_time: 시간 출력 여부
-        use_server: True면 vLLM 서버, None이면 환경변수 USE_VLM_SERVER 확인
-
-    Returns:
-        VLM 응답 문자열
-
-    Example:
-        # 서버 모드
-        response = vlm_response(
-            prompt="이 이미지를 분석해주세요",
-            images_b64=[initial_b64, final_b64],
-            use_server=True,
-        )
-
-        # API 모드
-        response = vlm_response(
-            prompt="이 이미지를 분석해주세요",
-            images_b64=[initial_b64, final_b64],
-            model="gpt-4o-mini",
-            use_server=False,
-        )
+    모델명에 따라 자동 라우팅:
+    - "gemini" 포함 → Vertex AI Gemini
+    - use_server=True → vLLM 서버
+    - 그 외 → OpenAI API
     """
     # vLLM 서버 사용 여부 결정
     if _should_use_server(use_server):
         return _call_vlm_server(
             prompt=prompt,
             images_b64=images_b64,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            check_time=check_time,
+        )
+
+    # Gemini 모델이면 Vertex AI 사용
+    if _is_gemini_model(model):
+        return _call_gemini_vlm(
+            prompt=prompt,
+            images_b64=images_b64,
+            model=model,
             max_tokens=max_tokens,
             temperature=temperature,
             check_time=check_time,

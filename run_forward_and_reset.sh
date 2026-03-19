@@ -85,32 +85,22 @@ NUM_RANDOM_SEEDS=5 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배�
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false
 
-# ============================================================
 # Reset execution 설정
-# ============================================================
 EXECUTE_RESET=true # Reset 실행 여부
 
-# ============================================================
-# Judge execution 설정
-# ============================================================
-SKIP_JUDGE=false
-
-# ============================================================
 # Dataset Recording 설정
-# ============================================================
 RECORD_DATASET=true
 
-
-
-
-
-
+# Resume 설정 (이전 세션 이어받기)
+# 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
+RESUME_SESSION=""
+# RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정
-# ============================================================
 # true: crop-then-point 멀티턴 (LLM이 이미지 보고 검출→crop pointing→코드 생성)
 # false: single-turn (Grounding DINO 검출 후 LLM 코드 생성)
+# ============================================================
 MULTI_TURN=true
 
 ## CAD 참조 이미지 디렉토리 (비어있으면 CAD 없이 실행)
@@ -312,7 +302,6 @@ echo ""
 echo "--- Feature Toggles ---"
 echo "Execute Reset: $EXECUTE_RESET"
 echo "Random Seeds: $NUM_RANDOM_SEEDS"
-echo "Skip Judge: $SKIP_JUDGE"
 echo "Use Server: $USE_SERVER"
 echo "Record Dataset: $RECORD_DATASET"
 echo "Multi-Turn: $MULTI_TURN"
@@ -355,10 +344,6 @@ if [ "$EXECUTE_RESET" = false ]; then
     EXTRA_ARGS="$EXTRA_ARGS --skip-reset"
 fi
 
-if [ "$SKIP_JUDGE" = true ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --skip-judge"
-fi
-
 if [ "$USE_SERVER" = true ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-server"
     EXTRA_ARGS="$EXTRA_ARGS --codegen-server-url $CODEGEN_SERVER_URL"
@@ -385,6 +370,10 @@ fi
 
 if [ -n "$SIDE_VIEW_IMAGE" ] && [ -f "$SIDE_VIEW_IMAGE" ]; then
     EXTRA_ARGS="$EXTRA_ARGS --side-view-image $SIDE_VIEW_IMAGE"
+fi
+
+if [ -n "$RESUME_SESSION" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --resume $RESUME_SESSION"
 fi
 
 # ============================================================

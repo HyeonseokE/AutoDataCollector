@@ -133,6 +133,7 @@ class ForwardAndResetPipeline:
         record_dataset: bool = False,
         dataset_repo_id: Optional[str] = None,
         recording_fps: int = 30,
+        resume_recording: bool = False,
         # Multi-turn options
         multi_turn: bool = False,
         cad_image_dirs: List[str] = None,
@@ -173,6 +174,7 @@ class ForwardAndResetPipeline:
         self.record_dataset = record_dataset
         self.dataset_repo_id = dataset_repo_id
         self.recording_fps = recording_fps
+        self.resume_recording = resume_recording
         self.dataset_recorder = None
         self.recording_skills_wrapper = None
         self.camera_manager = None  # MultiCameraManager for recording
@@ -280,25 +282,52 @@ class ForwardAndResetPipeline:
         return set(cached_keys) <= set(new_positions.keys())
 
     def initialize_camera(self) -> bool:
-        """카메라 초기화"""
+        """카메라 초기화 (camera_manager가 있으면 그것을 사용)"""
+        # camera_manager가 이미 RealSense를 가지고 있으면 재사용
+        if self.camera_manager:
+            if not self.camera_manager.is_connected:
+                try:
+                    self.camera_manager.connect_all()
+                except Exception as e:
+                    print(f"[Pipeline] Camera manager reconnect failed: {e}")
+            if self.camera_manager.is_connected:
+                try:
+                    self.camera = self.camera_manager.get_camera("realsense")
+                    if self.verbose:
+                        print("[Pipeline] Camera initialized (from camera_manager)")
+                    return True
+                except KeyError:
+                    pass
+
+        # Fallback: 직접 RealSense 연결
         try:
             from object_detection.camera import RealSenseD435
 
             self.camera = RealSenseD435(width=640, height=480, fps=30)
             self.camera.start()
-            # Warm-up: AWB/AE 안정화를 위해 초기 프레임 버리기
             for _ in range(30):
                 self.camera.get_frames()
             if self.verbose:
-                print("[Pipeline] Camera initialized")
+                print("[Pipeline] Camera initialized (direct)")
             return True
         except Exception as e:
             print(f"[Pipeline] Camera initialization failed: {e}")
             return False
 
     def shutdown_camera(self) -> None:
-        """카메라 종료"""
+        """카메라 종료 (camera_manager 소유 카메라는 참조만 해제)"""
         if self.camera:
+            # camera_manager가 소유한 카메라면 stop하지 않음 (manager가 관리)
+            if self.camera_manager:
+                try:
+                    cm_cam = self.camera_manager.get_camera("realsense")
+                    if self.camera is cm_cam:
+                        self.camera = None
+                        if self.verbose:
+                            print("[Pipeline] Camera reference cleared (managed by camera_manager)")
+                        return
+                except (KeyError, Exception):
+                    pass
             self.camera.stop()
             self.camera = None
             if self.verbose:
@@ -335,7 +364,7 @@ class ForwardAndResetPipeline:
             self.dataset_recorder = DatasetRecorder(
                 repo_id=self.dataset_repo_id,
                 fps=self.recording_fps,
-                # robot_type은 config.py에서 자동으로 "so101_follower" 사용
+                resume=self.resume_recording,
             )
             print(f"[Recording] Recorder initialized successfully")
             print(f"[Recording] Features: {list(self.dataset_recorder.features.keys())}")
@@ -1104,7 +1133,6 @@ class ForwardAndResetPipeline:
         save_dir: Optional[str] = None,
         use_timestamp_subdir: bool = True,
         skip_reset: bool = False,
-        skip_judge: bool = False,
         reset_target_positions: Optional[Dict] = None,
     ) -> Dict:
         """
@@ -1117,7 +1145,6 @@ class ForwardAndResetPipeline:
             visualize_detection: 검출 시각화 여부
             save_dir: 결과 저장 디렉토리
             skip_reset: Reset 단계 건너뛰기
-            skip_judge: Judge 단계 건너뛰기
 
         Returns:
             파이프라인 결과 딕셔너리
@@ -1209,13 +1236,23 @@ class ForwardAndResetPipeline:
                 # Step 1: 이미지 캡처 (Detection 없이)
                 print(f"\n{YELLOW}" + self._log("Capturing image for VLM (no detection)...", step="Step 1/5") + f"{RESET}")
 
-                # 카메라 초기화 (기존 capture_frame 활용: camera_manager → self.camera 순)
+                # 카메라 초기화
                 if not self.camera and not (self.camera_manager and self.camera_manager.is_connected):
                     if not self.initialize_camera():
                         print(f"{RED}[Error] Camera initialization failed{RESET}")
                         return result
 
                 self.initial_image = self.capture_frame()
+
+                # 캡처 실패 시 카메라 재초기화 후 재시도
+                if self.initial_image is None:
+                    print(f"  {YELLOW}[Warning] Capture failed, reinitializing camera...{RESET}")
+                    self.shutdown_camera()
+                    time.sleep(1.0)
+                    if self.initialize_camera():
+                        time.sleep(0.5)
+                        self.initial_image = self.capture_frame()
+
                 if self.initial_image is None:
                     print(f"{RED}[Error] Failed to capture image{RESET}")
                     return result
@@ -1561,28 +1598,27 @@ class ForwardAndResetPipeline:
 
             # Step 2: Judge 실행
             judge_prediction = "UNCERTAIN"
-            if not skip_judge:
-                print(f"\n{YELLOW}" + self._log(f"Running VLM Judge ({self.judge_model})...", step="Step 2/3", tag="Judge") + f"{RESET}")
-                if self.initial_image is not None and self.final_image is not None:
-                    judge_result = self.run_judge(
-                        instruction=instruction,
-                        positions=self.detected_positions,
-                        executed_code=self.generated_code,
-                    )
-                    result['judge'] = judge_result
+            print(f"\n{YELLOW}" + self._log(f"Running VLM Judge ({self.judge_model})...", step="Step 2/3", tag="Judge") + f"{RESET}")
+            if self.initial_image is not None and self.final_image is not None:
+                judge_result = self.run_judge(
+                    instruction=instruction,
+                    positions=self.detected_positions,
+                    executed_code=self.generated_code,
+                )
+                result['judge'] = judge_result
 
-                    judge_prediction = judge_result.get('prediction', 'UNCERTAIN')
-                    reasoning = judge_result.get('reasoning', '')
+                judge_prediction = judge_result.get('prediction', 'UNCERTAIN')
+                reasoning = judge_result.get('reasoning', '')
 
-                    pred_color = GREEN if judge_prediction == "TRUE" else RED if judge_prediction == "FALSE" else YELLOW
-                    print(f"  Prediction: {pred_color}{judge_prediction}{RESET}")
-                    print(f"  Reasoning: {reasoning[:100]}...")
-                else:
-                    print(f"  {YELLOW}Skipped (missing images){RESET}")
+                pred_color = GREEN if judge_prediction == "TRUE" else RED if judge_prediction == "FALSE" else YELLOW
+                print(f"  Prediction: {pred_color}{judge_prediction}{RESET}")
+                print(f"  Reasoning: {reasoning[:100]}...")
+            else:
+                print(f"  {YELLOW}Skipped (missing images){RESET}")
 
             # 레코딩 모드: Judge 결과에 따라 에피소드 저장/폐기
             if self.record_dataset:
-                should_discard = (judge_prediction != "TRUE") and not skip_judge
+                should_discard = judge_prediction != "TRUE"
                 self._end_episode_recording(discard=should_discard)
 
                 if not should_discard:
@@ -1629,9 +1665,6 @@ class ForwardAndResetPipeline:
                         result_image=result_image,
                         detection_image=self.detection_image,
                     )
-            else:
-                print(f"\n{YELLOW}" + self._log("Judge skipped (--skip-judge)", step="Step 2/3", tag="Judge") + f"{RESET}")
-
             # 코드 캐시 갱신: 실행 성공이면 캐싱 (Judge FALSE면 무효화)
             judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
             should_cache = forward_success and judge_pred != 'FALSE'
@@ -1674,34 +1707,6 @@ class ForwardAndResetPipeline:
 
                 # 카메라 종료 (Forward에서 사용하던 별도 카메라)
                 self.shutdown_camera()
-
-                # 배치 전환: Forward 완료 후 다음 seed 생성 → reset_target 교체
-                pending = getattr(self, '_pending_seed_transition', None)
-                if pending is not None:
-                    self._pending_seed_transition = None
-                    seed_idx = pending["seed_index"]
-                    s_positions = pending["seed_positions"]
-                    s_dir = pending["session_dir"]
-
-                    # seed_positions[0] 설정 + 과거 시드에 등록 (아직 없으면)
-                    if s_positions[0] is None and self.first_episode_positions is not None:
-                        import copy
-                        s_positions[0] = copy.deepcopy(self.first_episode_positions)
-                        # 초기 위치를 과거 시드로 등록 (겹침 방지 + 시각화)
-                        from code_gen_lerobot.reset_execution.workspace import is_grippable as _is_grip_
-                        self._all_previous_seed_positions.append(
-                            {name: info for name, info in self.first_episode_positions.items()
-                             if isinstance(info, dict) and _is_grip_(info.get("bbox_px"))}
-                        )
-
-                    print(f"\n{MAGENTA}{BOLD}  [Seed Transition] Generating seed_{seed_idx}...{RESET}")
-                    next_seed = self._generate_seed_positions(s_dir, seed_idx)
-                    if next_seed:
-                        s_positions[seed_idx] = next_seed
-                        reset_target_positions = next_seed
-                        print(f"  [Seed Transition] Reset target → seed_{seed_idx}")
-                    else:
-                        print(f"  {RED}[Seed Transition] Failed, using current positions{RESET}")
 
                 # Reset target 결정: 외부 지정 > first_episode_positions > detected_positions
                 if reset_target_positions is not None:
@@ -1835,59 +1840,49 @@ class ForwardAndResetPipeline:
                         print(f"  {YELLOW}Warning: Failed to capture reset final image{RESET}")
 
                     # Step 5: Reset Judge 실행
-                    if not skip_judge:
-                        print(f"\n{CYAN}" + self._log("Evaluating reset result...", tag="Judge") + f"{RESET}")
-                        reset_judge_result = self.run_reset_judge(
+                    print(f"\n{CYAN}" + self._log("Evaluating reset result...", tag="Judge") + f"{RESET}")
+                    reset_judge_result = self.run_reset_judge(
+                        reset_mode="original",
+                        current_positions=current_positions,
+                        target_positions=target_positions,
+                        executed_code=reset_code,
+                        original_instruction=instruction,
+                    )
+                    result['reset_judge'] = reset_judge_result
+
+                    rj_pred = reset_judge_result.get('prediction', 'UNCERTAIN')
+                    pred_color = GREEN if rj_pred == "TRUE" else RED if rj_pred == "FALSE" else YELLOW
+                    print(f"  Prediction: {pred_color}{rj_pred}{RESET}")
+                    rj_reasoning = reset_judge_result.get('reasoning', '')
+                    if rj_reasoning:
+                        reasoning_preview = rj_reasoning[:200]
+                        if len(rj_reasoning) > 200:
+                            reasoning_preview += "..."
+                        print(f"  Reasoning: {reasoning_preview}")
+
+                    # Reset Judge UI 표시
+                    if self.reset_initial_image is not None and self.reset_final_image is not None:
+                        self.show_reset_judge_ui(
                             reset_mode="original",
+                            prediction=rj_pred,
+                            reasoning=rj_reasoning,
                             current_positions=current_positions,
                             target_positions=target_positions,
-                            executed_code=reset_code,
-                            original_instruction=instruction,
                         )
-                        result['reset_judge'] = reset_judge_result
 
-                        # Reset Judge 결과 출력
-                        rj_pred = reset_judge_result.get('prediction', 'UNCERTAIN')
-                        if rj_pred == "TRUE":
-                            pred_color = GREEN
-                        elif rj_pred == "FALSE":
-                            pred_color = RED
-                        else:
-                            pred_color = YELLOW
-                        print(f"  Prediction: {pred_color}{rj_pred}{RESET}")
-                        rj_reasoning = reset_judge_result.get('reasoning', '')
-                        if rj_reasoning:
-                            # 첫 200자만 표시
-                            reasoning_preview = rj_reasoning[:200]
-                            if len(rj_reasoning) > 200:
-                                reasoning_preview += "..."
-                            print(f"  Reasoning: {reasoning_preview}")
-
-                        # Reset Judge UI 표시
-                        if self.reset_initial_image is not None and self.reset_final_image is not None:
-                            self.show_reset_judge_ui(
-                                reset_mode="original",
-                                prediction=rj_pred,
-                                reasoning=rj_reasoning,
-                                current_positions=current_positions,
-                                target_positions=target_positions,
-                            )
-
-                        # Reset judge 로그 저장 (judge 완료 후)
-                        reset_log = {
-                            'reset_mode': "original",
-                            'current_positions': current_positions,
-                            'target_positions': target_positions,
-                            'prediction': result['reset_judge'].get('prediction', 'UNCERTAIN'),
-                            'reasoning': result['reset_judge'].get('reasoning', ''),
-                            'execution_success': result['reset']['execution_success'],
-                        }
-                        reset_log_path = Path(reset_dir) / "reset_judge_result.json"
-                        with open(reset_log_path, 'w') as f:
-                            json.dump(reset_log, f, indent=2, default=str)
-                        print(f"  Reset judge result saved to: {reset_log_path}")
-                    else:
-                        print(f"\n{CYAN}" + self._log("Reset Judge skipped (--skip-judge)", tag="Judge") + f"{RESET}")
+                    # Reset judge 로그 저장
+                    reset_log = {
+                        'reset_mode': "original",
+                        'current_positions': current_positions,
+                        'target_positions': target_positions,
+                        'prediction': rj_pred,
+                        'reasoning': rj_reasoning,
+                        'execution_success': result['reset']['execution_success'],
+                    }
+                    reset_log_path = Path(reset_dir) / "reset_judge_result.json"
+                    with open(reset_log_path, 'w') as f:
+                        json.dump(reset_log, f, indent=2, default=str)
+                    print(f"  Reset judge result saved to: {reset_log_path}")
 
                     # Reset 코드를 dry_run 검증용으로 캐싱 (재사용은 하지 않음)
                     if result['reset']['execution_success'] and result['reset']['code']:
@@ -1907,7 +1902,7 @@ class ForwardAndResetPipeline:
             # ================================================================
             # SUMMARY
             # ================================================================
-            self._print_summary(result, skip_reset, skip_judge)
+            self._print_summary(result, skip_reset)
 
             return result
 
@@ -2196,7 +2191,7 @@ class ForwardAndResetPipeline:
             (forward_path / "turn3_log.txt").write_text("\n".join(lines), encoding="utf-8")
             print(f"  Turn 3 log saved: {forward_path / 'turn3_log.txt'}")
 
-    def _print_summary(self, result: Dict, skip_reset: bool, skip_judge: bool = False) -> None:
+    def _print_summary(self, result: Dict, skip_reset: bool) -> None:
         """결과 요약 출력"""
         CYAN = "\033[96m"
         GREEN = "\033[92m"
@@ -2209,32 +2204,22 @@ class ForwardAndResetPipeline:
         print(CYAN + BOLD + "PIPELINE COMPLETE".center(70) + RESET)
         print(CYAN + "=" * 70 + RESET)
 
-        # Forward 결과
         forward_status = result['forward']['execution_success']
         forward_color = GREEN if forward_status else RED
         print(f"  Forward: {forward_color}{'SUCCESS' if forward_status else 'FAILED'}{RESET}")
 
-        # Judge 결과
-        if not skip_judge:
-            judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-            judge_color = GREEN if judge_pred == "TRUE" else RED if judge_pred == "FALSE" else YELLOW
-            print(f"  Judge:   {judge_color}{judge_pred}{RESET}")
-        else:
-            print(f"  Judge:   {YELLOW}SKIPPED{RESET}")
+        judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+        judge_color = GREEN if judge_pred == "TRUE" else RED if judge_pred == "FALSE" else YELLOW
+        print(f"  Judge:   {judge_color}{judge_pred}{RESET}")
 
-        # Reset 결과
         if not skip_reset:
             reset_status = result['reset']['execution_success']
             reset_color = GREEN if reset_status else RED
             print(f"  Reset:   {reset_color}{'SUCCESS' if reset_status else 'FAILED'}{RESET}")
 
-            # Reset Judge 결과
-            if not skip_judge:
-                rj_pred = result['reset_judge'].get('prediction', 'UNCERTAIN')
-                rj_color = GREEN if rj_pred == "TRUE" else RED if rj_pred == "FALSE" else YELLOW
-                print(f"  Reset Judge: {rj_color}{rj_pred}{RESET}")
-            else:
-                print(f"  Reset Judge: {YELLOW}SKIPPED{RESET}")
+            rj_pred = result['reset_judge'].get('prediction', 'UNCERTAIN')
+            rj_color = GREEN if rj_pred == "TRUE" else RED if rj_pred == "FALSE" else YELLOW
+            print(f"  Reset Judge: {rj_color}{rj_pred}{RESET}")
         else:
             print(f"  Reset:   {YELLOW}SKIPPED{RESET}")
 
@@ -2478,6 +2463,129 @@ class ForwardAndResetPipeline:
 
         return new_positions
 
+    def _load_resume_state(self, session_dir: str) -> Tuple[List[int], List[Optional[Dict]]]:
+        """이전 세션에서 상태 복원.
+
+        Returns:
+            (batch_successes, seed_positions):
+                batch_successes[i] = 배치 i의 성공 에피소드 수
+                seed_positions[i] = 배치 i의 seed 위치 (없으면 None)
+        """
+        import copy
+        episodes_per_seed = max(1, self.total_episodes // self.num_random_seeds)
+        batch_successes = [0] * self.num_random_seeds
+        seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
+
+        # 1. first_episode_positions 복원 (ep_01 execution_context)
+        ctx_path = Path(session_dir) / "episode_01" / "forward" / "execution_context.json"
+        if ctx_path.exists():
+            with open(ctx_path) as f:
+                ctx = json.load(f)
+            self.first_episode_positions = ctx.get("object_positions", {})
+            seed_positions[0] = copy.deepcopy(self.first_episode_positions)
+            print(f"  [Resume] first_episode_positions restored from {ctx_path}")
+
+        # 2. seed positions 복원
+        for i in range(1, self.num_random_seeds):
+            sp_path = Path(session_dir) / f"seed_{i:02d}_setup" / "seed_positions.json"
+            if sp_path.exists():
+                with open(sp_path) as f:
+                    sp = json.load(f)
+                seed_positions[i] = sp.get("positions", None)
+                print(f"  [Resume] seed_{i} restored from {sp_path}")
+
+        # 3. 배치별 성공 에피소드 카운트
+        for ep_dir in sorted(Path(session_dir).glob("episode_*")):
+            ep_num = int(ep_dir.name.replace("episode_", ""))
+            batch_idx = min((ep_num - 1) // episodes_per_seed, self.num_random_seeds - 1)
+
+            judge_file = ep_dir / "forward" / "judge_result.json"
+            if judge_file.exists():
+                with open(judge_file) as f:
+                    jr = json.load(f)
+                pred = jr.get("judge_result", {}).get("prediction", jr.get("prediction", ""))
+                if pred == "TRUE":
+                    batch_successes[batch_idx] += 1
+
+        # 4. 복원된 seed positions를 _all_previous_seed_positions에 등록 (겹침 방지)
+        for i, sp in enumerate(seed_positions):
+            if sp is not None:
+                self._all_previous_seed_positions.append(sp)
+
+        print(f"  [Resume] Batch successes: {batch_successes} (target: {episodes_per_seed} each)")
+        print(f"  [Resume] Previous seeds registered: {len(self._all_previous_seed_positions)}")
+        return batch_successes, seed_positions
+
+    def _restore_to_seed(
+        self,
+        target_positions: Dict,
+        instruction: str,
+        detection_timeout: float = 10.0,
+    ) -> bool:
+        """물체를 seed 위치로 복원 (레코딩 없음).
+
+        현재 물체 위치를 검출하고, target_positions로 이동하는 Reset 코드를 생성/실행.
+        """
+        CYAN = "\033[96m"
+        GREEN = "\033[92m"
+        RED = "\033[91m"
+        YELLOW = "\033[93m"
+        RESET_C = "\033[0m"
+        BOLD = "\033[1m"
+
+        print(f"\n{CYAN}{BOLD}{'=' * 60}{RESET_C}")
+        print(f"{CYAN}{BOLD}  RESTORE TO SEED POSITION (no recording){RESET_C}")
+        print(f"{CYAN}{BOLD}{'=' * 60}{RESET_C}")
+
+        for name, info in target_positions.items():
+            pos = info.get("position") if isinstance(info, dict) else info
+            if pos and len(pos) >= 3:
+                print(f"  Target: {name} → [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
+
+        try:
+            # 카메라로 현재 상태 캡처
+            if not self.camera and not (self.camera_manager and self.camera_manager.is_connected):
+                self.initialize_camera()
+            time.sleep(0.5)
+            current_frame = self.capture_frame()
+            if current_frame is None:
+                print(f"  {RED}Failed to capture frame{RESET_C}")
+                return False
+
+            # 이미지 저장 (임시)
+            import tempfile
+            tmp_path = tempfile.mktemp(suffix=".jpg")
+            cv2.imwrite(tmp_path, current_frame)
+
+            # Reset 코드 생성
+            reset_code, _, current_pos, _ = self.generate_reset_code(
+                original_instruction=instruction,
+                original_positions=target_positions,
+                current_state_image_path=tmp_path,
+            )
+
+            # Reset 코드 실행 (레코딩 임시 비활성화)
+            self.shutdown_camera()
+            saved_record = self.record_dataset
+            self.record_dataset = False
+            try:
+                success = self.execute_code(reset_code, current_pos)
+            finally:
+                self.record_dataset = saved_record
+
+            if success:
+                print(f"  {GREEN}Restore to seed: SUCCESS{RESET_C}")
+            else:
+                print(f"  {RED}Restore to seed: FAILED{RESET_C}")
+
+            return success
+
+        except Exception as e:
+            print(f"  {RED}Restore to seed error: {e}{RESET_C}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def run_multiple_episodes(
         self,
         num_episodes: int,
@@ -2487,7 +2595,7 @@ class ForwardAndResetPipeline:
         visualize_detection: bool = False,
         save_dir: Optional[str] = None,
         skip_reset: bool = False,
-        skip_judge: bool = False,
+        resume_session_dir: Optional[str] = None,
     ) -> Dict:
         """
         여러 에피소드 연속 실행
@@ -2500,7 +2608,6 @@ class ForwardAndResetPipeline:
             visualize_detection: 검출 시각화 여부
             save_dir: 결과 저장 디렉토리
             skip_reset: Reset 단계 건너뛰기
-            skip_judge: Judge 단계 건너뛰기
 
         Returns:
             전체 에피소드 결과 딕셔너리
@@ -2517,9 +2624,28 @@ class ForwardAndResetPipeline:
         # 결과 저장 디렉토리 설정
         if save_dir is None:
             save_dir = "results"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_dir = str(Path(save_dir) / f"session_{timestamp}")
+
+        # Resume 모드: 이전 세션 디렉토리 재사용
+        if resume_session_dir:
+            session_dir = str(resume_session_dir)
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            session_dir = str(Path(save_dir) / f"session_{timestamp}")
         Path(session_dir).mkdir(parents=True, exist_ok=True)
+
+        # Set total episodes for logging
+        self.total_episodes = num_episodes
+
+        # 배치 계산
+        episodes_per_seed = max(1, num_episodes // self.num_random_seeds)
+
+        # 배치별 seed positions 초기화
+        seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
+        batch_successes = [0] * self.num_random_seeds
+
+        # Resume: 이전 세션에서 상태 복원
+        if resume_session_dir:
+            batch_successes, seed_positions = self._load_resume_state(session_dir)
 
         # 전체 결과 저장
         all_results = {
@@ -2538,120 +2664,130 @@ class ForwardAndResetPipeline:
             },
         }
 
-        # Set total episodes for logging
-        self.total_episodes = num_episodes
-
-        # 배치 계산
-        episodes_per_seed = max(1, num_episodes // self.num_random_seeds)
-
         print("\n" + MAGENTA + "=" * 70 + RESET)
-        print(MAGENTA + BOLD + f"  MULTI-EPISODE SESSION: {num_episodes} Episodes  ".center(70) + RESET)
+        if resume_session_dir:
+            print(MAGENTA + BOLD + f"  RESUME SESSION: {num_episodes} Episodes  ".center(70) + RESET)
+        else:
+            print(MAGENTA + BOLD + f"  MULTI-EPISODE SESSION: {num_episodes} Episodes  ".center(70) + RESET)
         print(MAGENTA + "=" * 70 + RESET)
         print(f"  Instruction: {instruction}")
         print(f"  Objects: {objects}")
         if self.num_random_seeds > 1:
             print(f"  Random Seeds: {self.num_random_seeds} batches × {episodes_per_seed} episodes")
+        if resume_session_dir:
+            print(f"  Resume from: {session_dir}")
+            for i, (s, sp) in enumerate(zip(batch_successes, seed_positions)):
+                status = "DONE" if s >= episodes_per_seed else f"{s}/{episodes_per_seed}"
+                seed_str = "loaded" if sp else "to generate"
+                print(f"    Batch {i}: {status} ({seed_str})")
         print(f"  Save Dir: {session_dir}")
         print(MAGENTA + "=" * 70 + RESET)
 
-        # 배치별 seed positions: seed_positions[0] = first_episode_positions (나중에 설정)
-        # seed_positions[1..N-1] = 랜덤 생성 (배치 전환 시점에 생성)
-        seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
+        # ================================================================
+        # 배치 루프: 각 배치에서 필요한 만큼 성공 에피소드 수집
+        # ================================================================
+        global_episode_num = sum(batch_successes) if resume_session_dir else 0
 
-        for episode_idx in range(num_episodes):
-            episode_num = episode_idx + 1
-            batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
-            is_batch_start = (episode_idx % episodes_per_seed == 0)
-            is_batch_last = (episode_idx % episodes_per_seed == episodes_per_seed - 1) or (episode_idx == num_episodes - 1)
-            next_batch_index = batch_index + 1
+        for batch_index in range(self.num_random_seeds):
+            needed = episodes_per_seed - batch_successes[batch_index]
+            if needed <= 0:
+                print(f"\n{GREEN}  [Batch {batch_index}] Already complete ({batch_successes[batch_index]}/{episodes_per_seed}), skipping{RESET}")
+                continue
 
-            # Set current episode for logging
-            self.current_episode = episode_num
+            # Seed 위치 확보
+            if seed_positions[batch_index] is None and batch_index > 0:
+                print(f"\n{MAGENTA}{BOLD}  [Batch {batch_index}] Generating seed_{batch_index}...{RESET}")
+                seed_positions[batch_index] = self._generate_seed_positions(session_dir, batch_index)
+                if seed_positions[batch_index] is None:
+                    print(f"  {RED}[Batch {batch_index}] Seed generation failed, skipping batch{RESET}")
+                    continue
 
-            print("\n" + CYAN + "=" * 70 + RESET)
-            print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Starting Episode (Batch {batch_index+1})  ".center(70) + RESET)
-            print(CYAN + "=" * 70 + RESET)
+            # 배치 첫 시작 시: 물체를 seed 위치로 복원
+            batch_seed = seed_positions[batch_index]
+            if batch_seed is not None and (resume_session_dir or batch_index > 0):
+                # 첫 배치가 아니거나 resume 모드면 복원 필요
+                print(f"\n{CYAN}{BOLD}  [Batch {batch_index}] Restoring to seed position...{RESET}")
+                self._restore_to_seed(batch_seed, instruction, detection_timeout)
 
-            # 에피소드별 저장 디렉토리
-            episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
+            # 에피소드 수집 루프
+            success_count = 0
+            attempt = 0
+            max_attempts = needed * 3  # 실패 허용 (최대 3배 시도)
 
-            # Reset target 결정
-            if is_batch_last and next_batch_index < self.num_random_seeds:
-                # 배치 마지막 + 다음 배치 있음 → run() 내부 Reset 직전에 seed 생성 예약
-                self._pending_seed_transition = {
-                    "session_dir": session_dir,
-                    "seed_index": next_batch_index,
-                    "seed_positions": seed_positions,
-                }
-                reset_target = seed_positions[batch_index]  # 임시 (run 내부에서 교체됨)
-            else:
-                # 일반 에피소드 또는 전체 마지막 → 현재 seed로 복귀
-                self._pending_seed_transition = None
+            while success_count < needed and attempt < max_attempts:
+                attempt += 1
+                global_episode_num += 1
+                self.current_episode = global_episode_num
+
+                print("\n" + CYAN + "=" * 70 + RESET)
+                print(CYAN + BOLD + f"  [Batch {batch_index}] Episode {success_count+1}/{needed} (attempt {attempt})  ".center(70) + RESET)
+                print(CYAN + "=" * 70 + RESET)
+
+                episode_dir = str(Path(session_dir) / f"episode_{global_episode_num:02d}")
+
+                # Reset target: 항상 현재 배치 seed로 복귀 (매 루프 갱신)
                 reset_target = seed_positions[batch_index]
 
-            try:
-                # 단일 에피소드 실행 (Forward → Reset)
-                result = self.run(
-                    instruction=instruction,
-                    objects=objects,
-                    detection_timeout=detection_timeout,
-                    visualize_detection=visualize_detection,
-                    save_dir=episode_dir,
-                    use_timestamp_subdir=False,
-                    skip_reset=skip_reset,
-                    skip_judge=skip_judge,
-                    reset_target_positions=reset_target,
-                )
+                try:
+                    result = self.run(
+                        instruction=instruction,
+                        objects=objects,
+                        detection_timeout=detection_timeout,
+                        visualize_detection=visualize_detection,
+                        save_dir=episode_dir,
+                        use_timestamp_subdir=False,
+                        skip_reset=skip_reset,
+                        reset_target_positions=reset_target,
+                    )
 
-                # first_episode_positions가 설정되면 seed_positions[0]에 저장
-                if seed_positions[0] is None and self.first_episode_positions is not None:
-                    import copy
-                    seed_positions[0] = copy.deepcopy(self.first_episode_positions)
+                    # first_episode_positions 초기 설정
+                    if seed_positions[0] is None and self.first_episode_positions is not None:
+                        import copy
+                        seed_positions[0] = copy.deepcopy(self.first_episode_positions)
 
-                # 결과 저장
-                all_results['episodes'].append({
-                    'episode': episode_num,
-                    'result': result,
-                    'success': True,
-                    'error': None,
-                })
+                    # 결과 저장
+                    all_results['episodes'].append({
+                        'episode': global_episode_num,
+                        'result': result,
+                        'success': True,
+                        'error': None,
+                    })
 
-                # 통계 업데이트
-                if result['forward']['execution_success']:
-                    all_results['summary']['forward_success'] += 1
+                    # 통계 업데이트
+                    judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+                    fwd_success = result['forward']['execution_success']
+                    if fwd_success:
+                        all_results['summary']['forward_success'] += 1
+                    if judge_pred == 'TRUE':
+                        all_results['summary']['forward_judge_true'] += 1
+                    elif judge_pred == 'FALSE':
+                        all_results['summary']['forward_judge_false'] += 1
 
-                judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-                if judge_pred == 'TRUE':
-                    all_results['summary']['forward_judge_true'] += 1
-                elif judge_pred == 'FALSE':
-                    all_results['summary']['forward_judge_false'] += 1
+                    # 성공 카운트: Judge TRUE일 때만
+                    if judge_pred == 'TRUE':
+                        success_count += 1
 
-                if not skip_reset:
-                    if result['reset']['execution_success']:
-                        all_results['summary']['reset_success'] += 1
+                    if not skip_reset:
+                        if result['reset']['execution_success']:
+                            all_results['summary']['reset_success'] += 1
+                        rj_pred = result['reset_judge'].get('prediction', 'UNCERTAIN')
+                        if rj_pred == 'TRUE':
+                            all_results['summary']['reset_judge_true'] += 1
+                        elif rj_pred == 'FALSE':
+                            all_results['summary']['reset_judge_false'] += 1
 
-                    rj_pred = result['reset_judge'].get('prediction', 'UNCERTAIN')
-                    if rj_pred == 'TRUE':
-                        all_results['summary']['reset_judge_true'] += 1
-                    elif rj_pred == 'FALSE':
-                        all_results['summary']['reset_judge_false'] += 1
+                except Exception as e:
+                    print(f"\n{RED}[Batch {batch_index}] Error: {e}{RESET}")
+                    import traceback
+                    traceback.print_exc()
+                    all_results['episodes'].append({
+                        'episode': global_episode_num,
+                        'result': None,
+                        'success': False,
+                        'error': str(e),
+                    })
 
-            except Exception as e:
-                print(f"\n{RED}[{episode_num:02d}/{num_episodes:02d}] Error: {e}{RESET}")
-                import traceback
-                traceback.print_exc()
-
-                all_results['episodes'].append({
-                    'episode': episode_num,
-                    'result': None,
-                    'success': False,
-                    'error': str(e),
-                })
-
-            # 에피소드 간 잠시 대기 (카메라 안정화)
-            if episode_idx < num_episodes - 1:
-                next_ep = episode_num + 1
-                print(f"\n{YELLOW}[{next_ep:02d}/{num_episodes:02d}] Starting in 2 seconds...{RESET}")
+                # 에피소드 간 대기
                 time.sleep(2)
 
         # 최종 요약 출력
@@ -2663,7 +2799,7 @@ class ForwardAndResetPipeline:
             'num_episodes': num_episodes,
             'instruction': instruction,
             'objects': objects,
-            'timestamp': timestamp,
+            'timestamp': datetime.now().strftime("%Y%m%d_%H%M%S"),
             'summary': all_results['summary'],
             'episodes': [
                 {
@@ -2794,6 +2930,13 @@ def main():
     )
 
     parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume from a previous session directory (e.g., results/session_20260319_174942)"
+    )
+
+    parser.add_argument(
         "--save", "-s",
         type=str,
         default="results",
@@ -2804,12 +2947,6 @@ def main():
         "--skip-reset",
         action="store_true",
         help="Skip reset execution phase"
-    )
-
-    parser.add_argument(
-        "--skip-judge",
-        action="store_true",
-        help="Skip all judge evaluation phases"
     )
 
     parser.add_argument(
@@ -2935,6 +3072,7 @@ def main():
         # LeRobot 데이터셋 레코딩 옵션
         record_dataset=args.record,
         dataset_repo_id=args.dataset_repo_id,
+        resume_recording=bool(args.resume),
         # Multi-turn 옵션
         multi_turn=args.multi_turn,
         cad_image_dirs=args.cad_image_dirs,
@@ -2952,7 +3090,7 @@ def main():
         visualize_detection=args.visualize_detection,
         save_dir=args.save,
         skip_reset=args.skip_reset,
-        skip_judge=args.skip_judge,
+        resume_session_dir=args.resume,
     )
 
     # 종료 코드 결정 (성공률 기반)

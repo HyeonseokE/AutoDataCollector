@@ -75,6 +75,7 @@ class DatasetRecorder:
         image_writer_threads: int = 4,
         config_yaml: Optional[str] = None,
         features: Optional[Dict] = None,
+        resume: bool = False,
     ):
         self.repo_id = repo_id
         self.fps = fps
@@ -83,6 +84,7 @@ class DatasetRecorder:
         self.use_videos = use_videos
         self.image_writer_threads = image_writer_threads
         self.config_yaml = config_yaml
+        self.resume = resume
 
         # 카메라 설정 로드 (YAML에서 동적으로)
         self.camera_configs: List[CameraConfigRecord] = load_cameras_from_yaml(config_yaml)
@@ -120,25 +122,32 @@ class DatasetRecorder:
         self._init_dataset()
 
     def _init_dataset(self):
-        """LeRobotDataset 초기화"""
+        """LeRobotDataset 초기화 (resume=True면 기존 데이터셋 열기)"""
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset, HF_LEROBOT_HOME
 
-            # Check if dataset already exists (same behavior as LeRobot official)
             dataset_path = self.root if self.root else HF_LEROBOT_HOME / self.repo_id
-            assert not dataset_path.exists(), (
-                f"\n"
-                f"========================================\n"
-                f"Dataset already exists!\n"
-                f"========================================\n"
-                f"Path: {dataset_path}\n"
-                f"\n"
-                f"To continue, either:\n"
-                f"  1. Delete the existing dataset:\n"
-                f"     rm -rf {dataset_path}\n"
-                f"  2. Use a different repo_id\n"
-                f"========================================"
-            )
+
+            if self.resume and dataset_path.exists():
+                # Resume: 기존 데이터셋 삭제 후 새로 생성 (세션 디렉토리가 상태를 관리)
+                import shutil
+                print(f"[DatasetRecorder] Resume mode: clearing existing dataset for fresh recording")
+                print(f"  Removing: {dataset_path}")
+                shutil.rmtree(dataset_path)
+            elif dataset_path.exists():
+                raise AssertionError(
+                    f"\n"
+                    f"========================================\n"
+                    f"Dataset already exists!\n"
+                    f"========================================\n"
+                    f"Path: {dataset_path}\n"
+                    f"\n"
+                    f"To continue, either:\n"
+                    f"  1. Delete the existing dataset:\n"
+                    f"     rm -rf {dataset_path}\n"
+                    f"  2. Use a different repo_id\n"
+                    f"========================================"
+                )
 
             print(f"[DatasetRecorder] Creating dataset: {self.repo_id}")
             print(f"  FPS: {self.fps}")

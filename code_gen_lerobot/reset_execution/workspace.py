@@ -90,26 +90,52 @@ class ResetWorkspace(BaseWorkspace):
         _, success = self._kinematics.inverse_kinematics_position_only(pos_pick, max_iterations=50)
         return success
 
+    @staticmethod
+    def _compute_iou(cx1, cy1, w1, h1, cx2, cy2, w2, h2) -> float:
+        """두 bbox의 IoU 계산 (center + size 형식)."""
+        # AABB 좌표 변환
+        ax1, ay1 = cx1 - w1 / 2, cy1 - h1 / 2
+        ax2, ay2 = cx1 + w1 / 2, cy1 + h1 / 2
+        bx1, by1 = cx2 - w2 / 2, cy2 - h2 / 2
+        bx2, by2 = cx2 + w2 / 2, cy2 + h2 / 2
+
+        # 교집합
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+        if inter == 0:
+            return 0.0
+
+        # 합집합
+        area_a = w1 * h1
+        area_b = w2 * h2
+        union = area_a + area_b - inter
+
+        return inter / union if union > 0 else 0.0
+
     def generate_random_position(
         self,
         obstacles: List[dict],
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
         max_attempts: int = 500,
-        bbox_margin_px: int = 10,
+        max_iou: float = 0.5,
     ) -> Optional[List[float]]:
         """
-        단일 객체용 랜덤 위치 생성 (reach + FOV + bbox 충돌 + 기본 IK 검증).
-        초기 위치 이격은 초기 위치를 장애물에 등록하여 bbox 충돌로 처리.
-        상세 IK 검증(pitch 포함)은 dry_run_code()에서 실제 코드로 수행.
+        단일 객체용 랜덤 위치 생성 (reach + FOV + IoU 기반 충돌 검증).
 
         Args:
-            obstacles: 피해야 할 장애물들 (현재 물체 + 장애물 + 초기 위치 포함)
-                [{"center_px": [u,v], "half_w_px": int, "half_h_px": int}, ...]
+            obstacles: 피해야 할 장애물들
+                [{"center_px": (u,v), "bbox_w": int, "bbox_h": int, "allow_overlap": bool}, ...]
+                allow_overlap=True: IoU ≤ max_iou 허용 (grippable)
+                allow_overlap=False: 겹침 불허 (non-grippable, margin 포함)
             obj_bbox_px: 이 객체의 bbox 픽셀 크기 (w_px, h_px). None이면 (30, 30) 사용.
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
-            bbox_margin_px: bbox 충돌 마진 (pixels, default 30px)
+            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.5)
 
         Returns:
             [x, y, z] 또는 None (실패 시)
@@ -120,12 +146,11 @@ class ResetWorkspace(BaseWorkspace):
 
         if obj_bbox_px is None:
             obj_bbox_px = (30, 30)
-        obj_half_w = obj_bbox_px[0] // 2 + bbox_margin_px
-        obj_half_h = obj_bbox_px[1] // 2 + bbox_margin_px
+        obj_w, obj_h = obj_bbox_px
 
         for _ in range(max_attempts):
-            # 전방 도넛 영역 내에서 직접 샘플링 (x>0, reach 범위 내)
-            angle = np.random.uniform(-np.pi / 2, np.pi / 2)  # 전방만 (-90°~+90°)
+            # 전방 도넛 영역 내에서 직접 샘플링
+            angle = np.random.uniform(-np.pi / 2, np.pi / 2)
             r = np.sqrt(np.random.uniform(r_min**2, r_max**2))
             x = r * np.cos(angle)
             y = r * np.sin(angle)
@@ -133,35 +158,43 @@ class ResetWorkspace(BaseWorkspace):
 
             candidate = [x, y, z]
 
-            # 조건 2: 기본 IK 검증 (approach + pick 높이)
+            # 조건 1: 기본 IK 검증
             if not self._check_ik_feasible(np.array(candidate)):
                 continue
 
-            # 조건 3: 카메라 FOV 내 + 초기 위치 이격 + bbox 충돌 (픽셀 공간)
+            # 조건 2: 픽셀 공간 검증
             if pix2robot is not None:
                 try:
                     cu, cv = pix2robot.robot_to_pixel(x, y)
                 except Exception:
                     continue
 
-                # FOV 체크: bbox + 가장자리 마진(30px) 포함하여 이미지 범위 내
+                # FOV + 가장자리 마진
                 img_w, img_h = 640, 480
                 edge_margin = 30
-                if (cu - obj_half_w < edge_margin or cu + obj_half_w >= img_w - edge_margin or
-                    cv - obj_half_h < edge_margin or cv + obj_half_h >= img_h - edge_margin):
+                hw, hh = obj_w // 2, obj_h // 2
+                if (cu - hw < edge_margin or cu + hw >= img_w - edge_margin or
+                    cv - hh < edge_margin or cv + hh >= img_h - edge_margin):
                     continue
 
-                # bbox 충돌 검사 (장애물 + 현재 위치 + 초기 위치 모두 포함)
+                # 충돌 검사: IoU 기반
                 collision = False
                 for occ in obstacles:
                     ou, ov = occ["center_px"]
-                    o_hw = occ["half_w_px"]
-                    o_hh = occ["half_h_px"]
-                    # AABB 겹침 검사
-                    if (abs(cu - ou) < obj_half_w + o_hw and
-                        abs(cv - ov) < obj_half_h + o_hh):
-                        collision = True
-                        break
+                    ow, oh = occ["bbox_w"], occ["bbox_h"]
+
+                    if occ.get("allow_overlap", False):
+                        # grippable: IoU ≤ max_iou 허용
+                        iou = self._compute_iou(cu, cv, obj_w, obj_h, ou, ov, ow, oh)
+                        if iou > max_iou:
+                            collision = True
+                            break
+                    else:
+                        # non-grippable: 겹침 불허 (AABB, margin 포함)
+                        if (abs(cu - ou) < (obj_w + ow) / 2 and
+                            abs(cv - ov) < (obj_h + oh) / 2):
+                            collision = True
+                            break
 
                 if collision:
                     continue
@@ -268,11 +301,11 @@ def generate_random_positions(
     bbox_margin_px: int = 10,
 ) -> Dict[str, List[float]]:
     """
-    랜덤 위치 생성 (픽셀 bbox 기반 충돌 검증).
+    랜덤 위치 생성 (IoU 기반 충돌 검증).
 
     조건:
     1. workspace 범위 내 (reach + IK 검증)
-    2. 모든 장애물과 bbox 겹치지 않음 (픽셀 공간, ±margin px)
+    2. non-grippable: 겹침 불허 + margin
     3. 이미 배치된 다른 grippable 객체와 bbox 겹치지 않음
     4. 초기 위치에서 min_displacement_from_initial 이상 떨어져야 함
 
@@ -312,9 +345,10 @@ def generate_random_positions(
             pass
 
     # 장애물 리스트 (픽셀 bbox 기반)
+    # allow_overlap: True → IoU ≤ 0.5 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
     occupied = []
 
-    # 1) Non-grippable 객체 (고정 장애물)
+    # 1) Non-grippable 객체 (고정 장애물, 겹침 불허 + margin)
     for name, info in obstacle_objects.items():
         if info is None:
             continue
@@ -325,12 +359,12 @@ def generate_random_positions(
         occupied.append({
             "name": name,
             "center_px": center_px,
-            "half_w_px": bbox_px[0] // 2 + bbox_margin_px,
-            "half_h_px": bbox_px[1] // 2 + bbox_margin_px,
-            "is_fixed": True,
+            "bbox_w": bbox_px[0] + bbox_margin_px * 2,  # 원본 bbox + margin 양쪽
+            "bbox_h": bbox_px[1] + bbox_margin_px * 2,
+            "allow_overlap": False,  # 겹침 불허
         })
 
-    # 2) Grippable 객체의 현재 위치 (이동 전까지 장애물, 50% 겹침 허용)
+    # 2) Grippable 객체의 현재 위치 (IoU ≤ 0.5 허용)
     for name, info in grippable_objects.items():
         if info is None:
             continue
@@ -341,13 +375,12 @@ def generate_random_positions(
         occupied.append({
             "name": name,
             "center_px": center_px,
-            "half_w_px": int((bbox_px[0] // 2 + bbox_margin_px) * 0.5),
-            "half_h_px": int((bbox_px[1] // 2 + bbox_margin_px) * 0.5),
-            "is_fixed": False,
+            "bbox_w": bbox_px[0],
+            "bbox_h": bbox_px[1],
+            "allow_overlap": True,  # IoU ≤ 0.5 허용
         })
 
-    # 3) 초기 위치 + 과거 시드 위치를 장애물로 추가
-    #    과거 시드("_seed" 포함)는 50% 겹침 허용 (반경 절반)
+    # 3) 초기 위치 + 과거 시드 위치 (IoU ≤ 0.5 허용)
     for name, info in initial_positions.items():
         if info is None:
             continue
@@ -356,13 +389,12 @@ def generate_random_positions(
         if center_px is None:
             continue
         bbox_px = _get_bbox_px(init_info)
-        scale = 0.5  # grippable 위치는 50% 겹침 허용 (과거 시드 + 초기 + 현재)
         occupied.append({
             "name": f"{name}_initial",
             "center_px": center_px,
-            "half_w_px": int((bbox_px[0] // 2 + bbox_margin_px) * scale),
-            "half_h_px": int((bbox_px[1] // 2 + bbox_margin_px) * scale),
-            "is_fixed": True,
+            "bbox_w": bbox_px[0],
+            "bbox_h": bbox_px[1],
+            "allow_overlap": True,  # IoU ≤ 0.5 허용
         })
 
     # 결과 저장
@@ -379,18 +411,17 @@ def generate_random_positions(
         # 초기 위치는 유지 (초기 위치와 겹치면 안 됨)
         obstacles_for_this = [occ for occ in occupied if occ["name"] != obj_name]
 
-        # 랜덤 위치 생성 (기본 IK + FOV + bbox 충돌 검증)
+        # 랜덤 위치 생성 (IK + FOV + IoU 기반 충돌 검증)
         position = workspace.generate_random_position(
             obstacles=obstacles_for_this,
             obj_bbox_px=obj_bbox_px,
             pix2robot=pix2robot,
             max_attempts=max_attempts,
-            bbox_margin_px=bbox_margin_px,
         )
 
         if position is not None:
             target_positions[obj_name] = position
-            # 새 위치로 장애물 업데이트
+            # 새 위치로 장애물 업데이트 (같은 시드 내 물체끼리는 겹침 불허)
             occupied = [occ for occ in occupied if occ["name"] != obj_name]
             if pix2robot is not None:
                 try:
@@ -398,17 +429,16 @@ def generate_random_positions(
                     occupied.append({
                         "name": obj_name,
                         "center_px": new_px,
-                        "half_w_px": obj_bbox_px[0] // 2 + bbox_margin_px,
-                        "half_h_px": obj_bbox_px[1] // 2 + bbox_margin_px,
-                        "is_fixed": False,
+                        "bbox_w": obj_bbox_px[0],
+                        "bbox_h": obj_bbox_px[1],
+                        "allow_overlap": False,  # 같은 시드 내 물체끼리 겹침 불허
                     })
                 except Exception:
                     pass
         else:
-            # Fallback: reach 중앙
-            print(f"[Warning] Could not find valid position for '{obj_name}'")
-            r_mid = (workspace.min_reach + workspace.max_reach) / 2
-            target_positions[obj_name] = [r_mid, 0.0, workspace.z_fixed]
+            # 유효 위치를 찾지 못함 → 빈 dict 반환 (workspace 포화)
+            print(f"[Warning] Could not find valid position for '{obj_name}' — workspace saturated")
+            return {}
 
     return target_positions
 

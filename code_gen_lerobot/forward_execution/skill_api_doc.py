@@ -12,6 +12,13 @@ ROBOT_API_DOC = '''class LeRobotSkills:
     with an asymmetric two-finger gripper (left finger is fixed, right finger is actuated).
     The gripper can open up to 0.07m (7cm) and approaches objects from directly above (top-down grasp).
     All positions are specified in the world coordinate frame in meters.
+
+    IMPORTANT: Every skill method accepts two optional string parameters for dataset recording:
+        skill_description (str): Concise sentence describing the action and purpose.
+            Example: "Move gripper above chocolate_pie_1 to prepare for picking"
+        verification_question (str): Yes/No question to visually verify the action's outcome.
+            Example: "Is the gripper positioned above chocolate_pie_1?"
+    You MUST always pass both parameters for every skill call.
     """
 
     def connect(self) -> bool:

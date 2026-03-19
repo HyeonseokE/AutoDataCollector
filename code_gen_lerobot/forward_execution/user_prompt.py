@@ -141,21 +141,21 @@ def lerobot_code_gen_prompt(
        ```
        # PICK pattern:
        pick_obj = positions["object_name"]
-       pick_pos = pick_obj["position"]  # [x, y, z] where z = object height
-       approach_height = 0.20  # 20cm above object
+       pick_pos = pick_obj["position"]
+       approach_height = 0.20
 
-       skills.gripper_open()
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
-       skills.execute_pick_object(pick_pos, object_name="object_name")
-       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
+       skills.gripper_open(skill_description="Open gripper to prepare for grasping object_name", verification_question="Is the gripper open?")
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name", skill_description="Move above object_name", verification_question="Is the gripper above object_name?")
+       skills.execute_pick_object(pick_pos, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped by the gripper?")
+       skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name", skill_description="Lift object_name", verification_question="Is object_name lifted off the table?")
 
        # PLACE on OBJECT pattern:
        place_obj = positions["target_object"]
-       place_pos = place_obj["position"]  # target object position
+       place_pos = place_obj["position"]
 
-       skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object")
-       skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object")
-       skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object")
+       skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Move object_name above target_object", verification_question="Is object_name above target_object?")
+       skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="Place object_name on target_object", verification_question="Is object_name placed on target_object?")
+       skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Retract from target_object", verification_question="Is the gripper clear of target_object?")
 
        # LATERAL PICK pattern (approach from side at object height, then slide in):
        # Use when the object is thin/tall and top-down approach is not suitable (e.g., gooseneck, handle, lever).
@@ -559,52 +559,25 @@ positions = {{
 ```python
 # START — always first
 approach_height = 0.20
-skills.move_to_initial_state()
+skills.move_to_initial_state(skill_description="Move to initial position", verification_question="Is the robot at initial position?")
 
 # PICK
 pick_obj = positions["object_name"]
 pick_pos = pick_obj["position"]
-skills.gripper_open()
-skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
-skills.execute_pick_object(pick_pos, object_name="object_name")
-skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name")
+skills.gripper_open(skill_description="Open gripper for object_name", verification_question="Is the gripper open?")
+skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name", skill_description="Move above object_name", verification_question="Is the gripper above object_name?")
+skills.execute_pick_object(pick_pos, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped?")
+skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name", skill_description="Lift object_name", verification_question="Is object_name lifted?")
 
 # PLACE ON OBJECT (is_table=False)
 place_obj = positions["target_object"]
 place_pos = place_obj["position"]
-skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object")
-skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object")
-skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object")
-
-# PLACE ON TABLE — same as above but is_table=True
-
-# LATERAL PICK — approach from side at object height (for thin/tall objects like gooseneck, handle, lever)
-# Determine offset direction from scene analysis — approach from obstacle-free side
-lat_obj = positions["object_name"]
-lat_pos = lat_obj["position"]
-skills.gripper_open()
-skills.move_to_position([lat_pos[0] + offset_x, lat_pos[1] + offset_y, lat_pos[2]], target_name="object_name")
-skills.execute_pick_object(lat_pos, object_name="object_name")
-skills.move_to_position([lat_pos[0], lat_pos[1], approach_height], target_name="object_name")
-
-# PUSH — close gripper, approach above contact point, execute_push handles descent + push + retreat
-push_obj = positions["object_name"]
-push_start = push_obj["points"]["<contact_label>"]
-push_end = [push_start[0], push_start[1] + 0.05, push_start[2]]
-skills.gripper_close()
-skills.move_to_position([push_start[0], push_start[1], approach_height], target_name="object_name")
-skills.execute_push(push_start, push_end, push_height=push_start[2] * 0.3, object_name="object_name")
-
-# PRESS — close gripper first, approach, press, retreat
-press_obj = positions["object_with_button"]
-press_pos = press_obj["position"]
-skills.gripper_close()
-skills.move_to_position([press_pos[0], press_pos[1], approach_height], target_name="object_with_button")
-skills.execute_press(press_pos, contact_height=press_pos[2], press_depth=0.01, hold_time=0.3, target_name="object_with_button")
-skills.move_to_position([press_pos[0], press_pos[1], approach_height], target_name="object_with_button")
+skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Move object_name above target_object", verification_question="Is object_name above target_object?")
+skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="Place object_name on target_object", verification_question="Is object_name on target_object?")
+skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Retract from target_object", verification_question="Is the gripper clear of target_object?")
 
 # END — always last
-skills.move_to_free_state()
+skills.move_to_free_state(skill_description="Move to safe position", verification_question="Is the robot at safe position?")
 ```
 
 **Code Skeleton**:

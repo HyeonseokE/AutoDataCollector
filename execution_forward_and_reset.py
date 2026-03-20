@@ -2778,7 +2778,7 @@ class ForwardAndResetPipeline:
                             with open(bi_path, 'w') as f:
                                 json.dump(batch_info, f, indent=2)
 
-                            self._update_results(all_results, result, global_episode_num, skip_reset)
+                            self._update_results(all_results, result, episode_num, skip_reset)
 
                             if judge_pred == 'TRUE':
                                 batch_slots[batch_index][slot] = True
@@ -2790,7 +2790,7 @@ class ForwardAndResetPipeline:
                         except Exception as e:
                             print(f"\n{RED}[Batch {batch_index} Slot {slot}] Error: {e}{RESET}")
                             import traceback; traceback.print_exc()
-                            all_results['episodes'].append({'episode': global_episode_num, 'result': None, 'success': False, 'error': str(e)})
+                            all_results['episodes'].append({'episode': episode_num, 'result': None, 'success': False, 'error': str(e)})
 
                         time.sleep(2)
 

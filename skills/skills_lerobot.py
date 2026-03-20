@@ -1168,7 +1168,7 @@ class LeRobotSkills:
         Args:
             duration: Movement duration in seconds (default: 1.5)
         """
-        GRIPPER_CLOSE_RATIO = 0.99
+        GRIPPER_CLOSE_RATIO = 1.0
         target_pos = self.gripper_open_pos + (self.gripper_close_pos - self.gripper_open_pos) * GRIPPER_CLOSE_RATIO
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
 
@@ -1354,7 +1354,7 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.025  # Minimum pick height (2.5cm) — gripper can't reach lower without hitting table
+        MIN_PICK_Z = 0.03  # Minimum pick height (3cm) — gripper can't reach lower without hitting table
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
@@ -1412,7 +1412,7 @@ class LeRobotSkills:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
 
-        MIN_PLACE_Z = 0.02  # Minimum place height (2cm) — robot can't reach lower while holding object
+        MIN_PLACE_Z = 0.03  # Minimum place height (3cm) — robot can't reach lower while holding object
 
         if is_table:
             # Placing on table: use target z (object's own height) as reference

@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/distribute_chocolatepies50epi"
+dataset_repo_id: "local/distribute_chocolatepies40epi"
 recording_fps: 30
 robot_type: "so101"
 

@@ -1379,18 +1379,12 @@ class LeRobotSkills:
             tip_drift = pick_tip[:2] - approach_tip[:2]  # XY 밀림량
 
             if np.linalg.norm(tip_drift) > 0.002:  # 2mm 이상 밀림 시만 보상
-                compensated = [
+                pick_position = [
                     pick_position[0] - tip_drift[0],
                     pick_position[1] - tip_drift[1],
                     pick_position[2],
                 ]
-                # 보상 후 reach 범위 초과 시 보상 미적용
-                comp_reach = np.sqrt(compensated[0]**2 + compensated[1]**2)
-                if comp_reach <= self.workspace_max_reach:
-                    pick_position = compensated
-                    self._log(f"  [Pitch Compensation] tip_drift=({tip_drift[0]*1000:.1f}, {tip_drift[1]*1000:.1f})mm")
-                else:
-                    self._log(f"  [Pitch Compensation] skipped (reach {comp_reach:.3f}m > max {self.workspace_max_reach:.3f}m)")
+                self._log(f"  [Pitch Compensation] tip_drift=({tip_drift[0]*1000:.1f}, {tip_drift[1]*1000:.1f})mm")
 
         # Move to pick position (skill recording handled inside)
         pick_label = f"pick {object_name}" if object_name else None

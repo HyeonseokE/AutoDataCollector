@@ -4,14 +4,14 @@ from typing import Dict, List, Optional, Tuple
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, NotFound
 
 # Vertex AI 설정 (환경변수로 override 가능)
 PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
 LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 30  # seconds
+MAX_RETRIES = 10
+RETRY_DELAY = 60  # seconds (fixed interval)
 GEMINI3_DEFAULT_THINKING_BUDGET = 10000  # Gemini 3 thinking 토큰 제한 (기본 10K)
 
 _initialized = False
@@ -65,16 +65,21 @@ def _build_contents(turn: Dict) -> list:
 
 def _send_with_retry(chat, contents, generation_config,
                      max_retries=MAX_RETRIES):
-    """Rate limit (429) / Service Unavailable (503) 시 exponential backoff 재시도."""
+    """Rate limit (429) / Service Unavailable (503) / NotFound (404, preview 모델 간헐적) 시 exponential backoff 재시도."""
     for attempt in range(max_retries + 1):
         try:
             return chat.send_message(contents,
                                      generation_config=generation_config)
-        except (ResourceExhausted, ServiceUnavailable) as e:
+        except (ResourceExhausted, ServiceUnavailable, NotFound) as e:
             if attempt == max_retries:
                 raise
-            delay = RETRY_BASE_DELAY * (2 ** attempt)
-            err_type = "Rate limit" if isinstance(e, ResourceExhausted) else "503 Unavailable"
+            delay = RETRY_DELAY
+            if isinstance(e, ResourceExhausted):
+                err_type = "Rate limit"
+            elif isinstance(e, NotFound):
+                err_type = "404 NotFound (preview model intermittent)"
+            else:
+                err_type = "503 Unavailable"
             print(f"  [{err_type}] Waiting {delay}s before retry "
                   f"({attempt + 1}/{max_retries})...")
             time.sleep(delay)

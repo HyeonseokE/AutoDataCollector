@@ -189,7 +189,9 @@ def lerobot_reset_code_gen_prompt(
     for name, info in target_positions.items():
         pos = get_position(info)
         if pos is not None:
-            target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
+            target_lines.append(
+                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
+            )
     target_str = "\n".join(target_lines)
 
     # 현재 위치 포맷팅
@@ -350,9 +352,10 @@ def execute_task():
         skills.move_to_initial_state(skill_description="move to initial position to start the reset task")
 
         # === RESET: Move objects to target positions ===
-        # Extract actual [x,y,z] values and hardcode them below
+        # ALWAYS reference current_positions["name"]["position"] and target_positions["name"]["position"]
+        # Do NOT hardcode any coordinate values
 
-        # ... (your reset logic with hardcoded values) ...
+        # ... (your reset logic referencing the dicts) ...
 
         skills.move_to_initial_state(skill_description="return to initial position after completing the reset")
         skills.move_to_free_state(skill_description="move to free position for safe parking")
@@ -607,7 +610,9 @@ def turn_codegen_reset_prompt(
     for name, info in target_positions.items():
         pos = get_pos(info)
         if pos is not None:
-            target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
+            target_lines.append(
+                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
+            )
     target_str = "\n".join(target_lines)
 
     # Format current positions
@@ -736,9 +741,10 @@ def execute_task():
         skills.move_to_initial_state(skill_description="move to initial position to start the reset task")
 
         # === RESET: Move objects to target positions ===
-        # Extract actual [x,y,z] values and hardcode them below
+        # ALWAYS reference current_positions["name"]["position"] and target_positions["name"]["position"]
+        # Do NOT hardcode any coordinate values
 
-        # ... (your reset logic with hardcoded values) ...
+        # ... (your reset logic referencing the dicts) ...
 
         skills.move_to_initial_state(skill_description="return to initial position after completing the reset")
         skills.move_to_free_state(skill_description="move to free position for safe parking")
@@ -820,7 +826,9 @@ def codegen_reset_with_context_prompt(
     for name, info in target_positions.items():
         pos = get_pos(info)
         if pos is not None:
-            target_lines.append(f'        "{name}": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],')
+            target_lines.append(
+                f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
+            )
     target_str = "\n".join(target_lines)
 
     current_lines = []
@@ -891,24 +899,26 @@ Object position z-coordinate = object height (table surface is z=0).
 ### **Skill Composition Patterns** (MUST follow exactly)
 
 ```python
-# PICK pattern — ALWAYS open gripper BEFORE approaching the object
-cx, cy, cz = <current object position x, y, z>
+# PICK from current position — ALWAYS reference current_positions dict
+cur = current_positions["object_name"]["position"]
 approach_height = 0.20
 
 skills.gripper_open()
-skills.move_to_position([cx, cy, approach_height], target_name="<object_name>")
-skills.execute_pick_object([cx, cy, cz], object_name="<object_name>")
-skills.move_to_position([cx, cy, approach_height], target_name="<object_name>")
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name")
+skills.execute_pick_object(cur, object_name="object_name")
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name")
 
-# PLACE ON TABLE pattern — is_table=True
-tx, ty, tz = <target position x, y, z>
+# PLACE at target position — ALWAYS reference target_positions dict
+tgt = target_positions["object_name"]["position"]
 
-skills.move_to_position([tx, ty, approach_height], target_name="original position")
-skills.execute_place_object([tx, ty, tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
-skills.move_to_position([tx, ty, approach_height], target_name="original position")
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target")
+skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_name="object_name target")
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target")
 ```
 
 ### **Code Template**
+
+**CRITICAL**: You MUST reference `current_positions` and `target_positions` dicts in skill calls. Do NOT hardcode coordinate values directly. The dicts are provided as global variables at runtime.
 
 ```python
 from skills.skills_lerobot import LeRobotSkills
@@ -923,24 +933,15 @@ def execute_task():
     skills.connect()
 
     try:
-        approach_height = 0.20  # 20cm above objects
-
-        # Target positions (where to place objects)
-        target_positions = {{
-{target_str}
-        }}
-
-        # Current positions (from detection)
-        current_positions = {{
-{current_str}
-        }}
+        approach_height = 0.20
 
         skills.move_to_initial_state()
 
-        # === RESET: Move objects to target positions ===
-        # Extract actual [x,y,z] values and hardcode them below
+        # === RESET: Move each object from current to target ===
+        # ALWAYS use: current_positions["name"]["position"] and target_positions["name"]["position"]
+        # Do NOT hardcode any coordinate values
 
-        # ... (your reset logic with hardcoded values) ...
+        # ... (your reset logic referencing the dicts) ...
 
         skills.move_to_initial_state()
         skills.move_to_free_state()

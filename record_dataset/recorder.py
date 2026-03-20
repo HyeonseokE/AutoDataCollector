@@ -122,18 +122,22 @@ class DatasetRecorder:
         self._init_dataset()
 
     def _init_dataset(self):
-        """LeRobotDataset 초기화 (resume=True면 기존 데이터셋 열기)"""
+        """LeRobotDataset 초기화 (resume=True면 기존 데이터셋에 append)"""
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset, HF_LEROBOT_HOME
 
             dataset_path = self.root if self.root else HF_LEROBOT_HOME / self.repo_id
 
             if self.resume and dataset_path.exists():
-                # Resume: 기존 데이터셋 삭제 후 새로 생성 (세션 디렉토리가 상태를 관리)
-                import shutil
-                print(f"[DatasetRecorder] Resume mode: clearing existing dataset for fresh recording")
-                print(f"  Removing: {dataset_path}")
-                shutil.rmtree(dataset_path)
+                # Resume: 기존 데이터셋을 열어서 에피소드 append
+                print(f"[DatasetRecorder] Resume mode: opening existing dataset")
+                print(f"  Path: {dataset_path}")
+                self._dataset = LeRobotDataset(
+                    repo_id=self.repo_id,
+                    root=self.root,
+                )
+                self._episode_count = self._dataset.num_episodes
+                print(f"[DatasetRecorder] Resumed: {self._episode_count} existing episodes")
             elif dataset_path.exists():
                 raise AssertionError(
                     f"\n"
@@ -148,23 +152,24 @@ class DatasetRecorder:
                     f"  2. Use a different repo_id\n"
                     f"========================================"
                 )
+            else:
+                # 새 데이터셋 생성
+                print(f"[DatasetRecorder] Creating dataset: {self.repo_id}")
+                print(f"  FPS: {self.fps}")
+                print(f"  Robot type: {self.robot_type}")
+                print(f"  Features: {list(self.features.keys())}")
 
-            print(f"[DatasetRecorder] Creating dataset: {self.repo_id}")
-            print(f"  FPS: {self.fps}")
-            print(f"  Robot type: {self.robot_type}")
-            print(f"  Features: {list(self.features.keys())}")
+                self._dataset = LeRobotDataset.create(
+                    repo_id=self.repo_id,
+                    fps=self.fps,
+                    robot_type=self.robot_type,
+                    features=self.features,
+                    root=self.root,
+                    use_videos=self.use_videos,
+                    image_writer_threads=self.image_writer_threads,
+                )
 
-            self._dataset = LeRobotDataset.create(
-                repo_id=self.repo_id,
-                fps=self.fps,
-                robot_type=self.robot_type,
-                features=self.features,
-                root=self.root,
-                use_videos=self.use_videos,
-                image_writer_threads=self.image_writer_threads,
-            )
-
-            print(f"[DatasetRecorder] Dataset created at: {self._dataset.root}")
+            print(f"[DatasetRecorder] Dataset at: {self._dataset.root}")
 
         except ImportError as e:
             raise ImportError(

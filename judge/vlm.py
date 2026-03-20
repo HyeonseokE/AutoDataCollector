@@ -205,12 +205,14 @@ def _call_gemini_vlm(
         print(f"[Gemini VLM] Failed to import Vertex AI SDK: {e}")
         return None
 
-    # Vertex AI 초기화
-    project_id = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
-    location = os.getenv("VERTEX_LOCATION", "us-central1")
-    if "gemini-3" in model.lower():
-        location = "global"
-    vertexai.init(project=project_id, location=location)
+    # Vertex AI 초기화 — gemini.py의 _ensure_init 사용하여 location 상태 동기화
+    try:
+        from code_gen_lerobot.llm_utils.gemini import _ensure_init, _get_location_for_model
+        _ensure_init(_get_location_for_model(model))
+    except ImportError:
+        project_id = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
+        location = "global" if "gemini-3" in model.lower() else os.getenv("VERTEX_LOCATION", "us-central1")
+        vertexai.init(project=project_id, location=location)
 
     gemini_model = GenerativeModel(model)
     gen_config = GenerationConfig(

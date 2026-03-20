@@ -623,20 +623,19 @@ class ForwardAndResetPipeline:
             pass
 
     @staticmethod
-    def _patch_reset_code_targets(code: str, new_targets: Dict) -> str:
-        """Reset 코드 내 target_positions 블록의 좌표만 새 값으로 치환.
+    def _patch_code_block(code: str, block_name: str, new_values: Dict) -> str:
+        """코드 내 지정된 dict 블록의 좌표를 치환.
 
-        target_positions = { ... } 블록을 찾아 그 안의 좌표만 교체.
-        current_positions 등 다른 블록은 건드리지 않음.
+        예: _patch_code_block(code, "target_positions", {...})
+            → target_positions = { ... } 블록 내 좌표만 교체
         """
         import re
-
-        block_match = re.search(r'(target_positions\s*=\s*\{)(.*?)(\})', code, re.DOTALL)
+        block_match = re.search(rf'({block_name}\s*=\s*\{{)(.*?)(\}})', code, re.DOTALL)
         if not block_match:
             return code
 
         block_body = block_match.group(2)
-        for name, info in new_targets.items():
+        for name, info in new_values.items():
             pos = info.get("position") if isinstance(info, dict) else info
             if pos is None or len(pos) < 3:
                 continue
@@ -645,6 +644,11 @@ class ForwardAndResetPipeline:
             block_body = re.sub(pattern, replacement, block_body)
 
         return code[:block_match.start()] + block_match.group(1) + block_body + block_match.group(3) + code[block_match.end():]
+
+    @staticmethod
+    def _patch_reset_code_targets(code: str, new_targets: Dict) -> str:
+        """Reset 코드 내 target_positions 좌표 치환 (하위호환)."""
+        return ForwardAndResetPipeline._patch_code_block(code, "target_positions", new_targets)
 
     def dry_run_code(self, code: str, positions: Dict) -> bool:
         """생성된 코드를 IK 검증만으로 가상 실행 (로봇 연결 없음).
@@ -687,14 +691,13 @@ class ForwardAndResetPipeline:
             print(f"  [DryRun] Code execution error: {e}")
             return False
 
-    def execute_code(self, code: str, positions: Dict) -> bool:
+    def execute_code(self, code: str, positions: Dict, extra_globals: Dict = None) -> bool:
         """생성된 코드 실행 (레코딩 모드 지원)
 
-        NOTE: __name__을 "__generated__"로 설정하여 LLM 생성 코드의
-        if __name__ == "__main__": 블록이 실행되지 않도록 합니다.
-        이 블록에는 LLM이 하드코딩한 가짜 positions가 포함되어 있어,
-        실행 시 올바른 pix2world 좌표를 덮어쓰는 버그가 발생합니다.
-        대신 exec 후 execute_task()를 수동으로 호출합니다.
+        Args:
+            code: 실행할 Python 코드
+            positions: Forward용 positions dict
+            extra_globals: 추가 globals (Reset용 current_positions, target_positions 등)
         """
         self._last_skill_sequence = []  # 초기화
         try:
@@ -702,6 +705,8 @@ class ForwardAndResetPipeline:
                 "__name__": "__generated__",
                 "positions": positions,
             }
+            if extra_globals:
+                exec_globals.update(extra_globals)
 
             # 레코딩 모드: RecordingContext 설정
             # LeRobotSkills가 생성될 때 자동으로 콜백을 획득
@@ -1804,7 +1809,10 @@ class ForwardAndResetPipeline:
                     # Step 3: Reset 코드 실행
                     print(f"\n{YELLOW}" + self._log("Executing reset code...", step="Step 3/4") + f"{RESET}")
                     self.reset_code = reset_code
-                    reset_success = self.execute_code(reset_code, current_positions)
+                    reset_success = self.execute_code(reset_code, current_positions, extra_globals={
+                        "current_positions": current_positions,
+                        "target_positions": target_positions,
+                    })
                     result['reset']['execution_success'] = reset_success
 
                     if reset_success:
@@ -2477,17 +2485,18 @@ class ForwardAndResetPipeline:
 
         return new_positions
 
-    def _load_resume_state(self, session_dir: str) -> Tuple[List[int], List[Optional[Dict]]]:
-        """이전 세션에서 상태 복원.
+    def _load_resume_state(self, session_dir: str) -> Tuple[List[List[bool]], List[Optional[Dict]]]:
+        """이전 세션에서 상태 복원 (batch_info.json 기반).
 
         Returns:
-            (batch_successes, seed_positions):
-                batch_successes[i] = 배치 i의 성공 에피소드 수
+            (batch_slots, seed_positions):
+                batch_slots[i] = [True/False, ...] 배치 i의 각 slot 성공 여부
                 seed_positions[i] = 배치 i의 seed 위치 (없으면 None)
         """
         import copy
         episodes_per_seed = max(1, self.total_episodes // self.num_random_seeds)
-        batch_successes = [0] * self.num_random_seeds
+        # 각 배치의 slot별 성공 여부: batch_slots[batch][slot] = True/False
+        batch_slots = [[False] * episodes_per_seed for _ in range(self.num_random_seeds)]
         seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
 
         # 1. first_episode_positions 복원 (ep_01 execution_context)
@@ -2508,27 +2517,33 @@ class ForwardAndResetPipeline:
                 seed_positions[i] = sp.get("positions", None)
                 print(f"  [Resume] seed_{i} restored from {sp_path}")
 
-        # 3. 배치별 성공 에피소드 카운트
+        # 3. batch_info.json 기반으로 slot별 성공 여부 파악
         for ep_dir in sorted(Path(session_dir).glob("episode_*")):
-            ep_num = int(ep_dir.name.replace("episode_", ""))
-            batch_idx = min((ep_num - 1) // episodes_per_seed, self.num_random_seeds - 1)
+            batch_info_path = ep_dir / "batch_info.json"
+            if not batch_info_path.exists():
+                continue
+            with open(batch_info_path) as f:
+                bi = json.load(f)
+            batch_idx = bi.get("batch_index", -1)
+            slot = bi.get("slot", -1)
+            judge_pred = bi.get("judge", "")
+            if 0 <= batch_idx < self.num_random_seeds and 0 <= slot < episodes_per_seed:
+                if judge_pred == "TRUE":
+                    batch_slots[batch_idx][slot] = True
 
-            judge_file = ep_dir / "forward" / "judge_result.json"
-            if judge_file.exists():
-                with open(judge_file) as f:
-                    jr = json.load(f)
-                pred = jr.get("judge_result", {}).get("prediction", jr.get("prediction", ""))
-                if pred == "TRUE":
-                    batch_successes[batch_idx] += 1
-
-        # 4. 복원된 seed positions를 _all_previous_seed_positions에 등록 (겹침 방지)
+        # 4. 복원된 seed positions를 _all_previous_seed_positions에 등록
         for i, sp in enumerate(seed_positions):
             if sp is not None:
                 self._all_previous_seed_positions.append(sp)
 
-        print(f"  [Resume] Batch successes: {batch_successes} (target: {episodes_per_seed} each)")
+        # 요약 출력
+        for i in range(self.num_random_seeds):
+            done = sum(batch_slots[i])
+            status = "DONE" if done >= episodes_per_seed else f"{done}/{episodes_per_seed}"
+            seed_str = "loaded" if seed_positions[i] else "to generate"
+            print(f"    Batch {i}: {status} ({seed_str})")
         print(f"  [Resume] Previous seeds registered: {len(self._all_previous_seed_positions)}")
-        return batch_successes, seed_positions
+        return batch_slots, seed_positions
 
     def _restore_to_seed(
         self,
@@ -2566,13 +2581,14 @@ class ForwardAndResetPipeline:
                 print(f"  {RED}Failed to capture frame{RESET_C}")
                 return False
 
-            # 이미지 저장 (임시)
             import tempfile
             tmp_path = tempfile.mktemp(suffix=".jpg")
             cv2.imwrite(tmp_path, current_frame)
+            if self.multi_turn and not self.forward_initial_image_path:
+                self.forward_initial_image_path = tmp_path
 
-            # Reset 코드 생성
-            reset_code, _, current_pos, _ = self.generate_reset_code(
+            # Reset 코드 생성 (LLM이 현재 위치 → target 위치 코드 생성)
+            reset_code, _, current_pos, target_pos = self.generate_reset_code(
                 original_instruction=instruction,
                 original_positions=target_positions,
                 current_state_image_path=tmp_path,
@@ -2583,7 +2599,10 @@ class ForwardAndResetPipeline:
             saved_record = self.record_dataset
             self.record_dataset = False
             try:
-                success = self.execute_code(reset_code, current_pos)
+                success = self.execute_code(reset_code, {}, extra_globals={
+                    "current_positions": current_pos,
+                    "target_positions": target_pos,
+                })
             finally:
                 self.record_dataset = saved_record
 
@@ -2655,11 +2674,11 @@ class ForwardAndResetPipeline:
 
         # 배치별 seed positions 초기화
         seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
-        batch_successes = [0] * self.num_random_seeds
+        batch_slots = [[False] * episodes_per_seed for _ in range(self.num_random_seeds)]
 
         # Resume: 이전 세션에서 상태 복원
         if resume_session_dir:
-            batch_successes, seed_positions = self._load_resume_state(session_dir)
+            batch_slots, seed_positions = self._load_resume_state(session_dir)
 
         # 전체 결과 저장
         all_results = {
@@ -2690,10 +2709,6 @@ class ForwardAndResetPipeline:
             print(f"  Random Seeds: {self.num_random_seeds} batches × {episodes_per_seed} episodes")
         if resume_session_dir:
             print(f"  Resume from: {session_dir}")
-            for i, (s, sp) in enumerate(zip(batch_successes, seed_positions)):
-                status = "DONE" if s >= episodes_per_seed else f"{s}/{episodes_per_seed}"
-                seed_str = "loaded" if sp else "to generate"
-                print(f"    Batch {i}: {status} ({seed_str})")
         print(f"  Save Dir: {session_dir}")
         print(MAGENTA + "=" * 70 + RESET)
 
@@ -2705,31 +2720,18 @@ class ForwardAndResetPipeline:
         # ================================================================
 
         if resume_session_dir:
-            # Resume 모드: 첫 미완료 배치의 seed로 복원 후 재시도 루프
-            first_incomplete = None
-            for i in range(self.num_random_seeds):
-                if batch_successes[i] < episodes_per_seed:
-                    first_incomplete = i
-                    break
-
-            if first_incomplete is not None:
-                # 복원: 해당 seed 위치로 이동 (1회만)
-                if seed_positions[first_incomplete] is None and first_incomplete > 0:
-                    print(f"\n{MAGENTA}{BOLD}  [Resume] Generating seed_{first_incomplete}...{RESET}")
-                    seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
-                if seed_positions[first_incomplete] is not None:
-                    print(f"\n{CYAN}{BOLD}  [Resume] Restoring to seed_{first_incomplete}...{RESET}")
-                    self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
-
-            global_episode_num = sum(batch_successes)
+            # Resume 모드: 배치→slot 단위 재시도
+            global_episode_num = sum(1 for ep in Path(session_dir).glob("episode_*"))
 
             for batch_index in range(self.num_random_seeds):
-                needed = episodes_per_seed - batch_successes[batch_index]
-                if needed <= 0:
-                    print(f"\n{GREEN}  [Batch {batch_index}] Already complete ({batch_successes[batch_index]}/{episodes_per_seed}), skipping{RESET}")
+                # 미완료 slot 찾기
+                incomplete_slots = [s for s, done in enumerate(batch_slots[batch_index]) if not done]
+                if not incomplete_slots:
+                    done_count = sum(batch_slots[batch_index])
+                    print(f"\n{GREEN}  [Batch {batch_index}] Already complete ({done_count}/{episodes_per_seed}), skipping{RESET}")
                     continue
 
-                # Seed 위치 확보 (resume 복원 이후 배치)
+                # Seed 위치 확보
                 if seed_positions[batch_index] is None and batch_index > 0:
                     print(f"\n{MAGENTA}{BOLD}  [Batch {batch_index}] Generating seed_{batch_index}...{RESET}")
                     seed_positions[batch_index] = self._generate_seed_positions(session_dir, batch_index)
@@ -2737,49 +2739,57 @@ class ForwardAndResetPipeline:
                         print(f"  {RED}[Batch {batch_index}] Seed generation failed, skipping batch{RESET}")
                         continue
 
-                success_count = 0
-                max_attempts = needed * 3
+                # 배치 시작 시 해당 seed로 복원
+                if seed_positions[batch_index] is not None:
+                    print(f"\n{CYAN}{BOLD}  [Batch {batch_index}] Restoring to seed position...{RESET}")
+                    self._restore_to_seed(seed_positions[batch_index], instruction, detection_timeout)
 
-                for attempt in range(max_attempts):
-                    if success_count >= needed:
-                        break
-                    global_episode_num += 1
-                    self.current_episode = global_episode_num
+                # slot별 재시도
+                for slot in incomplete_slots:
+                    max_retries = 3
+                    for retry in range(max_retries):
+                        global_episode_num += 1
+                        self.current_episode = global_episode_num
 
-                    print("\n" + CYAN + "=" * 70 + RESET)
-                    print(CYAN + BOLD + f"  [Resume Batch {batch_index}] {success_count+1}/{needed} (attempt {attempt+1})  ".center(70) + RESET)
-                    print(CYAN + "=" * 70 + RESET)
+                        print("\n" + CYAN + "=" * 70 + RESET)
+                        print(CYAN + BOLD + f"  [Batch {batch_index} Slot {slot}] (retry {retry+1}/{max_retries})  ".center(70) + RESET)
+                        print(CYAN + "=" * 70 + RESET)
 
-                    episode_dir = str(Path(session_dir) / f"episode_{global_episode_num:02d}")
-
-                    # 마지막 필요 에피소드면 다음 seed로 전환
-                    is_last = (success_count == needed - 1)
-                    next_batch = batch_index + 1
-                    if is_last and next_batch < self.num_random_seeds:
-                        if seed_positions[next_batch] is None:
-                            seed_positions[next_batch] = self._generate_seed_positions(session_dir, next_batch)
-                        reset_target = seed_positions[next_batch] if seed_positions[next_batch] else seed_positions[batch_index]
-                    else:
+                        episode_dir = str(Path(session_dir) / f"episode_{global_episode_num:02d}")
                         reset_target = seed_positions[batch_index]
 
-                    try:
-                        result = self.run(
-                            instruction=instruction, objects=objects,
-                            detection_timeout=detection_timeout,
-                            visualize_detection=visualize_detection,
-                            save_dir=episode_dir, use_timestamp_subdir=False,
-                            skip_reset=skip_reset, reset_target_positions=reset_target,
-                        )
-                        judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-                        if judge_pred == 'TRUE':
-                            success_count += 1
-                        self._update_results(all_results, result, global_episode_num, skip_reset)
-                    except Exception as e:
-                        print(f"\n{RED}[Resume Batch {batch_index}] Error: {e}{RESET}")
-                        import traceback; traceback.print_exc()
-                        all_results['episodes'].append({'episode': global_episode_num, 'result': None, 'success': False, 'error': str(e)})
+                        try:
+                            result = self.run(
+                                instruction=instruction, objects=objects,
+                                detection_timeout=detection_timeout,
+                                visualize_detection=visualize_detection,
+                                save_dir=episode_dir, use_timestamp_subdir=False,
+                                skip_reset=skip_reset, reset_target_positions=reset_target,
+                            )
+                            judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
 
-                    time.sleep(2)
+                            # batch_info.json 저장
+                            batch_info = {"batch_index": batch_index, "slot": slot, "judge": judge_pred}
+                            bi_path = Path(episode_dir) / "batch_info.json"
+                            bi_path.parent.mkdir(parents=True, exist_ok=True)
+                            with open(bi_path, 'w') as f:
+                                json.dump(batch_info, f, indent=2)
+
+                            self._update_results(all_results, result, global_episode_num, skip_reset)
+
+                            if judge_pred == 'TRUE':
+                                batch_slots[batch_index][slot] = True
+                                print(f"  {GREEN}[Batch {batch_index} Slot {slot}] SUCCESS{RESET}")
+                                break  # 이 slot 완료, 다음 slot으로
+                            else:
+                                print(f"  {YELLOW}[Batch {batch_index} Slot {slot}] FAILED, retrying...{RESET}")
+
+                        except Exception as e:
+                            print(f"\n{RED}[Batch {batch_index} Slot {slot}] Error: {e}{RESET}")
+                            import traceback; traceback.print_exc()
+                            all_results['episodes'].append({'episode': global_episode_num, 'result': None, 'success': False, 'error': str(e)})
+
+                        time.sleep(2)
 
         else:
             # 새 세션: 고정 스케줄 (NUM_EPISODES개, 실패해도 계속 진행)
@@ -2834,6 +2844,15 @@ class ForwardAndResetPipeline:
                         import copy
                         seed_positions[0] = copy.deepcopy(self.first_episode_positions)
                         self._all_previous_seed_positions.append(seed_positions[0])
+
+                    # batch_info.json 저장
+                    slot = episode_idx % episodes_per_seed
+                    judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+                    batch_info = {"batch_index": batch_index, "slot": slot, "judge": judge_pred}
+                    bi_path = Path(episode_dir) / "batch_info.json"
+                    bi_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(bi_path, 'w') as f:
+                        json.dump(batch_info, f, indent=2)
 
                     self._update_results(all_results, result, episode_num, skip_reset)
 

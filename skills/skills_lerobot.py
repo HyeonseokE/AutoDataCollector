@@ -1364,8 +1364,39 @@ class LeRobotSkills:
             self._log(f"  [Pick Z-Fix] {(object_height - self.pick_offset)*100:.1f}cm < min {MIN_PICK_Z*100:.1f}cm, clamping to {MIN_PICK_Z*100:.1f}cm")
         self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.1f}cm from top)")
 
+        # Pitch 보상: approach→pick 하강 시 pitch 변화로 인한 그리퍼 끝점 XY 드리프트 보정
+        GRIPPER_TIP_LENGTH = 0.05  # gripper_frame_link → 실제 접촉점 거리 (m)
+        _, approach_joints, _ = self._get_current_state()
+        pick_joints, ik_ok = self.kinematics.inverse_kinematics_position_only(
+            np.array(pick_position), initial_guess=approach_joints,
+        )
+        if ik_ok:
+            tip_local = np.array([0, 0, GRIPPER_TIP_LENGTH])  # gripper Z-axis 방향
+            approach_pos, approach_rot = self.kinematics.forward_kinematics(approach_joints)
+            pick_pos_fk, pick_rot = self.kinematics.forward_kinematics(pick_joints)
+            approach_tip = approach_pos + approach_rot @ tip_local
+            pick_tip = pick_pos_fk + pick_rot @ tip_local
+            tip_drift = pick_tip[:2] - approach_tip[:2]  # XY 밀림량
+
+            if np.linalg.norm(tip_drift) > 0.002:  # 2mm 이상 밀림 시만 보상
+                compensated = [
+                    pick_position[0] - tip_drift[0],
+                    pick_position[1] - tip_drift[1],
+                    pick_position[2],
+                ]
+                # 보상 후 reach 범위 초과 시 보상 미적용
+                comp_reach = np.sqrt(compensated[0]**2 + compensated[1]**2)
+                if comp_reach <= self.workspace_max_reach:
+                    pick_position = compensated
+                    self._log(f"  [Pitch Compensation] tip_drift=({tip_drift[0]*1000:.1f}, {tip_drift[1]*1000:.1f})mm")
+                else:
+                    self._log(f"  [Pitch Compensation] skipped (reach {comp_reach:.3f}m > max {self.workspace_max_reach:.3f}m)")
+
         # Move to pick position (skill recording handled inside)
         pick_label = f"pick {object_name}" if object_name else None
+        # pick_z를 먼저 저장 (place에서 참조, pick 실패 시에도 crash 방지)
+        self._pick_z = pick_z
+
         if not self.move_to_position(pick_position, target_name=pick_label, skill_description=skill_description):
             print("Error: Failed to reach pick position")
             return False
@@ -1373,9 +1404,6 @@ class LeRobotSkills:
         # Close gripper (skill recording handled inside)
         grasp_desc = f"grasp {object_name}" if object_name else None
         self.gripper_close(skill_description=grasp_desc)
-
-        # Store pick_z for place operation
-        self._pick_z = pick_z
 
         # Store current pitch for place operation
         _, current_joints, _ = self._get_current_state()

@@ -2721,8 +2721,6 @@ class ForwardAndResetPipeline:
 
         if resume_session_dir:
             # Resume 모드: 배치→slot 단위 재시도
-            global_episode_num = sum(1 for ep in Path(session_dir).glob("episode_*"))
-
             for batch_index in range(self.num_random_seeds):
                 # 미완료 slot 찾기
                 incomplete_slots = [s for s, done in enumerate(batch_slots[batch_index]) if not done]
@@ -2730,6 +2728,11 @@ class ForwardAndResetPipeline:
                     done_count = sum(batch_slots[batch_index])
                     print(f"\n{GREEN}  [Batch {batch_index}] Already complete ({done_count}/{episodes_per_seed}), skipping{RESET}")
                     continue
+
+                done_count = sum(batch_slots[batch_index])
+                need_count = len(incomplete_slots)
+                first_ep = batch_index * episodes_per_seed + incomplete_slots[0] + 1
+                print(f"\n{YELLOW}  [Batch {batch_index}] {done_count}/{episodes_per_seed} complete, {need_count} slots remaining (ep {first_ep}~){RESET}")
 
                 # Seed 위치 확보
                 if seed_positions[batch_index] is None and batch_index > 0:
@@ -2746,16 +2749,16 @@ class ForwardAndResetPipeline:
 
                 # slot별 재시도
                 for slot in incomplete_slots:
+                    episode_num = batch_index * episodes_per_seed + slot + 1
+                    self.current_episode = episode_num
                     max_retries = 3
                     for retry in range(max_retries):
-                        global_episode_num += 1
-                        self.current_episode = global_episode_num
 
                         print("\n" + CYAN + "=" * 70 + RESET)
-                        print(CYAN + BOLD + f"  [Batch {batch_index} Slot {slot}] (retry {retry+1}/{max_retries})  ".center(70) + RESET)
+                        print(CYAN + BOLD + f"  [Batch {batch_index} Slot {slot}] Episode {episode_num:02d} (retry {retry+1}/{max_retries})  ".center(70) + RESET)
                         print(CYAN + "=" * 70 + RESET)
 
-                        episode_dir = str(Path(session_dir) / f"episode_{global_episode_num:02d}")
+                        episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
                         reset_target = seed_positions[batch_index]
 
                         try:

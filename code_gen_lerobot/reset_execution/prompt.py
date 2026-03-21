@@ -427,8 +427,8 @@ if __name__ == "__main__":
 3. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
 4. Use `execute_pick_object` (with `object_name=`) and `execute_place_object` (with `target_name=`) for pick/place operations
 5. **NEVER pass `object_name` to `execute_place_object`** — it only accepts `target_name`
-6. **Hardcode actual coordinate values** from current_positions and target_positions directly in the code
-7. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
+6. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
+7. Do NOT hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 8. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object (grasp offset handled internally)
 9. Use `approach_height = 0.20` (20cm) for all approach/lift movements
 10. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement
@@ -763,8 +763,8 @@ if __name__ == "__main__":
 3. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
 4. Use `execute_pick_object` (with `object_name=`) and `execute_place_object` (with `target_name=`) for pick/place operations
 5. **NEVER pass `object_name` to `execute_place_object`** — it only accepts `target_name`
-6. **Hardcode actual coordinate values** from current_positions and target_positions directly in the code
-7. Do NOT reference `current_positions` or `target_positions` as variables - extract and use the actual [x,y,z] values
+6. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
+7. Do NOT hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 8. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object (grasp offset handled internally)
 9. Use `approach_height = 0.20` (20cm) for all approach/lift movements
 10. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement

@@ -2288,7 +2288,7 @@ class ForwardAndResetPipeline:
             print("  [SeedGen] No first_episode_positions, cannot generate")
             return None
 
-        save_dir = str(Path(session_dir) / f"seed_{seed_index:02d}_setup")
+        save_dir = str(Path(session_dir) / f"seed_{seed_index+1:02d}_setup")
         Path(save_dir).mkdir(parents=True, exist_ok=True)
 
         grippable, obstacles = classify_objects(self.first_episode_positions)
@@ -2362,7 +2362,7 @@ class ForwardAndResetPipeline:
 
         new_positions = accepted_positions
 
-        print(f"  [SeedGen] seed_{seed_index} positions:")
+        print(f"  [SeedGen] seed_{seed_index+1} positions:")
         for name, info in new_positions.items():
             pos = info.get("position") if isinstance(info, dict) else info
             if pos and len(pos) >= 3:
@@ -2457,7 +2457,7 @@ class ForwardAndResetPipeline:
                 if pos and pix2robot:
                     try:
                         px = pix2robot.robot_to_pixel(pos[0], pos[1])
-                        _draw_bbox(result, px, bbox, color, 1, f"s{i}:{name}")
+                        _draw_bbox(result, px, bbox, color, 1, f"s{i+1}:{name}")
                     except Exception:
                         pass
 
@@ -2472,13 +2472,13 @@ class ForwardAndResetPipeline:
             if pos and pix2robot:
                 try:
                     px = pix2robot.robot_to_pixel(pos[0], pos[1])
-                    _draw_bbox(result, px, bbox, (0, 255, 0), 3, f"NEW s{seed_index}:{name}")
+                    _draw_bbox(result, px, bbox, (0, 255, 0), 3, f"NEW s{seed_index+1}:{name}")
                 except Exception:
                     pass
 
         # 범례
         img_h = result.shape[0]
-        cv2.putText(result, f"Seed {seed_index} | Past: {len(self._all_previous_seed_positions)} seeds",
+        cv2.putText(result, f"Seed {seed_index+1} | Past: {len(self._all_previous_seed_positions)} seeds",
                     (10, img_h - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
 
         out_path = str(Path(save_dir) / "seed_visualization.jpg")
@@ -2540,12 +2540,12 @@ class ForwardAndResetPipeline:
 
         # 2. seed positions 복원
         for i in range(1, self.num_random_seeds):
-            sp_path = Path(session_dir) / f"seed_{i:02d}_setup" / "seed_positions.json"
+            sp_path = Path(session_dir) / f"seed_{i+1:02d}_setup" / "seed_positions.json"
             if sp_path.exists():
                 with open(sp_path) as f:
                     sp = json.load(f)
                 seed_positions[i] = sp.get("positions", None)
-                print(f"  [Resume] seed_{i} restored from {sp_path}")
+                print(f"  [Resume] seed_{i+1} restored from {sp_path}")
 
         # 3. batch_info.json 기반으로 slot별 성공 여부 파악
         for ep_dir in sorted(Path(session_dir).glob("episode_*")):
@@ -2609,7 +2609,7 @@ class ForwardAndResetPipeline:
             status = "DONE" if done >= episodes_per_seed else f"{done}/{episodes_per_seed}"
             seed_str = "loaded" if seed_positions[i] else "to generate"
             attempted_str = "attempted" if batch_attempted[i] else "new"
-            print(f"    Batch {i}: {status} ({seed_str}, {attempted_str})")
+            print(f"    Batch {i+1}: {status} ({seed_str}, {attempted_str})")
         print(f"  [Resume] Previous seeds registered: {len(self._all_previous_seed_positions)}")
         return batch_slots, seed_positions, batch_attempted
 
@@ -2856,7 +2856,7 @@ class ForwardAndResetPipeline:
             self.current_episode = episode_num
 
             print("\n" + CYAN + "=" * 70 + RESET)
-            print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index})  ".center(70) + RESET)
+            print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1})  ".center(70) + RESET)
             print(CYAN + "=" * 70 + RESET)
 
             episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
@@ -2876,7 +2876,7 @@ class ForwardAndResetPipeline:
                         sp[0] = copy.deepcopy(self.first_episode_positions)
                         self._all_previous_seed_positions.append(sp[0])
                     if sp[next_idx] is None:
-                        print(f"\n{MAGENTA}  [Seed Transition] Generating seed_{next_idx}...{RESET}")
+                        print(f"\n{MAGENTA}  [Seed Transition] Generating seed_{next_idx+1}...{RESET}")
                         sp[next_idx] = self._generate_seed_positions(sd, next_idx)
                     return sp[next_idx]
                 pre_reset_cb = _make_next_seed
@@ -2966,104 +2966,67 @@ class ForwardAndResetPipeline:
         print(MAGENTA + "=" * 70 + RESET)
 
         # --------------------------------------------------------
-        # Phase 1: 시도했지만 미완료인 배치 — _restore_to_seed 후 재시도
+        # 통합 에피소드 루프: 성공 slot 스킵, 실패/미시도 slot 실행
         # --------------------------------------------------------
-        for batch_index in range(self.num_random_seeds):
-            if not batch_attempted[batch_index]:
-                continue  # 미시도 배치는 Phase 2에서 처리
-            incomplete_slots = [s for s, done in enumerate(batch_slots[batch_index]) if not done]
-            if not incomplete_slots:
-                done_count = sum(batch_slots[batch_index])
-                print(f"\n{GREEN}  [Batch {batch_index}] Already complete ({done_count}/{episodes_per_seed}), skipping{RESET}")
-                continue
 
-            done_count = sum(batch_slots[batch_index])
-            first_ep = batch_index * episodes_per_seed + incomplete_slots[0] + 1
-            print(f"\n{YELLOW}  [Resume Batch {batch_index}] {done_count}/{episodes_per_seed} complete, {len(incomplete_slots)} slots remaining (ep {first_ep}~){RESET}")
+        def _find_next_incomplete(from_batch):
+            """from_batch 이후 첫 미완료 배치 인덱스 반환"""
+            for i in range(from_batch + 1, self.num_random_seeds):
+                if any(not done for done in batch_slots[i]):
+                    return i
+            return None
 
-            # Seed 위치 확보
-            if seed_positions[batch_index] is None and batch_index > 0:
-                print(f"\n{MAGENTA}{BOLD}  [Batch {batch_index}] Generating seed_{batch_index}...{RESET}")
-                seed_positions[batch_index] = self._generate_seed_positions(session_dir, batch_index)
-                if seed_positions[batch_index] is None:
-                    print(f"  {RED}[Batch {batch_index}] Seed generation failed, skipping batch{RESET}")
+        # 첫 미완료 배치 찾기 → _restore_to_seed 1회
+        first_incomplete = None
+        for i in range(self.num_random_seeds):
+            if any(not done for done in batch_slots[i]):
+                first_incomplete = i
+                break
+
+        if first_incomplete is None:
+            print(f"\n{GREEN}  All batches complete, nothing to resume{RESET}")
+        else:
+            # seed 확보 + restore
+            if seed_positions[first_incomplete] is None and first_incomplete > 0:
+                print(f"\n{MAGENTA}{BOLD}  Generating seed_{first_incomplete+1}...{RESET}")
+                seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
+            if seed_positions[first_incomplete] is not None:
+                print(f"\n{CYAN}{BOLD}  Restoring to seed_{first_incomplete+1}...{RESET}")
+                self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
+
+            # 에피소드 루프
+            for episode_idx in range(num_episodes):
+                batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
+                slot = episode_idx % episodes_per_seed
+                episode_num = episode_idx + 1
+
+                # 이미 성공한 slot → 스킵
+                if batch_slots[batch_index][slot]:
                     continue
 
-            # 배치 시작 시 해당 seed로 복원
-            if seed_positions[batch_index] is not None:
-                print(f"\n{CYAN}{BOLD}  [Batch {batch_index}] Restoring to seed position...{RESET}")
-                self._restore_to_seed(seed_positions[batch_index], instruction, detection_timeout)
-
-            # slot별 재시도
-            for slot in incomplete_slots:
-                episode_num = batch_index * episodes_per_seed + slot + 1
-                self.current_episode = episode_num
-                max_retries = 3
-                for retry in range(max_retries):
-                    print("\n" + CYAN + "=" * 70 + RESET)
-                    print(CYAN + BOLD + f"  [Resume Batch {batch_index} Slot {slot}] Episode {episode_num:02d} (retry {retry+1}/{max_retries})  ".center(70) + RESET)
-                    print(CYAN + "=" * 70 + RESET)
-
-                    episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
-                    reset_target = seed_positions[batch_index]
-
-                    try:
-                        result = self.run(
-                            instruction=instruction, objects=objects,
-                            detection_timeout=detection_timeout,
-                            visualize_detection=visualize_detection,
-                            save_dir=episode_dir, use_timestamp_subdir=False,
-                            skip_reset=skip_reset, reset_target_positions=reset_target,
-                        )
-                        judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-                        self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
-                        self._update_results(all_results, result, episode_num, skip_reset)
-                        if judge_pred == 'TRUE':
-                            print(f"  {GREEN}[Batch {batch_index} Slot {slot}] SUCCESS{RESET}")
-                            break
-                        else:
-                            print(f"  {YELLOW}[Batch {batch_index} Slot {slot}] FAILED, retrying...{RESET}")
-                    except Exception as e:
-                        print(f"\n{RED}[Batch {batch_index} Slot {slot}] Error: {e}{RESET}")
-                        import traceback; traceback.print_exc()
-                        all_results['episodes'].append({'episode': episode_num, 'result': None, 'success': False, 'error': str(e)})
-                    time.sleep(2)
-
-        # --------------------------------------------------------
-        # Phase 2: 미시도 배치 — _restore_to_seed 후 순차 실행
-        # --------------------------------------------------------
-        for batch_index in range(self.num_random_seeds):
-            if batch_attempted[batch_index]:
-                continue  # 이미 Phase 1에서 처리됨
-
-            print(f"\n{MAGENTA}{BOLD}  [Resume → New] Batch {batch_index} (not attempted){RESET}")
-
-            # Seed 위치 확보
-            if seed_positions[batch_index] is None and batch_index > 0:
-                print(f"\n{MAGENTA}{BOLD}  [Batch {batch_index}] Generating seed_{batch_index}...{RESET}")
-                seed_positions[batch_index] = self._generate_seed_positions(session_dir, batch_index)
-                if seed_positions[batch_index] is None:
-                    print(f"  {RED}[Batch {batch_index}] Seed generation failed, skipping batch{RESET}")
-                    continue
-
-            # 해당 seed로 복원
-            if seed_positions[batch_index] is not None:
-                print(f"\n{CYAN}{BOLD}  [Batch {batch_index}] Restoring to seed position...{RESET}")
-                self._restore_to_seed(seed_positions[batch_index], instruction, detection_timeout)
-
-            # 배치 내 slot 순차 실행
-            for slot in range(episodes_per_seed):
-                episode_num = batch_index * episodes_per_seed + slot + 1
-                if episode_num > num_episodes:
-                    break
                 self.current_episode = episode_num
 
                 print("\n" + CYAN + "=" * 70 + RESET)
-                print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index}, Slot {slot})  ".center(70) + RESET)
+                print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1}, Slot {slot})  ".center(70) + RESET)
                 print(CYAN + "=" * 70 + RESET)
 
                 episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
-                reset_target = seed_positions[batch_index]
+
+                # Reset target 결정: 배치 내 남은 미완료 slot이 있는지 확인
+                remaining_in_batch = [s for s in range(slot + 1, episodes_per_seed)
+                                      if not batch_slots[batch_index][s]]
+                if not remaining_in_batch:
+                    # 배치 마지막 실행 slot → 다음 미완료 배치 탐색
+                    next_incomplete = _find_next_incomplete(batch_index)
+                    if next_incomplete is not None:
+                        if seed_positions[next_incomplete] is None:
+                            print(f"\n{MAGENTA}  [Seed Transition] Generating seed_{next_incomplete+1}...{RESET}")
+                            seed_positions[next_incomplete] = self._generate_seed_positions(session_dir, next_incomplete)
+                        reset_target = seed_positions[next_incomplete] if seed_positions[next_incomplete] else seed_positions[batch_index]
+                    else:
+                        reset_target = seed_positions[batch_index]  # 정리
+                else:
+                    reset_target = seed_positions[batch_index]  # 같은 배치 유지
 
                 try:
                     result = self.run(
@@ -3074,12 +3037,9 @@ class ForwardAndResetPipeline:
                         skip_reset=skip_reset, reset_target_positions=reset_target,
                     )
 
-                    # first_episode_positions → seed_positions[0] 초기 설정
-                    if seed_positions[0] is None and self.first_episode_positions is not None:
-                        seed_positions[0] = copy.deepcopy(self.first_episode_positions)
-                        self._all_previous_seed_positions.append(seed_positions[0])
-
                     judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+                    if judge_pred == 'TRUE':
+                        batch_slots[batch_index][slot] = True
                     self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
                     self._update_results(all_results, result, episode_num, skip_reset)
 

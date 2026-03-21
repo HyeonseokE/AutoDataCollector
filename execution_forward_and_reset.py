@@ -1901,7 +1901,7 @@ class ForwardAndResetPipeline:
                         json.dump(reset_log, f, indent=2, default=str)
                     print(f"  Reset judge result saved to: {reset_log_path}")
 
-                    # Reset 코드를 캐싱 (dict 참조 방식만, 주석 제외)
+                    # Reset 코드를 캐싱 (dict 참조 방식 + 로컬 재정의 없음)
                     reset_code_text = result['reset'].get('code', '')
                     if result['reset']['execution_success'] and reset_code_text:
                         # 주석(#)이 아닌 실제 코드 라인에서 dict 참조 확인
@@ -1909,8 +1909,15 @@ class ForwardAndResetPipeline:
                                       if ln.strip() and not ln.strip().startswith('#')]
                         has_cur_ref = any('current_positions[' in ln for ln in code_lines)
                         has_tgt_ref = any('target_positions[' in ln for ln in code_lines)
-                        if has_cur_ref and has_tgt_ref:
+                        # 로컬 재정의가 있으면 캐시 거부 (exec_globals shadow 방지)
+                        has_cur_redef = any(ln.startswith('current_positions') and '=' in ln and '{' in ln
+                                           for ln in code_lines)
+                        has_tgt_redef = any(ln.startswith('target_positions') and '=' in ln and '{' in ln
+                                           for ln in code_lines)
+                        if has_cur_ref and has_tgt_ref and not has_cur_redef and not has_tgt_redef:
                             self.cached_reset_code = reset_code_text
+                        elif has_cur_redef or has_tgt_redef:
+                            print(f"  {YELLOW}[Cache] Reset code has hardcoded position defs — not caching{RESET}")
 
                 except Exception as e:
                     print(f"{RED}[Error] Reset failed: {e}{RESET}")

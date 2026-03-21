@@ -21,7 +21,6 @@ from .prompt import (
     lerobot_reset_code_gen_prompt,
     turn0_reset_scene_understanding_prompt,
     turn1_reset_bbox_detection_prompt,
-    turn_codegen_reset_prompt,
 )
 from .workspace import (
     classify_objects,

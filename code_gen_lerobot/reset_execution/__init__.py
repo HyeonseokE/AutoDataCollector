@@ -22,10 +22,8 @@ from .code_gen import (
 )
 from .prompt import (
     lerobot_reset_code_gen_prompt,
-    lerobot_reset_spec_gen_prompt,
     turn0_reset_scene_understanding_prompt,
     turn1_reset_bbox_detection_prompt,
-    turn_codegen_reset_prompt,
 )
 from .workspace import (
     ResetWorkspace,
@@ -44,10 +42,8 @@ __all__ = [
     "extract_code_from_response",
     # Prompts
     "lerobot_reset_code_gen_prompt",
-    "lerobot_reset_spec_gen_prompt",
     "turn0_reset_scene_understanding_prompt",
     "turn1_reset_bbox_detection_prompt",
-    "turn_codegen_reset_prompt",
     # Workspace
     "ResetWorkspace",
     "is_grippable",

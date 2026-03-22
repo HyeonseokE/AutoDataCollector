@@ -169,6 +169,7 @@ class ForwardAndResetPipeline:
         self.side_view_image = side_view_image
         self.codegen_model = codegen_model
         self.multi_turn_info: Dict = {}
+        self.reset_multi_turn_info: Dict = {}
 
         # Recording options
         self.record_dataset = record_dataset
@@ -1128,7 +1129,7 @@ class ForwardAndResetPipeline:
         if active_camera is None:
             active_camera = self.camera
 
-        reset_code, current_pos, target_pos, grippable, obstacles = lerobot_reset_code_gen_multi_turn(
+        reset_code, current_pos, target_pos, grippable, obstacles, reset_mt_info = lerobot_reset_code_gen_multi_turn(
             original_instruction=original_instruction,
             original_positions=original_positions,
             current_state_image_path=current_state_image_path,
@@ -1143,6 +1144,8 @@ class ForwardAndResetPipeline:
             skip_codegen=skip_codegen,
             canonical_labels=canonical_labels,
         )
+
+        self.reset_multi_turn_info = reset_mt_info
 
         return reset_code, original_positions, current_pos, target_pos
 
@@ -1754,12 +1757,6 @@ class ForwardAndResetPipeline:
             forward_log_path = forward_logger.stop()
             print(f"\n  Forward log saved to: {forward_log_path}")
 
-            # Forward 완료 후 콜백: seed 생성 등 (reset_target 갱신 가능)
-            if pre_reset_callback is not None:
-                new_target = pre_reset_callback()
-                if new_target is not None:
-                    reset_target_positions = new_target
-
             # ================================================================
             # PHASE 3: RESET EXECUTION
             # ================================================================
@@ -1776,7 +1773,7 @@ class ForwardAndResetPipeline:
                 # 카메라 종료 (Forward에서 사용하던 별도 카메라)
                 self.shutdown_camera()
 
-                # Reset target 결정: 외부 지정 > first_episode_positions > detected_positions
+                # Reset target 결정 (콜백 전 — 현재 seed 사용, 콜백 후 갱신)
                 if reset_target_positions is not None:
                     reset_original_positions = reset_target_positions
                     print(f"  Reset target: seed positions")
@@ -1838,6 +1835,13 @@ class ForwardAndResetPipeline:
                         # 콜백으로 교체된 reset_original_positions를 직접 사용
                         target_positions = reset_original_positions
 
+                    # 검출 완료 후 콜백: 실제 current_positions로 seed 생성
+                    if pre_reset_callback is not None:
+                        new_target = pre_reset_callback(current_positions=current_positions)
+                        if new_target is not None:
+                            reset_original_positions = new_target
+                            target_positions = new_target
+
                     result['reset']['current_positions'] = current_positions
                     result['reset']['target_positions'] = target_positions
                     result['reset']['code'] = reset_code
@@ -1869,6 +1873,50 @@ class ForwardAndResetPipeline:
                             print(f"  LLM cost saved: {cost_path}")
                     except Exception:
                         pass
+
+                    # [즉시 저장] Reset multi-turn VLM 데이터
+                    reset_mt = getattr(self, 'reset_multi_turn_info', None)
+                    if reset_mt:
+                        # multi_turn_info.json
+                        mt_path = Path(reset_dir) / "multi_turn_info.json"
+                        mt_save = {k: v for k, v in reset_mt.items() if k != "crop_dir"}
+                        with open(mt_path, 'w', encoding='utf-8') as f:
+                            json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
+                        print(f"  Reset multi-turn info saved: {mt_path}")
+
+                        # Turn 시각화 이미지
+                        reset_base_img = self.reset_initial_image
+                        if reset_base_img is not None:
+                            t1_parsed = reset_mt.get("turn1_parsed")
+                            if t1_parsed:
+                                self._visualize_turn1(
+                                    reset_base_img.copy(), t1_parsed,
+                                    str(Path(reset_dir) / "turn1_detection.jpg"),
+                                )
+                            all_pts = reset_mt.get("all_points", [])
+                            if t1_parsed and all_pts:
+                                t2_compat = {"grasp_points": [
+                                    {"object_name": p["object_label"], "label": p["label"],
+                                     "role": p["role"], "point_pixel": [p["px"], p["py"]]}
+                                    for p in all_pts
+                                ]}
+                                self._visualize_turn2(
+                                    reset_base_img.copy(), t1_parsed, t2_compat,
+                                    str(Path(reset_dir) / "turn2_grasp_points.jpg"),
+                                )
+
+                        # Crop 이미지 복사
+                        crop_dir_path = reset_mt.get("crop_dir")
+                        if crop_dir_path and os.path.isdir(crop_dir_path):
+                            import shutil
+                            for fname in sorted(os.listdir(crop_dir_path)):
+                                if fname.endswith(('.jpg', '.png')):
+                                    shutil.copy2(os.path.join(crop_dir_path, fname),
+                                                 os.path.join(reset_dir, fname))
+                            print(f"  Reset crop images saved to: {reset_dir}")
+
+                        # Turn 로그 저장
+                        self._save_turn_logs(reset_dir, reset_mt)
 
                     print("\n" + "-" * 40)
                     print("Generated Reset Code (preview):")
@@ -2412,12 +2460,18 @@ class ForwardAndResetPipeline:
 
         print(CYAN + "=" * 70 + RESET)
 
-    def _generate_seed_positions(self, session_dir: str, seed_index: int) -> Optional[Dict]:
+    def _generate_seed_positions(self, session_dir: str, seed_index: int, current_positions: Dict = None) -> Optional[Dict]:
         """
         새 seed 위치 생성: 랜덤 위치 생성 → IK dry_run 검증.
 
         first_episode_positions를 기반으로 랜덤 위치를 생성합니다.
         first_episode_positions는 변경하지 않습니다.
+
+        Args:
+            session_dir: 세션 디렉토리
+            seed_index: 시드 인덱스
+            current_positions: 실제 검출된 현재 위치 (dry-run용).
+                              None이면 candidate를 current로 사용 (fallback).
 
         Returns:
             성공 시 새 positions dict, 실패 시 None
@@ -2485,11 +2539,12 @@ class ForwardAndResetPipeline:
 
             candidate = self._build_batch_positions(random_targets, obstacles, pix2robot=pix2robot)
 
-            # dry_run 검증: 캐싱된 reset 코드에 candidate를 globals로 주입
+            # dry_run 검증: 캐싱된 reset 코드에 실제 current_positions + candidate target 주입
             if reset_code is not None:
                 print(f"  [SeedGen] Attempt {attempt+1}: dry-run validating...")
+                dry_run_current = current_positions if current_positions else candidate
                 if self.dry_run_code(reset_code, candidate, extra_globals={
-                    "current_positions": candidate,
+                    "current_positions": dry_run_current,
                     "target_positions": candidate,
                 }):
                     print(f"  [SeedGen] Attempt {attempt+1}: dry-run PASSED")
@@ -2629,6 +2684,110 @@ class ForwardAndResetPipeline:
         out_path = str(Path(save_dir) / "seed_visualization.jpg")
         cv2.imwrite(out_path, result)
         print(f"  [SeedGen] Visualization saved: {out_path}")
+
+        # ── 객체 종류별 포인트 시각화 ──
+        self._visualize_seed_points(save_dir, new_positions, seed_index, pix2robot)
+
+    def _visualize_seed_points(
+        self,
+        save_dir: str,
+        new_positions: Dict,
+        seed_index: int,
+        pix2robot=None,
+    ):
+        """
+        객체 종류별 색상으로 모든 시드의 위치를 점으로 시각화.
+
+        각 객체에 고유 색상을 할당하고, 과거 시드 + 현재 시드의
+        위치를 점(원)으로 표시. 현재 시드는 크게, 과거는 작게.
+        """
+        import cv2
+        from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image, is_grippable as _is_grippable
+
+        if self.forward_initial_image_path and Path(self.forward_initial_image_path).exists():
+            base_img = cv2.imread(self.forward_initial_image_path)
+        else:
+            base_img = np.zeros((480, 640, 3), dtype=np.uint8) + 60
+
+        result = draw_workspace_on_image(base_img, robot_id=self.robot_id, pix2robot_calibrator=pix2robot)
+
+        # 객체 이름 수집 (grippable만)
+        all_obj_names = set()
+        if self.first_episode_positions:
+            for name, info in self.first_episode_positions.items():
+                if isinstance(info, dict) and _is_grippable(info.get("bbox_px")):
+                    all_obj_names.add(name)
+        for name in new_positions:
+            if isinstance(new_positions[name], dict) and _is_grippable(new_positions[name].get("bbox_px")):
+                all_obj_names.add(name)
+        all_obj_names = sorted(all_obj_names)
+
+        # 객체별 고유 색상 (BGR)
+        OBJ_COLORS = [
+            (0, 0, 255),    # 빨강
+            (255, 0, 0),    # 파랑
+            (0, 200, 0),    # 초록
+            (0, 200, 255),  # 노랑
+            (255, 0, 255),  # 마젠타
+            (255, 200, 0),  # 시안
+            (0, 128, 255),  # 주황
+            (200, 0, 128),  # 보라
+        ]
+        obj_color_map = {name: OBJ_COLORS[i % len(OBJ_COLORS)] for i, name in enumerate(all_obj_names)}
+
+        # 과거 시드 (작은 점 + 시드 번호)
+        for seed_i, prev in enumerate(self._all_previous_seed_positions):
+            for name, info in prev.items():
+                if name not in obj_color_map or not isinstance(info, dict):
+                    continue
+                pos = info.get("position")
+                if pos and pix2robot:
+                    try:
+                        px, py = pix2robot.robot_to_pixel(pos[0], pos[1])
+                        px, py = int(px), int(py)
+                        color = obj_color_map[name]
+                        cv2.circle(result, (px, py), 5, color, -1, cv2.LINE_AA)
+                        cv2.circle(result, (px, py), 5, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.putText(result, f"s{seed_i+1}", (px + 7, py + 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
+                    except Exception:
+                        pass
+
+        # 현재 시드 (큰 점 + 라벨)
+        for name, info in new_positions.items():
+            if name not in obj_color_map or not isinstance(info, dict):
+                continue
+            if not _is_grippable(info.get("bbox_px")):
+                continue
+            pos = info.get("position")
+            if pos and pix2robot:
+                try:
+                    px, py = pix2robot.robot_to_pixel(pos[0], pos[1])
+                    px, py = int(px), int(py)
+                    color = obj_color_map[name]
+                    cv2.circle(result, (px, py), 9, color, -1, cv2.LINE_AA)
+                    cv2.circle(result, (px, py), 9, (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.putText(result, f"s{seed_index+1}", (px + 11, py + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+                except Exception:
+                    pass
+
+        # 범례: 객체별 색상
+        img_h = result.shape[0]
+        y_offset = img_h - 15 * len(all_obj_names) - 10
+        for i, name in enumerate(all_obj_names):
+            color = obj_color_map[name]
+            y = y_offset + i * 15
+            cv2.circle(result, (15, y), 5, color, -1, cv2.LINE_AA)
+            cv2.putText(result, name, (25, y + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+
+        cv2.putText(result, f"Seed {seed_index+1} | {len(self._all_previous_seed_positions)} past seeds",
+                    (10, img_h - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+
+        out_path = str(Path(save_dir) / "seed_visualization_point.jpg")
+        cv2.imwrite(out_path, result)
+        print(f"  [SeedGen] Point visualization saved: {out_path}")
 
     def _build_batch_positions(self, random_targets: Dict, obstacles: Dict, pix2robot=None) -> Dict:
         """랜덤 타겟과 obstacle을 합쳐 positions dict 구성. pixel 필드도 갱신."""
@@ -2873,6 +3032,20 @@ class ForwardAndResetPipeline:
         self.total_episodes = num_episodes
         episodes_per_seed = max(1, num_episodes // self.num_random_seeds)
 
+        # 세션 설정 저장 (최초 생성 시만, resume 시 덮어쓰지 않음)
+        config_path = Path(session_dir) / "session_config.json"
+        if not config_path.exists():
+            session_config = {
+                "num_episodes": num_episodes,
+                "num_random_seeds": self.num_random_seeds,
+                "episodes_per_seed": episodes_per_seed,
+                "instruction": instruction,
+                "objects": objects,
+            }
+            with open(config_path, 'w') as f:
+                json.dump(session_config, f, indent=2)
+            print(f"  [Session] Config saved: {config_path}")
+
         all_results = {
             'num_episodes': num_episodes,
             'instruction': instruction,
@@ -2926,6 +3099,31 @@ class ForwardAndResetPipeline:
         with open(summary_path, 'w', encoding='utf-8') as f:
             json.dump(summary_data, f, indent=2, ensure_ascii=False)
         print(f"\n[Session Summary] Saved to: {summary_path}")
+
+        # 최종 시드 시각화 (new_seed 없이 — 모든 시드 분포 확인용)
+        if self._all_previous_seed_positions and self.num_random_seeds > 1:
+            try:
+                from pix2robot_calibrator import Pix2RobotCalibrator
+                pix2robot = None
+                calib_path = Path(__file__).parent / "robot_configs" / "pix2robot_matrices" / f"robot{self.robot_id}_pix2robot_data.npz"
+                if calib_path.exists():
+                    pix2robot = Pix2RobotCalibrator(robot_id=self.robot_id)
+                    if not pix2robot.load(str(calib_path)):
+                        pix2robot = None
+
+                last_seed_idx = len(self._all_previous_seed_positions) - 1
+                final_save_dir = str(Path(session_dir) / f"seed_{last_seed_idx+1:02d}_setup")
+                Path(final_save_dir).mkdir(parents=True, exist_ok=True)
+                # new_positions를 빈 dict로 → 초록 bbox 없음
+                self._visualize_seed_positions(
+                    save_dir=final_save_dir,
+                    new_positions={},
+                    seed_index=last_seed_idx,
+                    pix2robot=pix2robot,
+                )
+                print(f"  [Session] Final seed visualization saved")
+            except Exception as e:
+                print(f"  [Session] Warning: Final seed visualization failed: {e}")
 
         if self.record_dataset:
             self._finalize_recording()
@@ -3016,13 +3214,13 @@ class ForwardAndResetPipeline:
                 _next_idx = next_batch_index
                 _sp = seed_positions
                 _sd = session_dir
-                def _make_next_seed(next_idx=_next_idx, sp=_sp, sd=_sd):
+                def _make_next_seed(next_idx=_next_idx, sp=_sp, sd=_sd, current_positions=None):
                     if sp[0] is None and self.first_episode_positions is not None:
                         sp[0] = copy.deepcopy(self.first_episode_positions)
                         self._all_previous_seed_positions.append(sp[0])
                     if sp[next_idx] is None:
                         print(f"\n{MAGENTA}  [Seed Transition] Generating seed_{next_idx+1}...{RESET}")
-                        sp[next_idx] = self._generate_seed_positions(sd, next_idx)
+                        sp[next_idx] = self._generate_seed_positions(sd, next_idx, current_positions=current_positions)
                     return sp[next_idx]
                 pre_reset_cb = _make_next_seed
 
@@ -3150,6 +3348,23 @@ class ForwardAndResetPipeline:
                 break
 
         if first_incomplete is None:
+            # 설정 불일치 감지: session_config.json 또는 실제 데이터에서 원래 설정 확인
+            config_path = Path(session_dir) / "session_config.json"
+            if config_path.exists():
+                with open(config_path) as f:
+                    orig = json.load(f)
+                orig_eps = orig.get("num_episodes", num_episodes)
+                orig_seeds = orig.get("num_random_seeds", self.num_random_seeds)
+                if orig_eps != num_episodes or orig_seeds != self.num_random_seeds:
+                    print(f"\n{RED}{BOLD}  [Config Mismatch] 원래 세션 설정: NUM_EPISODES={orig_eps}, NUM_RANDOM_SEEDS={orig_seeds}{RESET}")
+                    print(f"{RED}  현재 설정: NUM_EPISODES={num_episodes}, NUM_RANDOM_SEEDS={self.num_random_seeds}{RESET}")
+                    print(f"{RED}  → run_forward_and_reset.sh에서 NUM_EPISODES={orig_eps}, NUM_RANDOM_SEEDS={orig_seeds}로 맞춰주세요.{RESET}")
+            else:
+                # session_config.json 없는 이전 세션: 실제 데이터에서 추정
+                actual_episodes = len(list(Path(session_dir).glob("episode_*")))
+                if actual_episodes > num_episodes:
+                    print(f"\n{RED}{BOLD}  [Config Mismatch] Session has {actual_episodes} episodes but NUM_EPISODES={num_episodes}, NUM_RANDOM_SEEDS={self.num_random_seeds}{RESET}")
+                    print(f"{RED}  → run_forward_and_reset.sh의 NUM_EPISODES와 NUM_RANDOM_SEEDS를 원래 세션 설정으로 맞춰주세요.{RESET}")
             print(f"\n{GREEN}  All batches complete, nothing to resume{RESET}")
         else:
             # seed 확보 + restore

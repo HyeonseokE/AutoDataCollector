@@ -549,7 +549,7 @@ def lerobot_reset_code_gen_multi_turn(
     codegen_model: str = None,
     skip_codegen: bool = False,
     canonical_labels: List[str] = None,
-) -> Tuple[str, Dict, Dict, Dict, Dict]:
+) -> Tuple[str, Dict, Dict, Dict, Dict, Dict]:
     """
     VLM Multi-Turn Reset 코드 생성 파이프라인.
 
@@ -1005,4 +1005,15 @@ def lerobot_reset_code_gen_multi_turn(
         },
     }
 
-    return code, current_positions, target_positions, grippable_objects, obstacle_objects
+    # Multi-turn info 수집 (forward와 동일한 구조)
+    reset_multi_turn_info = {
+        "turn0_response": turn0_resp,
+        "turn1_response": turn1_resp,
+        "turn1_parsed": valid_objects,
+        "all_points": all_points,
+        "crop_responses": crop_responses,
+        "detected_objects": valid_objects,
+        "crop_dir": crop_dir,
+    }
+
+    return code, current_positions, target_positions, grippable_objects, obstacle_objects, reset_multi_turn_info

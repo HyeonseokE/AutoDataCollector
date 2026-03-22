@@ -177,6 +177,8 @@ def cleanup_dataset_for_resume(
     from lerobot.datasets.dataset_tools import delete_episodes
 
     temp_dir = dataset_path.parent / f"{dataset_path.name}_cleanup_temp"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
     try:
         new_dataset = delete_episodes(
             dataset=dataset,

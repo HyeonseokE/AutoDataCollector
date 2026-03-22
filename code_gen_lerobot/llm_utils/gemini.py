@@ -148,40 +148,47 @@ def gemini_chat_send(
         turn_label: 로그에 표시할 턴 라벨 (예: "Turn 0", "Crop: male hinge")
 
     Returns:
-        LLM 응답 텍스트
+        LLM 응답 텍스트. usage_metadata는 resp._last_usage에 저장.
     """
     start_time = time.time()
 
     contents = _build_contents(turn)
     resp = _send_with_retry(chat, contents, gen_config)
 
+    elapsed = time.time() - start_time
+
+    # usage 추출
+    usage_dict = {"inference_time": elapsed, "in": 0, "out": 0, "think": 0, "total": 0}
+    try:
+        usage = resp.usage_metadata
+        if hasattr(usage, 'prompt_token_count') and usage.prompt_token_count:
+            usage_dict["in"] = usage.prompt_token_count
+        if hasattr(usage, 'candidates_token_count') and usage.candidates_token_count:
+            usage_dict["out"] = usage.candidates_token_count
+        if hasattr(usage, 'thoughts_token_count') and usage.thoughts_token_count:
+            usage_dict["think"] = usage.thoughts_token_count
+        elif hasattr(usage, 'thinking_token_count') and usage.thinking_token_count:
+            usage_dict["think"] = usage.thinking_token_count
+        if hasattr(usage, 'total_token_count') and usage.total_token_count:
+            usage_dict["total"] = usage.total_token_count
+    except Exception:
+        pass
+
     if check_time:
-        elapsed = time.time() - start_time
         n_images = (1 if turn.get("image_path") else 0) + len(turn.get("image_paths", []))
         img_str = f" + {n_images} image(s)" if n_images > 0 else ""
         label = f" [{turn_label}]" if turn_label else ""
-        # Token usage breakdown
-        token_str = ""
-        try:
-            usage = resp.usage_metadata
-            parts = []
-            if hasattr(usage, 'prompt_token_count') and usage.prompt_token_count:
-                parts.append(f"in={usage.prompt_token_count}")
-            if hasattr(usage, 'candidates_token_count') and usage.candidates_token_count:
-                parts.append(f"out={usage.candidates_token_count}")
-            if hasattr(usage, 'thoughts_token_count') and usage.thoughts_token_count:
-                parts.append(f"think={usage.thoughts_token_count}")
-            elif hasattr(usage, 'thinking_token_count') and usage.thinking_token_count:
-                parts.append(f"think={usage.thinking_token_count}")
-            if hasattr(usage, 'total_token_count') and usage.total_token_count:
-                parts.append(f"total={usage.total_token_count}")
-            if parts:
-                token_str = f" ({', '.join(parts)})"
-        except Exception:
-            pass
+        parts = [f"{k}={v}" for k, v in usage_dict.items() if k != "inference_time" and v > 0]
+        token_str = f" ({', '.join(parts)})" if parts else ""
         print(f"[GEMINI/Chat]{label}{img_str}: {elapsed:.2f}s{token_str}")
 
+    # 마지막 usage를 접근 가능하게 저장
+    gemini_chat_send._last_usage = usage_dict
+
     return resp.text
+
+# 초기화
+gemini_chat_send._last_usage = None
 
 
 # ============================================================
@@ -276,7 +283,7 @@ def gemini_chat(
             print(f"[GEMINI/Chat] Turn {i+1}/{len(turns)}{img_str}: {turn_elapsed:.2f}s")
 
     if check_time:
-        total_elapsed = time.time() - start_time
-        print(f"[GEMINI/Chat] Total ({len(turns)} turns): {total_elapsed:.2f}s")
+        total_inference_time = time.time() - start_time
+        print(f"[GEMINI/Chat] Total ({len(turns)} turns): {total_inference_time:.2f}s")
 
     return responses

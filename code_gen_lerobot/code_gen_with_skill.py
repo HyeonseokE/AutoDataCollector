@@ -507,6 +507,59 @@ def lerobot_code_gen_multi_turn(
     print(f"  Model: {llm_model}")
     print(f"  Image: {image_path}")
 
+    # 토큰/시간 통계 누적
+    _usage_stats = {"total_inference_time": 0.0, "total_in": 0, "total_out": 0, "total_think": 0, "total_tokens": 0}
+    _turn_costs = []  # 턴별 비용 기록
+    def _accumulate_usage(turn_name=""):
+        u = gemini_chat_send._last_usage
+        if u:
+            _usage_stats["total_inference_time"] += u.get("inference_time", 0)
+            _usage_stats["total_in"] += u.get("in", 0)
+            _usage_stats["total_out"] += u.get("out", 0)
+            _usage_stats["total_think"] += u.get("think", 0)
+            _usage_stats["total_tokens"] += u.get("total", 0)
+            _turn_costs.append({
+                "turn": turn_name,
+                "inference_time_s": round(u.get("inference_time", 0), 2),
+                "input_tokens": u.get("in", 0),
+                "output_tokens": u.get("out", 0),
+                "thinking_tokens": u.get("think", 0),
+                "total_tokens": u.get("total", 0),
+            })
+
+    def _build_llm_cost(turns, stats, perception_model, codegen_model):
+        """턴별 비용을 perception/codegen으로 분류하여 구조화"""
+        perception_turns = [t for t in turns if t["turn"] != "Code Gen"]
+        codegen_turns = [t for t in turns if t["turn"] == "Code Gen"]
+        def _sum(ts, key): return sum(t.get(key, 0) for t in ts)
+        return {
+            "perception": {
+                "model": perception_model,
+                "inference_time_s": round(_sum(perception_turns, "inference_time_s"), 2),
+                "input_tokens": _sum(perception_turns, "input_tokens"),
+                "output_tokens": _sum(perception_turns, "output_tokens"),
+                "thinking_tokens": _sum(perception_turns, "thinking_tokens"),
+                "total_tokens": _sum(perception_turns, "total_tokens"),
+                "turns": perception_turns,
+            },
+            "codegen": {
+                "model": codegen_model,
+                "inference_time_s": round(_sum(codegen_turns, "inference_time_s"), 2),
+                "input_tokens": _sum(codegen_turns, "input_tokens"),
+                "output_tokens": _sum(codegen_turns, "output_tokens"),
+                "thinking_tokens": _sum(codegen_turns, "thinking_tokens"),
+                "total_tokens": _sum(codegen_turns, "total_tokens"),
+                "turns": codegen_turns,
+            },
+            "total": {
+                "inference_time_s": round(stats["total_inference_time"], 2),
+                "input_tokens": stats["total_in"],
+                "output_tokens": stats["total_out"],
+                "thinking_tokens": stats["total_think"],
+                "total_tokens": stats["total_tokens"],
+            },
+        }
+
     # CAD 이미지 수집 (Step 6)
     cad_paths = []
     if cad_image_dirs:
@@ -530,6 +583,7 @@ def lerobot_code_gen_multi_turn(
             "image_paths": cad_paths,
         },
         turn_label="Turn 0")
+    _accumulate_usage("Turn 0")
     print(f"  {turn0_resp[:300]}{'...' if len(turn0_resp) > 300 else ''}")
 
     # ── Turn 1: BBox Detection (이미지 재전송) — test6 방식 ──
@@ -550,6 +604,7 @@ def lerobot_code_gen_multi_turn(
     if has_side_view:
         turn1_msg["image_paths"] = [side_view_image]
     turn1_resp = gemini_chat_send(chat, gen_config, turn1_msg, turn_label="Turn 1")
+    _accumulate_usage("Turn 1")
     print(f"  {turn1_resp[:300]}{'...' if len(turn1_resp) > 300 else ''}")
 
     # Parse bboxes (dual-view or single-view)
@@ -675,6 +730,7 @@ def lerobot_code_gen_multi_turn(
 
         resp = gemini_chat_send(chat, gen_config, turn2_msg,
             turn_label=f"Crop: {label}")
+        _accumulate_usage(f"Crop: {label}")
         crop_responses.append({"label": label, "response": resp})
         print(f"    {resp[:200]}{'...' if len(resp) > 200 else ''}")
 
@@ -806,6 +862,7 @@ def lerobot_code_gen_multi_turn(
 
         turn_test_resp = gemini_chat_send(chat, gen_config, turn_msg,
             turn_label="Waypoint Trajectory")
+        _accumulate_usage("Waypoint Trajectory")
         print(f"    {turn_test_resp[:300]}{'...' if len(turn_test_resp) > 300 else ''}")
 
         parsed_test = _parse_json_from_response(turn_test_resp)
@@ -863,22 +920,39 @@ def lerobot_code_gen_multi_turn(
         summary_resp = gemini_chat_send(chat, gen_config,
             {"text": context_summary_prompt()},
             turn_label="Context Summary")
+        _accumulate_usage("Context Summary")
         print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
 
         # ── Code Generation (새 Session 2) ──
         session2_model = codegen_model or llm_model
         print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET}")
+
+        # Generate workspace-annotated image for codegen
+        codegen_image = image_path
+        try:
+            from .reset_execution.workspace import draw_workspace_on_image
+            raw_img = cv2.imread(image_path)
+            if raw_img is not None:
+                annotated = draw_workspace_on_image(raw_img, robot_id=robot_id)
+                annotated_path = str(Path(image_path).parent / "workspace_annotated_codegen.jpg")
+                cv2.imwrite(annotated_path, annotated)
+                codegen_image = annotated_path
+                print(f"  Workspace annotated image: {annotated_path}")
+        except Exception as e:
+            print(f"  Warning: workspace annotation failed: {e}")
+
         codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT)
         codegen_msg = {
             "text": codegen_with_context_prompt(
                 instruction=instruction, robot_id=robot_id,
                 all_points=all_points, context_summary=summary_resp,
                 positions=positions),
-            "image_path": image_path,
+            "image_path": codegen_image,
         }
         codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
             codegen_msg,
             turn_label="Code Gen")
+        _accumulate_usage("Code Gen")
         code = extract_code_from_response(codegen_resp)
         assert code, "Failed to extract code from Code Gen response"
 
@@ -933,11 +1007,14 @@ def lerobot_code_gen_multi_turn(
         "turn_test_sideview_waypoints": turn_test_sideview_waypoints,
         "side_view_image": side_view_image if has_side_view else None,
         "context_summary": summary_resp,
+        "llm_cost": _build_llm_cost(_turn_costs, _usage_stats, llm_model, codegen_model or llm_model),
     }
 
     n_turns = 2 + len(valid_objects) + 1
     print(GRAY + "=" * line_width + RESET)
     print(LIGHT_GREEN + f"Crop-then-Point completed ({n_turns} turns).".center(line_width) + RESET)
+    s = _usage_stats
+    print(f"  Total: {s['total_inference_time']:.1f}s, in={s['total_in']}, out={s['total_out']}, think={s['total_think']}, tokens={s['total_tokens']}")
     print(GRAY + "=" * line_width + RESET)
 
     return code, positions, multi_turn_info

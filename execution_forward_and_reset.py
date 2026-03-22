@@ -1478,6 +1478,14 @@ class ForwardAndResetPipeline:
                 import json as _json
                 with open(mt_info_path, 'w', encoding='utf-8') as f:
                     _json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
+
+                # LLM 비용 통계 저장 (Judge 추가는 Judge 실행 후)
+                llm_cost = self.multi_turn_info.get("llm_cost")
+                if llm_cost:
+                    cost_path = Path(forward_dir) / "llm_cost.json"
+                    with open(cost_path, 'w') as f:
+                        _json.dump({"phase": "forward", **llm_cost}, f, indent=2)
+                    print(f"  LLM cost saved: {cost_path}")
                 print(f"  Multi-turn info saved: {mt_info_path}")
 
                 # [신규] Turn 시각화 이미지 저장
@@ -1638,6 +1646,35 @@ class ForwardAndResetPipeline:
                 pred_color = GREEN if judge_prediction == "TRUE" else RED if judge_prediction == "FALSE" else YELLOW
                 print(f"  Prediction: {pred_color}{judge_prediction}{RESET}")
                 print(f"  Reasoning: {reasoning[:100]}...")
+                # Judge 비용을 llm_cost.json에 추가
+                try:
+                    from judge.vlm import _call_gemini_vlm
+                    judge_usage = getattr(_call_gemini_vlm, '_last_usage', None)
+                    if judge_usage:
+                        cost_path = Path(forward_dir) / "llm_cost.json"
+                        if cost_path.exists():
+                            with open(cost_path) as f:
+                                cost_data = json.load(f)
+                        else:
+                            cost_data = {"phase": "forward"}
+                        cost_data["judge"] = {
+                            "model": judge_usage.get("model", self.judge_model),
+                            "inference_time_s": judge_usage.get("inference_time_s", 0),
+                            "input_tokens": judge_usage.get("in", 0),
+                            "output_tokens": judge_usage.get("out", 0),
+                            "total_tokens": judge_usage.get("total", 0),
+                        }
+                        # total에 judge 비용 합산
+                        if "total" in cost_data:
+                            cost_data["total"]["inference_time_s"] = round(
+                                cost_data["total"]["inference_time_s"] + judge_usage.get("inference_time_s", 0), 2)
+                            cost_data["total"]["input_tokens"] += judge_usage.get("in", 0)
+                            cost_data["total"]["output_tokens"] += judge_usage.get("out", 0)
+                            cost_data["total"]["total_tokens"] += judge_usage.get("total", 0)
+                        with open(cost_path, 'w') as f:
+                            json.dump(cost_data, f, indent=2)
+                except Exception:
+                    pass
             else:
                 print(f"  {YELLOW}Skipped (missing images){RESET}")
 
@@ -1820,6 +1857,18 @@ class ForwardAndResetPipeline:
                     with open(reset_positions_path, 'w') as f:
                         json.dump(reset_positions_data, f, indent=2, default=str)
                     print(f"  Reset positions saved: {reset_positions_path}")
+
+                    # LLM 비용 통계 저장 (reset)
+                    try:
+                        from code_gen_lerobot.reset_execution.code_gen import lerobot_reset_code_gen_multi_turn
+                        reset_cost = getattr(lerobot_reset_code_gen_multi_turn, '_last_llm_cost', None)
+                        if reset_cost:
+                            cost_path = Path(reset_dir) / "llm_cost.json"
+                            with open(cost_path, 'w') as f:
+                                json.dump({"phase": "reset", **reset_cost}, f, indent=2)
+                            print(f"  LLM cost saved: {cost_path}")
+                    except Exception:
+                        pass
 
                     print("\n" + "-" * 40)
                     print("Generated Reset Code (preview):")

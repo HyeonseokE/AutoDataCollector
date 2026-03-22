@@ -616,6 +616,26 @@ def lerobot_reset_code_gen_multi_turn(
     print(MAGENTA + f"LeRobot {mode_str} (Multi-Turn VLM)".center(line_width) + RESET_COLOR)
     print(GRAY + "=" * line_width + RESET_COLOR)
     print(f"  Model: {llm_model}")
+
+    # 토큰/시간 통계 누적
+    _usage_stats = {"total_inference_time": 0.0, "total_in": 0, "total_out": 0, "total_think": 0, "total_tokens": 0}
+    _turn_costs = []
+    def _accumulate_usage(turn_name=""):
+        u = gemini_chat_send._last_usage
+        if u:
+            _usage_stats["total_inference_time"] += u.get("inference_time", 0)
+            _usage_stats["total_in"] += u.get("in", 0)
+            _usage_stats["total_out"] += u.get("out", 0)
+            _usage_stats["total_think"] += u.get("think", 0)
+            _usage_stats["total_tokens"] += u.get("total", 0)
+            _turn_costs.append({
+                "turn": turn_name,
+                "inference_time_s": round(u.get("inference_time", 0), 2),
+                "input_tokens": u.get("in", 0),
+                "output_tokens": u.get("out", 0),
+                "thinking_tokens": u.get("think", 0),
+                "total_tokens": u.get("total", 0),
+            })
     print(f"  Current image: {current_state_image_path}")
     print(f"  Initial image: {initial_state_image_path}")
 
@@ -695,6 +715,7 @@ def lerobot_reset_code_gen_multi_turn(
             "image_paths": [initial_state_image_path],
         },
         turn_label="Turn 0 (Reset)")
+    _accumulate_usage("Turn 0")
     print(f"  {turn0_resp[:300]}{'...' if len(turn0_resp) > 300 else ''}")
 
     # ── Turn 1: BBox Detection (Reset 전용 — Forward 라벨 강제 사용) ──
@@ -712,6 +733,7 @@ def lerobot_reset_code_gen_multi_turn(
             "image_path": current_state_image_path,  # 원본 이미지 (시각화 없음)
         },
         turn_label="Turn 1 (Reset)")
+    _accumulate_usage("Turn 1")
     print(f"  {turn1_resp[:300]}{'...' if len(turn1_resp) > 300 else ''}")
 
     # Parse bboxes
@@ -777,6 +799,7 @@ def lerobot_reset_code_gen_multi_turn(
                 "image_path": crop_path,
             },
             turn_label=f"Crop: {label}")
+        _accumulate_usage(f"Crop: {label}")
         crop_responses.append({"label": label, "response": resp})
         print(f"    {resp[:200]}{'...' if len(resp) > 200 else ''}")
 
@@ -915,6 +938,7 @@ def lerobot_reset_code_gen_multi_turn(
         summary_resp = gemini_chat_send(chat, gen_config,
             {"text": reset_context_summary_prompt()},
             turn_label="Context Summary (Reset)")
+        _accumulate_usage("Context Summary")
         print(f"  Summary: {summary_resp[:200]}{'...' if len(summary_resp) > 200 else ''}")
 
         # ── Code Generation (새 Session 2) ──
@@ -935,6 +959,7 @@ def lerobot_reset_code_gen_multi_turn(
                 all_points=all_points,
             )},
             turn_label="CodeGen (Reset)")
+        _accumulate_usage("CodeGen")
 
         code = extract_code_from_response(codegen_resp)
         assert code, "Failed to extract code from CodeGen response"
@@ -942,6 +967,41 @@ def lerobot_reset_code_gen_multi_turn(
     # Summary
     print(GRAY + "=" * line_width + RESET_COLOR)
     print(LIGHT_GREEN + f"{mode_str} multi-turn code gen completed.".center(line_width) + RESET_COLOR)
+    s = _usage_stats
+    print(f"  Total: {s['total_inference_time']:.1f}s, in={s['total_in']}, out={s['total_out']}, think={s['total_think']}, tokens={s['total_tokens']}")
     print(GRAY + "=" * line_width + RESET_COLOR)
+
+    # llm_cost를 모듈 변수로 저장 (호출부에서 접근 가능)
+    # perception/codegen 분류
+    perception_turns = [t for t in _turn_costs if t["turn"] != "CodeGen"]
+    codegen_turns = [t for t in _turn_costs if t["turn"] == "CodeGen"]
+    def _sum(ts, key): return sum(t.get(key, 0) for t in ts)
+    lerobot_reset_code_gen_multi_turn._last_llm_cost = {
+        "perception": {
+            "model": llm_model,
+            "inference_time_s": round(_sum(perception_turns, "inference_time_s"), 2),
+            "input_tokens": _sum(perception_turns, "input_tokens"),
+            "output_tokens": _sum(perception_turns, "output_tokens"),
+            "thinking_tokens": _sum(perception_turns, "thinking_tokens"),
+            "total_tokens": _sum(perception_turns, "total_tokens"),
+            "turns": perception_turns,
+        },
+        "codegen": {
+            "model": codegen_model or llm_model,
+            "inference_time_s": round(_sum(codegen_turns, "inference_time_s"), 2),
+            "input_tokens": _sum(codegen_turns, "input_tokens"),
+            "output_tokens": _sum(codegen_turns, "output_tokens"),
+            "thinking_tokens": _sum(codegen_turns, "thinking_tokens"),
+            "total_tokens": _sum(codegen_turns, "total_tokens"),
+            "turns": codegen_turns,
+        },
+        "total": {
+            "inference_time_s": round(_usage_stats["total_inference_time"], 2),
+            "input_tokens": _usage_stats["total_in"],
+            "output_tokens": _usage_stats["total_out"],
+            "thinking_tokens": _usage_stats["total_think"],
+            "total_tokens": _usage_stats["total_tokens"],
+        },
+    }
 
     return code, current_positions, target_positions, grippable_objects, obstacle_objects

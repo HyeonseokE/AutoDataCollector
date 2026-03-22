@@ -245,9 +245,26 @@ def _call_gemini_vlm(
                 print(f"  [Gemini VLM] Rate limit, retrying in {delay}s...")
                 time.sleep(delay)
 
+        elapsed = time.time() - start_time
+
+        # usage 추출 + 저장
+        usage_dict = {"model": model, "inference_time_s": round(elapsed, 2), "in": 0, "out": 0, "total": 0}
+        try:
+            usage = response.usage_metadata
+            if hasattr(usage, 'prompt_token_count') and usage.prompt_token_count:
+                usage_dict["in"] = usage.prompt_token_count
+            if hasattr(usage, 'candidates_token_count') and usage.candidates_token_count:
+                usage_dict["out"] = usage.candidates_token_count
+            if hasattr(usage, 'total_token_count') and usage.total_token_count:
+                usage_dict["total"] = usage.total_token_count
+        except Exception:
+            pass
+        _call_gemini_vlm._last_usage = usage_dict
+
         if check_time:
-            elapsed = time.time() - start_time
-            print(f"[Gemini VLM] Model: {model}, Response time: {elapsed:.2f}s")
+            parts = [f"{k}={v}" for k, v in usage_dict.items() if k not in ("model", "inference_time_s") and v > 0]
+            token_str = f" ({', '.join(parts)})" if parts else ""
+            print(f"[Gemini VLM] Model: {model}, Response time: {elapsed:.2f}s{token_str}")
 
         return response.text
 

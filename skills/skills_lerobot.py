@@ -333,11 +333,12 @@ class LeRobotSkills:
                 self._log(f"  Compensation config: {compensation_file}")
 
         # Load Pix2Robot calibrator (if available)
+        robot_id_int = int(robot_id_match.group(1)) if robot_id_match else 3
         pix2robot_path = Path(f"robot_configs/pix2robot_matrices/{robot_id}_pix2robot_data.npz")
         if pix2robot_path.exists():
             try:
                 from pix2robot_calibrator.calibrator import Pix2RobotCalibrator
-                self.pix2robot = Pix2RobotCalibrator()
+                self.pix2robot = Pix2RobotCalibrator(robot_id=robot_id_int)
                 self.pix2robot.load(str(pix2robot_path))
                 self._log(f"  Pix2Robot calibrator loaded: {pix2robot_path}")
             except Exception as e:
@@ -1199,20 +1200,24 @@ class LeRobotSkills:
         u = int(norm_x * self.IMAGE_WIDTH / 1000)
         v = int(norm_y * self.IMAGE_HEIGHT / 1000)
 
+        APPROACH_HEIGHT = 0.20  # 20cm approach height
+
         robot_pos = self.pix2robot.pixel_to_robot(u, v)
-        self._log(f"\nNormalized [{norm_y}, {norm_x}] -> pixel [{u}, {v}] -> robot frame [{robot_pos[0]:.3f}, {robot_pos[1]:.3f}, {robot_pos[2]:.3f}]")
+        # Override z with approach height (pixel only gives x, y on table surface)
+        approach_pos = [robot_pos[0], robot_pos[1], APPROACH_HEIGHT]
+        self._log(f"\nNormalized [{norm_y}, {norm_x}] -> pixel [{u}, {v}] -> robot frame [{robot_pos[0]:.3f}, {robot_pos[1]:.3f}] at approach height {APPROACH_HEIGHT}m")
 
         # Log normalized position for visualization
         self.pixel_move_log.append({
             "pixel": [u, v],
             "normalized": [norm_y, norm_x],
-            "robot_pos": robot_pos,
+            "robot_pos": approach_pos,
             "target_name": target_name or "",
             "skill_description": skill_description or "",
         })
 
         return self.move_to_position(
-            position=robot_pos,
+            position=approach_pos,
             duration=duration,
             maintain_wrist_roll=maintain_wrist_roll,
             maintain_pitch=maintain_pitch,
@@ -1256,7 +1261,10 @@ class LeRobotSkills:
         u = int(norm_x * self.IMAGE_WIDTH / 1000)
         v = int(norm_y * self.IMAGE_HEIGHT / 1000)
 
+        APPROACH_HEIGHT = 0.20  # 20cm approach height
+
         robot_pos = self.pix2robot.pixel_to_robot(u, v)
+        approach_pos = [robot_pos[0], robot_pos[1], APPROACH_HEIGHT]
         self._log(f"\nPlace at normalized [{norm_y}, {norm_x}] -> pixel [{u}, {v}] -> robot frame [{robot_pos[0]:.3f}, {robot_pos[1]:.3f}, {robot_pos[2]:.3f}]")
 
         # Log normalized position for visualization
@@ -1269,7 +1277,7 @@ class LeRobotSkills:
         })
 
         return self.execute_place_object(
-            position=robot_pos,
+            place_position=robot_pos,
             is_table=is_table,
             gripper_open_ratio=gripper_open_ratio,
             target_name=target_name,

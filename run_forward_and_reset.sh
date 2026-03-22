@@ -16,8 +16,8 @@ cd "$SCRIPT_DIR"
 # ============================================================
 
 # # Grasping:                                                                  
-# (1, 성공) pick up the red block and place it on the blue plate
-# (2, 성공) distribute chocolate pies to each plate                           
+# (1, 완료) pick up the red block and place it on the blue plate
+# (2, 완료) distribute chocolate pies to each plate                           
 # (3) clear the table after a meal
 
 # # Arrangement:                                                               
@@ -56,7 +56,7 @@ cd "$SCRIPT_DIR"
 # (3) shake the bottle
 
 ## [필수] 태스크 명령어
-INSTRUCTION="distribute chocolate pies to each plate"
+INSTRUCTION="arrange yellow, red, and green blocks from left to right"
 
 # INSTRUCTION="make sandwich using the ingredients on the table"
 # INSTRUCTION="pick up the red block and place it on the blue dish"
@@ -79,8 +79,8 @@ ROBOT_ID=2
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=40
-NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=30
+NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false

@@ -2323,11 +2323,14 @@ class ForwardAndResetPipeline:
             pass
         workspace = ResetWorkspace(kinematics_engine=kin_engine)
 
-        # 과거 모든 시드 위치 + 현재 초기 위치를 합쳐서 겹침 방지
-        all_initial = dict(self.first_episode_positions)
+        # 과거 시드 위치: 같은 객체끼리만 겹침 비교하도록 _pseed 키 사용
+        # first_episode_positions도 과거 seed (seed_1)이므로 포함
+        all_initial = {}
+        for name, info in self.first_episode_positions.items():
+            all_initial[f"{name}_pseed_init"] = info
         for i, prev_positions in enumerate(self._all_previous_seed_positions):
             for name, info in prev_positions.items():
-                all_initial[f"{name}_seed{i}"] = info
+                all_initial[f"{name}_pseed{i}"] = info
 
         # 랜덤 위치 생성 + dry_run 검증 (최대 10회 재시도)
         reset_code = self.cached_reset_code

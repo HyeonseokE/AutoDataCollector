@@ -813,7 +813,7 @@ class LeRobotSkills:
         )
         self._print_error(self.last_error, description)
 
-        return target_reached or position_error < POSITION_TOLERANCE * 3
+        return target_reached or position_error < POSITION_TOLERANCE * 4  # 20mm 허용
     
     # ========== Robot Tool skills ==========
 

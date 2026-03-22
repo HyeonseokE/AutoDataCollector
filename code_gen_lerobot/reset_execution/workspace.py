@@ -122,7 +122,7 @@ class ResetWorkspace(BaseWorkspace):
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
         max_attempts: int = 500,
-        max_iou: float = 0.5,
+        max_iou: float = 0.3,
     ) -> Optional[List[float]]:
         """
         단일 객체용 랜덤 위치 생성 (reach + FOV + IoU 기반 충돌 검증).
@@ -407,9 +407,16 @@ def generate_random_positions(
         # 이 객체의 bbox 픽셀 크기
         obj_bbox_px = _get_bbox_px(obj_info if isinstance(obj_info, dict) else {})
 
-        # 자기 자신의 현재 위치만 장애물에서 제거 (이동할 거니까)
-        # 초기 위치는 유지 (초기 위치와 겹치면 안 됨)
-        obstacles_for_this = [occ for occ in occupied if occ["name"] != obj_name]
+        # 장애물 필터링:
+        # - 자기 자신의 현재 위치 제거 (이동할 거니까)
+        # - 과거 seed 위치(_pseed): 같은 객체만 유지, 다른 객체는 제거
+        # - 그 외 (obstacle, 현재 seed 내 확정 위치): 전부 유지
+        obstacles_for_this = [
+            occ for occ in occupied
+            if occ["name"] != obj_name and (
+                "_pseed" not in occ["name"] or occ["name"].startswith(obj_name + "_pseed")
+            )
+        ]
 
         # 랜덤 위치 생성 (IK + FOV + IoU 기반 충돌 검증)
         position = workspace.generate_random_position(

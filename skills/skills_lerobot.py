@@ -625,8 +625,10 @@ class LeRobotSkills:
                 try:
                     state_full = self.robot.read_positions(normalize=True)  # 6축 실제 값
                     self.recording_callback(state_full.copy(), full_normalized.copy())
-                except Exception:
-                    pass
+                except Exception as _rec_e:
+                    if not getattr(self, '_rec_err_logged', False):
+                        print(f"\n[Recording] Callback error: {_rec_e}")
+                        self._rec_err_logged = True
 
             if self.verbose:
                 progress = (i + 1) / num_points
@@ -685,8 +687,10 @@ class LeRobotSkills:
                 try:
                     state_full = self.robot.read_positions(normalize=True)  # 6축 실제 값
                     self.recording_callback(state_full.copy(), full_normalized.copy())
-                except Exception:
-                    pass
+                except Exception as _rec_e:
+                    if not getattr(self, '_rec_err_logged', False):
+                        print(f"\n[Recording] Callback error: {_rec_e}")
+                        self._rec_err_logged = True
 
             # Wait for next control step
             next_time = start_time + (i + 1) * (duration / num_steps)
@@ -724,7 +728,7 @@ class LeRobotSkills:
         duration = trajectory.duration
         start_time = time.time()
 
-        POSITION_TOLERANCE = 0.005  # 5mm
+        POSITION_TOLERANCE = 0.007  # 7mm (fail threshold = 7mm * 3 = 21mm)
         MAX_TOTAL_TIME = duration + 2.0
         SETTLE_TIME = 0.2
 
@@ -770,8 +774,10 @@ class LeRobotSkills:
                 try:
                     state_full = self.robot.read_positions(normalize=True)  # 6축 실제 값
                     self.recording_callback(state_full.copy(), full_normalized.copy())
-                except Exception:
-                    pass
+                except Exception as _rec_e:
+                    if not getattr(self, '_rec_err_logged', False):
+                        print(f"\n[Recording] Callback error: {_rec_e}")
+                        self._rec_err_logged = True
 
             # Progress display
             if self.verbose:
@@ -1354,7 +1360,7 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.03  # Minimum pick height (3cm) — gripper can't reach lower without hitting table
+        MIN_PICK_Z = 0.015  # Minimum pick height (1.5cm) — gripper ground margin
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
@@ -1434,7 +1440,7 @@ class LeRobotSkills:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
 
-        MIN_PLACE_Z = 0.03  # Minimum place height (3cm) — robot can't reach lower while holding object
+        MIN_PLACE_Z = 0.015  # Minimum place height (1.5cm) — ground margin
 
         if is_table:
             # Placing on table: use target z (object's own height) as reference

@@ -225,8 +225,8 @@ class ForwardAndResetPipeline:
         self.cached_reset_code: Optional[str] = None
         self.cached_reset_keys: List[str] = []
 
-        # 레코딩 모드 초기화
-        if self.record_dataset:
+        # 레코딩 모드 초기화 (resume 모드는 cleanup 후 초기화)
+        if self.record_dataset and not self.resume_recording:
             self._init_recording()
 
     def _log(self, message: str, step: str = None, tag: str = None) -> str:
@@ -369,6 +369,9 @@ class ForwardAndResetPipeline:
             print(f"[Recording] Recorder initialized successfully")
             print(f"[Recording] Features: {list(self.dataset_recorder.features.keys())}")
 
+            # Signal handler: Ctrl+C 시 finalize() 호출하여 데이터셋 보존
+            self._install_recording_signal_handler()
+
         except ImportError as e:
             print(f"[Recording] Warning: Failed to import record_dataset: {e}")
             print(f"[Recording] Dataset recording will be disabled")
@@ -424,6 +427,22 @@ class ForwardAndResetPipeline:
             except Exception as e:
                 print(f"[Recording] Warning: Failed to disconnect cameras: {e}")
             self.camera_manager = None
+
+    def _install_recording_signal_handler(self) -> None:
+        """Ctrl+C 시 데이터셋 finalize() 호출을 보장하는 signal handler 등록"""
+        import signal
+
+        original_handler = signal.getsignal(signal.SIGINT)
+
+        def _handle_sigint(signum, frame):
+            print(f"\n[Recording] SIGINT received — finalizing dataset...")
+            self._finalize_recording()
+            # 원래 handler 복원 후 재전송 (정상 종료 흐름)
+            signal.signal(signal.SIGINT, original_handler)
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGINT, _handle_sigint)
+        print(f"[Recording] Signal handler installed (Ctrl+C will finalize dataset)")
 
     def capture_frame(self) -> Optional[np.ndarray]:
         """현재 프레임 캡처 (camera 또는 camera_manager 사용)"""
@@ -2974,6 +2993,27 @@ class ForwardAndResetPipeline:
         print(f"  Resume from: {session_dir}")
         print(f"  Save Dir: {session_dir}")
         print(MAGENTA + "=" * 70 + RESET)
+
+        # --------------------------------------------------------
+        # 데이터셋 정리: 재취득 대상 에피소드를 데이터셋에서 제거
+        # --------------------------------------------------------
+        if self.record_dataset:
+            if self.dataset_repo_id:
+                try:
+                    from record_dataset.cleanup import cleanup_dataset_for_resume
+                    cleanup_stats = cleanup_dataset_for_resume(
+                        session_dir=session_dir,
+                        repo_id=self.dataset_repo_id,
+                    )
+                    print(f"\n[Cleanup] Result: {cleanup_stats['dataset_episodes_before']} → {cleanup_stats['dataset_episodes_after']} episodes")
+                    if cleanup_stats['deleted_indices']:
+                        print(f"[Cleanup] Deleted dataset indices: {cleanup_stats['deleted_indices']}")
+                except Exception as e:
+                    print(f"\n{YELLOW}[Cleanup] Warning: Dataset cleanup failed: {e}{RESET}")
+                    import traceback; traceback.print_exc()
+
+            # cleanup 후 레코딩 초기화 (resume=True로 append 모드)
+            self._init_recording()
 
         # --------------------------------------------------------
         # 통합 에피소드 루프: 성공 slot 스킵, 실패/미시도 slot 실행

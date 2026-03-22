@@ -67,8 +67,23 @@ class RealSenseCamera:
     def is_connected(self) -> bool:
         return self._is_connected
 
+    def _hardware_reset(self) -> None:
+        """RealSense 하드웨어 리셋 후 재초기화."""
+        import time
+        print(f"[RealSense:{self.name}] Hardware reset...")
+        try:
+            self.pipeline.stop()
+        except Exception:
+            pass
+        ctx = rs.context()
+        devs = ctx.query_devices()
+        if len(devs) > 0:
+            devs[0].hardware_reset()
+        time.sleep(5)
+        self._is_connected = False
+
     def connect(self, warmup: bool = True) -> None:
-        """카메라 연결 및 스트림 시작
+        """카메라 연결 및 스트림 시작 (실패 시 자동 리셋 후 재시도).
 
         카메라 식별:
         - serial_number가 지정된 경우 해당 카메라 연결
@@ -78,6 +93,23 @@ class RealSenseCamera:
             print(f"[RealSense:{self.name}] Already connected")
             return
 
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                self._connect_pipeline(warmup)
+                return
+            except RuntimeError as e:
+                if "Frame didn't arrive" in str(e) or "wait_for_frames" in str(e):
+                    if attempt < max_retries:
+                        print(f"[RealSense:{self.name}] Frame timeout, resetting device (retry {attempt + 1}/{max_retries})...")
+                        self._hardware_reset()
+                    else:
+                        raise
+                else:
+                    raise
+
+    def _connect_pipeline(self, warmup: bool = True) -> None:
+        """카메라 파이프라인 연결 (내부 구현)."""
         self.pipeline = rs.pipeline()
         rs_config = rs.config()
 
@@ -118,7 +150,7 @@ class RealSenseCamera:
 
         self._is_connected = True
 
-        # Warmup (처음 몇 프레임 버리기)
+        # Warmup (처음 몇 프레임 버리기 — 여기서 Frame timeout 발생 가능)
         if warmup:
             for _ in range(30):
                 self.pipeline.wait_for_frames()

@@ -29,8 +29,41 @@ class RealSenseD435:
 
         self._is_running = False
 
+    def _hardware_reset(self) -> None:
+        """RealSense 하드웨어 리셋 후 재초기화."""
+        import time
+        print("[Camera] Hardware reset...")
+        try:
+            self.pipeline.stop()
+        except Exception:
+            pass
+        ctx = rs.context()
+        devs = ctx.query_devices()
+        if len(devs) > 0:
+            devs[0].hardware_reset()
+        time.sleep(5)
+        self.pipeline = rs.pipeline()
+        self.config = rs.config()
+
     def start(self) -> None:
-        """카메라 스트림 시작"""
+        """카메라 스트림 시작 (실패 시 자동 리셋 후 재시도)."""
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                self._start_pipeline()
+                return
+            except RuntimeError as e:
+                if "Frame didn't arrive" in str(e) or "wait_for_frames" in str(e):
+                    if attempt < max_retries:
+                        print(f"[Camera] Frame timeout, resetting device (retry {attempt + 1}/{max_retries})...")
+                        self._hardware_reset()
+                    else:
+                        raise
+                else:
+                    raise
+
+    def _start_pipeline(self) -> None:
+        """카메라 파이프라인 시작 (내부 구현)."""
         # RGB와 Depth 스트림 설정
         self.config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
         self.config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
@@ -40,6 +73,9 @@ class RealSenseD435:
 
         # Depth를 RGB에 정렬
         self.align = rs.align(rs.stream.color)
+
+        # Warmup — 여기서 Frame timeout이 발생할 수 있음
+        self.pipeline.wait_for_frames(timeout_ms=5000)
 
         # 카메라 내부 파라미터 가져오기
         color_stream = profile.get_stream(rs.stream.color)

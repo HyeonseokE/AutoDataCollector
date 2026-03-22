@@ -56,7 +56,7 @@ cd "$SCRIPT_DIR"
 # (3) shake the bottle
 
 ## [필수] 태스크 명령어
-INSTRUCTION="arrange yellow, red, and purple blocks from left to right"
+INSTRUCTION="arrange yellow, red, and purple blocks in a line from left to right"
 
 # INSTRUCTION="make sandwich using the ingredients on the table"
 # INSTRUCTION="pick up the red block and place it on the blue dish"

@@ -92,6 +92,15 @@ Image Layout (top-view, normalized 0–1000 coordinate system):
   - Right half (x > 500): right arm's reachable area.
   - Objects near the left/right edges are close to the robot arms and may have limited clearance for grasping.
 
+Workspace Constraints:
+  - The provided top-view image includes workspace annotations:
+    a green rectangle showing the table boundary, and cyan arcs showing each arm's reachable range.
+  - When using `move_to_pixel` or `execute_place_at_pixel`, you MUST specify positions
+    that fall WITHIN the reachable area (inside the cyan arcs and green rectangle).
+  - The reachable area is roughly y ≈ 150–750, x ≈ 100–900 in normalized coordinates.
+    Avoid placing objects near the image edges (y < 150 or y > 750) as these are
+    outside the robot's reach or at the table boundary.
+
 Grasp Guidelines:                           
   - Always open the gripper before approaching the grasp pose.      
   - The gripper must move to an approach position before making any interaction (pick, place, etc.) with the object.                                                           

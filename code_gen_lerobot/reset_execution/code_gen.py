@@ -944,7 +944,8 @@ def lerobot_reset_code_gen_multi_turn(
         # ── Code Generation (새 Session 2) ──
         session2_model = codegen_model or llm_model
         print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET_COLOR}")
-        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
+        from ..forward_execution.system_prompt import CODEGEN_SYSTEM_PROMPT
+        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT)
         codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
             {"text": codegen_reset_with_context_prompt(
                 context_summary=summary_resp,

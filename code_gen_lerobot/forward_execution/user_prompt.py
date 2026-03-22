@@ -327,9 +327,9 @@ Now generate executable Python code to complete the task using the LeRobot SO-10
 Use the scene understanding, detected objects, and grasp/place points from our previous conversation turns.
 
 **Grasp Guidelines**:
-- The gripper has asymmetric fingers (left fixed, right actuated), max opening 0.07m.
+- The gripper has symmetric fingers (both actuated), max opening 0.07m.
 - Always open the gripper before approaching the grasp pose.
-- Ensure the target position is reachable within the workspace and has enough clearance to avoid collisions.
+- Ensure the target position has enough clearance to avoid collisions.
 {points_section}
 **The `positions` dictionary** will be provided at runtime as a global variable with this structure:
 ```python
@@ -345,8 +345,9 @@ positions = {{
     ...
 }}
 ```
-- `position`: default grasp point in world coordinates (meters).
+- `position`: default grasp point for this object.
 - `points`: all detected critical points for this object. Choose the best point for the task.
+- Coordinate values are managed internally — do NOT inspect or use the raw numbers.
 - **CRITICAL**: You MUST use ONLY the exact key names from the `positions` dictionary provided earlier in the conversation. Do NOT invent new key names.
 
 **Available Robot API Skills**:
@@ -502,25 +503,16 @@ Choose the most appropriate point for the task. Access via `positions["object"][
 {points_desc}
 """
 
-    # 실제 positions dict를 코드로 포맷팅
-    positions_concrete = ""
+    # positions dict의 key 구조만 포맷팅 (좌표값은 숨김)
+    positions_keys = ""
     if positions:
-        pos_lines = []
+        key_lines = []
         for name, info in positions.items():
             if isinstance(info, dict) and "position" in info:
-                pos = info["position"]
                 pts = info.get("points", {})
-                pts_str = ", ".join(
-                    f'"{k}": [{v[0]:.4f}, {v[1]:.4f}, {v[2]:.4f}]'
-                    for k, v in pts.items()
-                ) if pts else ""
-                pos_lines.append(
-                    f'    "{name}": {{\n'
-                    f'        "position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}],\n'
-                    f'        "points": {{{pts_str}}},\n'
-                    f'    }},'
-                )
-        positions_concrete = "\n".join(pos_lines)
+                pt_labels = ", ".join(f'"{k}"' for k in pts.keys()) if pts else ""
+                key_lines.append(f'  - "{name}": position, points: [{pt_labels}]')
+        positions_keys = "\n".join(key_lines)
 
     prompt = f"""### Scene Context (from prior analysis session)
 
@@ -528,25 +520,22 @@ Choose the most appropriate point for the task. Access via `positions["object"][
 
 ### Code Generation Task
 
-Generate executable Python code to complete the following task using the LeRobot SO-101 robot arm.
+Generate executable Python code to complete the following task using the robot.
 
 **Task**: "{instruction}"
 
 **Grasp Guidelines**:
-- The gripper has asymmetric fingers (left fixed, right actuated), max opening 0.07m.
+- The gripper has symmetric fingers (both actuated), max opening 0.07m.
 - Always open the gripper before approaching the grasp pose.
-- Ensure the target position is reachable within the workspace and has enough clearance to avoid collisions.
+- Ensure the target position has enough clearance to avoid collisions.
 {points_section}
-**The `positions` dictionary** is provided at runtime as a global variable. Here are the actual detected values:
-```python
-positions = {{
-{positions_concrete}
-}}
-```
-- `position`: default grasp point in world coordinates (meters).
-- `points`: all detected critical points for this object. Choose the best point for the task.
+**The `positions` dictionary** is provided at runtime as a global variable with the following keys:
+{positions_keys}
+- Access via `positions["object_name"]["position"]` or `positions["object_name"]["points"]["label"]`.
+- Coordinate values are managed internally — do NOT inspect or use the raw numbers.
 - **CRITICAL**: You MUST use ONLY the exact key names shown above. Do NOT invent new key names.
-- **CRITICAL**: Do NOT redefine or hardcode the `positions` dictionary in your code. It is already available as a global variable at runtime. Access it directly (e.g., `positions["corn"]`).
+- **CRITICAL**: Do NOT redefine or hardcode the `positions` dictionary in your code. It is already available as a global variable at runtime.
+- **CRITICAL**: Do NOT hardcode any coordinate values (e.g., `[0.15, -0.25, 0.0]`). For locations not in the dictionary, use `move_to_pixel([y, x])` or `execute_place_at_pixel([y, x])` with normalized 0–1000 image coordinates.
 
 **Available Robot API Skills**:
 
@@ -569,12 +558,19 @@ skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name
 skills.execute_pick_object(pick_pos, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped?")
 skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name", skill_description="Lift object_name", verification_question="Is object_name lifted?")
 
-# PLACE ON OBJECT (is_table=False)
+# PLACE ON OBJECT (is_table=False) — target is a detected object in positions dict
 place_obj = positions["target_object"]
 place_pos = place_obj["position"]
 skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Move object_name above target_object", verification_question="Is object_name above target_object?")
 skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="Place object_name on target_object", verification_question="Is object_name on target_object?")
 skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Retract from target_object", verification_question="Is the gripper clear of target_object?")
+
+# PLACE AT PIXEL (is_table=True) — target is NOT in positions dict (e.g., empty spot on table)
+# Specify [y, x] in normalized 0–1000 coordinates from the top-view image.
+# Example: place at the left side of the table → [500, 200]
+skills.move_to_pixel([500, 200], target_name="left side", skill_description="Move object_name above left side of table", verification_question="Is object_name above the left side?")
+skills.execute_place_at_pixel([500, 200], is_table=True, gripper_open_ratio=0.7, target_name="left side", skill_description="Place object_name at left side of table", verification_question="Is object_name placed at the left side?")
+skills.move_to_pixel([500, 200], target_name="left side", skill_description="Retract from left side", verification_question="Is the gripper clear of the left side?")
 
 # END — always last
 skills.move_to_free_state(skill_description="Move to safe position", verification_question="Is the robot at safe position?")
@@ -609,6 +605,7 @@ if __name__ == "__main__":
 9. **ALWAYS** pass `skill_description` and `verification_question` for every skill call:
    - `skill_description`: concise sentence describing the action (e.g., "Move gripper above chocolate_pie_1")
    - `verification_question`: Yes/No question to verify the outcome (e.g., "Is the gripper above chocolate_pie_1?")
+10. **NEVER hardcode coordinate values** (e.g., `[0.15, -0.25, 0.0]`). Use `positions` dict for detected objects, and `move_to_pixel([y, x])` / `execute_place_at_pixel([y, x])` with normalized 0–1000 coordinates for any location not in the dict.
 
 **Output**: Complete executable Python code (no code blocks, plain text).
 

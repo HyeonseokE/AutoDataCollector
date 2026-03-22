@@ -588,7 +588,8 @@ def lerobot_reset_code_gen_multi_turn(
 
     from ..llm_utils.gemini import gemini_chat_start, gemini_chat_send
     from ..forward_execution.turn2_prompt import turn2_crop_pointing_prompt
-    from ..code_gen_with_skill import _points_to_positions, _parse_json_from_response, _get_system_prompt
+    from ..code_gen_with_skill import _points_to_positions, _parse_json_from_response
+    from ..forward_execution.system_prompt import PERCEPTION_SYSTEM_PROMPT
 
     CROP_PADDING = 25  # bbox 패딩 (0-1000 스케일)
 
@@ -673,8 +674,7 @@ def lerobot_reset_code_gen_multi_turn(
 
     # ── Step 2: Gemini chat 시작 ──
     print(f"\n{YELLOW}" + _log("Starting Gemini chat", step="Chat") + f"{RESET_COLOR}")
-    system_prompt = _get_system_prompt()
-    chat, gen_config = gemini_chat_start(llm_model, system_prompt=system_prompt)
+    chat, gen_config = gemini_chat_start(llm_model, system_prompt=PERCEPTION_SYSTEM_PROMPT)
 
     # ── Turn 0: Scene Understanding ──
     print(f"\n{YELLOW}" + _log("Turn 0 — Scene Understanding", step="Turn0") + f"{RESET_COLOR}")

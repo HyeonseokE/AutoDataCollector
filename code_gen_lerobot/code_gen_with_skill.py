@@ -4,6 +4,7 @@ from .forward_execution.turn0_prompt import turn0_scene_understanding_prompt
 from .forward_execution.turn1_prompt import turn1_detect_task_relevant_objects_prompt
 from .forward_execution.turn2_prompt import turn2_crop_pointing_prompt
 from .forward_execution.turn_test_prompt import turn_test_waypoint_trajectory_prompt
+from .forward_execution.system_prompt import PERCEPTION_SYSTEM_PROMPT, CODEGEN_SYSTEM_PROMPT
 
 import json
 import os
@@ -11,24 +12,6 @@ import re
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
-# System prompt 로드 (고정, 한번만 읽기)
-_SYSTEM_PROMPT_PATH = Path(__file__).parent / "forward_execution" / "system_prompt.py"
-_SYSTEM_PROMPT = None
-
-
-def _get_system_prompt() -> str:
-    """system_prompt.py에서 docstring 내용을 로드"""
-    global _SYSTEM_PROMPT
-    if _SYSTEM_PROMPT is None:
-        text = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-        # ''' ... ''' 사이의 내용 추출
-        match = re.search(r"'''(.*?)'''", text, re.DOTALL)
-        if match:
-            _SYSTEM_PROMPT = match.group(1).strip()
-        else:
-            _SYSTEM_PROMPT = text.strip()
-    return _SYSTEM_PROMPT
 
 def lerobot_code_gen(
     instruction: str,
@@ -199,8 +182,8 @@ def lerobot_code_gen(
         robot_id=robot_id,
     )
 
-    # 3) LLM 호출
-    system_prompt = _get_system_prompt()
+    # 3) LLM 호출 (단일턴 모드: codegen 프롬프트 사용)
+    system_prompt = CODEGEN_SYSTEM_PROMPT
     if image_path:
         print(f"\n{YELLOW}" + _log(f"Calling LLM ({llm_model}) with image: {image_path}", step="3/3") + f"{RESET}")
     else:
@@ -532,9 +515,9 @@ def lerobot_code_gen_multi_turn(
             cad_paths.extend(sorted(glob_mod.glob(f"{d}/*.png")))
         print(f"  CAD images: {len(cad_paths)} files from {len(cad_image_dirs)} dirs")
 
-    # Chat session 시작
-    system_prompt = _get_system_prompt()
-    chat, gen_config = gemini_chat_start(llm_model, system_prompt=system_prompt)
+    # Chat session 시작 (Session 1: Perception)
+    perception_prompt = PERCEPTION_SYSTEM_PROMPT
+    chat, gen_config = gemini_chat_start(llm_model, system_prompt=perception_prompt)
 
     has_cad = bool(cad_paths)
 
@@ -885,12 +868,16 @@ def lerobot_code_gen_multi_turn(
         # ── Code Generation (새 Session 2) ──
         session2_model = codegen_model or llm_model
         print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET}")
-        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=system_prompt)
-        codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
-            {"text": codegen_with_context_prompt(
+        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT)
+        codegen_msg = {
+            "text": codegen_with_context_prompt(
                 instruction=instruction, robot_id=robot_id,
                 all_points=all_points, context_summary=summary_resp,
-                positions=positions)},
+                positions=positions),
+            "image_path": image_path,
+        }
+        codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
+            codegen_msg,
             turn_label="Code Gen")
         code = extract_code_from_response(codegen_resp)
         assert code, "Failed to extract code from Code Gen response"

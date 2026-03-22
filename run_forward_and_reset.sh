@@ -56,7 +56,7 @@ cd "$SCRIPT_DIR"
 # (3) shake the bottle
 
 ## [필수] 태스크 명령어
-INSTRUCTION="distribute chocolate pies to each plate"
+INSTRUCTION="arrange yellow, red, and purple blocks from left to right"
 
 # INSTRUCTION="make sandwich using the ingredients on the table"
 # INSTRUCTION="pick up the red block and place it on the blue dish"
@@ -73,14 +73,14 @@ INSTRUCTION="distribute chocolate pies to each plate"
 # since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
 # [필수] 로봇 번호 (2 또는 3)
-ROBOT_ID=0
+ROBOT_ID=2
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=30
-NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=2
+NUM_RANDOM_SEEDS=2 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false

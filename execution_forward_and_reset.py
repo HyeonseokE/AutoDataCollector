@@ -1576,6 +1576,22 @@ class ForwardAndResetPipeline:
             else:
                 print(f"  {RED}Forward execution FAILED{RESET}")
 
+            # VLM pixel move 시각화 (pixel 좌표로 직접 이동한 경우)
+            try:
+                from skills.skills_lerobot import LeRobotSkills
+                if (LeRobotSkills._last_instance
+                        and hasattr(LeRobotSkills._last_instance, 'pixel_move_log')
+                        and LeRobotSkills._last_instance.pixel_move_log):
+                    grasp_img_path = str(Path(forward_dir) / "turn2_grasp_points.jpg")
+                    if os.path.isfile(grasp_img_path):
+                        self._visualize_pixel_moves(
+                            grasp_img_path,
+                            LeRobotSkills._last_instance.pixel_move_log,
+                            str(Path(forward_dir) / "pixel_moves_overlay.jpg"),
+                        )
+            except Exception as e:
+                print(f"  Warning: pixel move visualization failed: {e}")
+
             # Step 5: Context 저장
             print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 5/5") + f"{RESET}")
             self.generated_spec = {}
@@ -2086,6 +2102,57 @@ class ForwardAndResetPipeline:
 
         cv2.imwrite(save_path, image)
         print(f"  Turn 2 visualization saved: {save_path}")
+
+    def _visualize_pixel_moves(
+        self,
+        base_image_path: str,
+        pixel_move_log: list,
+        save_path: str,
+    ) -> None:
+        """VLM이 지정한 pixel 위치들을 grasp_points 이미지 위에 시각화.
+
+        Args:
+            base_image_path: turn2_grasp_points.jpg 경로 (이미 bbox+grasp가 그려진 이미지)
+            pixel_move_log: LeRobotSkills.pixel_move_log 리스트
+                           [{"pixel": [u, v], "target_name": str, "skill_description": str}, ...]
+            save_path: 저장 경로
+        """
+        if not pixel_move_log:
+            return
+
+        image = cv2.imread(base_image_path)
+        if image is None:
+            print(f"  [Visualize] Cannot read base image: {base_image_path}")
+            return
+
+        img_h, img_w = image.shape[:2]
+
+        for i, entry in enumerate(pixel_move_log):
+            px, py = entry["pixel"]
+            name = entry.get("target_name", "")
+            desc = entry.get("skill_description", "")
+
+            # 마커: 시안 다이아몬드 (기존 grasp point와 구별)
+            color = (255, 255, 0)  # cyan (BGR)
+            pts = np.array([
+                [px, py - 6], [px + 6, py], [px, py + 6], [px - 6, py]
+            ], dtype=np.int32)
+            cv2.polylines(image, [pts], True, color, 2)
+            cv2.circle(image, (px, py), 2, color, -1)
+
+            # 라벨
+            label = name if name else desc
+            if label:
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+                text_x = min(px + 10, img_w - tw - 5)
+                text_y = max(py - 5, th + 5)
+                cv2.rectangle(image, (text_x - 2, text_y - th - 2),
+                              (text_x + tw + 2, text_y + 2), color, -1)
+                cv2.putText(image, label, (text_x, text_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+
+        cv2.imwrite(save_path, image)
+        print(f"  Pixel move visualization saved: {save_path}")
 
     def _visualize_turn_test(
         self,

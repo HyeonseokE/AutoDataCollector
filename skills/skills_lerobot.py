@@ -156,6 +156,12 @@ class LeRobotSkills:
         # Last movement error (for reporting)
         self.last_error: Optional[dict] = None
 
+        # Pix2Robot calibrator (loaded on connect if available)
+        self.pix2robot = None
+
+        # VLM-specified pixel positions log (for visualization)
+        self.pixel_move_log: List[dict] = []
+
     def _log(self, message: str):
         """Print message if verbose mode is enabled."""
         if self.verbose:
@@ -325,6 +331,18 @@ class LeRobotSkills:
                     target_z=0.1,  # Will be updated per movement
                 )
                 self._log(f"  Compensation config: {compensation_file}")
+
+        # Load Pix2Robot calibrator (if available)
+        pix2robot_path = Path(f"robot_configs/pix2robot_matrices/{robot_id}_pix2robot_data.npz")
+        if pix2robot_path.exists():
+            try:
+                from pix2robot_calibrator.calibrator import Pix2RobotCalibrator
+                self.pix2robot = Pix2RobotCalibrator()
+                self.pix2robot.load(str(pix2robot_path))
+                self._log(f"  Pix2Robot calibrator loaded: {pix2robot_path}")
+            except Exception as e:
+                self._log(f"  Warning: Failed to load Pix2Robot calibrator: {e}")
+                self.pix2robot = None
 
         # Initialize workspace with kinematics engine and frame transformer
         self.workspace = BaseWorkspace(self.kinematics, self.frame_transformer)
@@ -1138,6 +1156,126 @@ class LeRobotSkills:
             )
         finally:
             self._clear_skill_recording()
+
+    # Image resolution for normalized coordinate conversion (0–1000 → pixel)
+    IMAGE_WIDTH = 640
+    IMAGE_HEIGHT = 480
+
+    def move_to_pixel(
+        self,
+        pixel: List[int],
+        duration: Optional[float] = None,
+        maintain_wrist_roll: bool = True,
+        maintain_pitch: bool = False,
+        target_pitch: Optional[float] = None,
+        target_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
+    ) -> bool:
+        """
+        Move end-effector to a position specified by normalized coordinates in the top-view image.
+        Accepts [y, x] in 0–1000 range (Gemini convention), converts to raw pixel,
+        then to robot frame using Pix2Robot calibrator.
+
+        Args:
+            pixel: [y, x] normalized coordinates (0–1000) in the overhead camera image
+            duration: Movement duration (uses default if None)
+            maintain_wrist_roll: Maintain wrist_roll joint during movement (default: True)
+            maintain_pitch: Maintain current gripper pitch during movement (default: False)
+            target_pitch: Specific pitch angle to achieve (radians)
+            target_name: Name of the target for subgoal labeling (optional)
+            skill_description: Concise description for dataset recording
+            verification_question: Yes/No question for verification
+
+        Returns:
+            True if movement successful
+        """
+        if self.pix2robot is None:
+            self._log("ERROR: Pix2Robot calibrator not loaded — cannot convert pixel to robot frame")
+            return False
+
+        # Gemini convention: [y, x] normalized 0–1000 → raw pixel [u, v]
+        norm_y, norm_x = int(pixel[0]), int(pixel[1])
+        u = int(norm_x * self.IMAGE_WIDTH / 1000)
+        v = int(norm_y * self.IMAGE_HEIGHT / 1000)
+
+        robot_pos = self.pix2robot.pixel_to_robot(u, v)
+        self._log(f"\nNormalized [{norm_y}, {norm_x}] -> pixel [{u}, {v}] -> robot frame [{robot_pos[0]:.3f}, {robot_pos[1]:.3f}, {robot_pos[2]:.3f}]")
+
+        # Log normalized position for visualization
+        self.pixel_move_log.append({
+            "pixel": [u, v],
+            "normalized": [norm_y, norm_x],
+            "robot_pos": robot_pos,
+            "target_name": target_name or "",
+            "skill_description": skill_description or "",
+        })
+
+        return self.move_to_position(
+            position=robot_pos,
+            duration=duration,
+            maintain_wrist_roll=maintain_wrist_roll,
+            maintain_pitch=maintain_pitch,
+            target_pitch=target_pitch,
+            target_name=target_name,
+            skill_description=skill_description,
+            verification_question=verification_question,
+        )
+
+    def execute_place_at_pixel(
+        self,
+        pixel: List[int],
+        is_table: bool = True,
+        gripper_open_ratio: float = 0.7,
+        target_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
+    ) -> bool:
+        """
+        Place object at a position specified by normalized coordinates.
+        Accepts [y, x] in 0–1000 range (Gemini convention), converts to raw pixel,
+        then to robot frame, and delegates to execute_place_object.
+
+        Args:
+            pixel: [y, x] normalized coordinates (0–1000) in the overhead camera image
+            is_table: True if placing on table surface, False if on another object
+            gripper_open_ratio: How much to open gripper after placing (default: 0.7)
+            target_name: Name of the target for subgoal labeling
+            skill_description: Concise description for dataset recording
+            verification_question: Yes/No question for verification
+
+        Returns:
+            True if place successful
+        """
+        if self.pix2robot is None:
+            self._log("ERROR: Pix2Robot calibrator not loaded — cannot convert pixel to robot frame")
+            return False
+
+        # Gemini convention: [y, x] normalized 0–1000 → raw pixel [u, v]
+        norm_y, norm_x = int(pixel[0]), int(pixel[1])
+        u = int(norm_x * self.IMAGE_WIDTH / 1000)
+        v = int(norm_y * self.IMAGE_HEIGHT / 1000)
+
+        robot_pos = self.pix2robot.pixel_to_robot(u, v)
+        self._log(f"\nPlace at normalized [{norm_y}, {norm_x}] -> pixel [{u}, {v}] -> robot frame [{robot_pos[0]:.3f}, {robot_pos[1]:.3f}, {robot_pos[2]:.3f}]")
+
+        # Log normalized position for visualization
+        self.pixel_move_log.append({
+            "pixel": [u, v],
+            "normalized": [norm_y, norm_x],
+            "robot_pos": robot_pos,
+            "target_name": target_name or "place_target",
+            "skill_description": skill_description or "place at pixel",
+        })
+
+        return self.execute_place_object(
+            position=robot_pos,
+            is_table=is_table,
+            gripper_open_ratio=gripper_open_ratio,
+            target_name=target_name,
+            skill_description=skill_description,
+            verification_question=verification_question,
+        )
 
     def gripper_open(self, duration: float = 2.0, ratio: float = 1.0, skill_description: Optional[str] = None, verification_question: Optional[str] = None):
         """

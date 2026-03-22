@@ -409,12 +409,17 @@ def generate_random_positions(
 
         # 장애물 필터링:
         # - 자기 자신의 현재 위치 제거 (이동할 거니까)
-        # - 과거 seed 위치(_pseed): 같은 객체만 유지, 다른 객체는 제거
+        # - 과거 seed 위치(_pseed): 같은 종류만 유지, 다른 종류는 제거
+        #   (chocolate_pie_1과 chocolate_pie_2는 같은 종류 → 둘 다 비교)
         # - 그 외 (obstacle, 현재 seed 내 확정 위치): 전부 유지
+        import re
+        obj_type = re.sub(r'_?\d+$', '', obj_name)  # chocolate_pie_1 → chocolate_pie
+        def _pseed_type(n):
+            return re.sub(r'_?\d+$', '', n.split('_pseed')[0])
         obstacles_for_this = [
             occ for occ in occupied
             if occ["name"] != obj_name and (
-                "_pseed" not in occ["name"] or occ["name"].startswith(obj_name + "_pseed")
+                "_pseed" not in occ["name"] or _pseed_type(occ["name"]) == obj_type
             )
         ]
 

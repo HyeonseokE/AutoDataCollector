@@ -46,7 +46,7 @@ joint_names:
 
 # Kinematics configuration
 kinematics:
-  urdf_path: /home/csi/AutoDataCollector/assets/urdf/so101_robot0.urdf
+  urdf_path: /home/csi/AutoDataCollector/assets/urdf/so101_robot2.urdf
   end_effector_frame: gripper_frame_link
 
 # Calibration file (absolute path)

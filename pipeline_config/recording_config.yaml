@@ -4,10 +4,10 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/arrange_YRGblocks_left2right"
+dataset_repo_id: "local/distribute_chocolatepies_30epi"
 recording_fps: 30
 robot_type: "so101"
-
+  
 # =============================================================================
 # Camera Configuration
 # =============================================================================
@@ -16,7 +16,7 @@ robot_type: "so101"
 cameras:
   - name: "realsense"
     type: "realsense"
-    serial_number: "335622072328"
+    serial_number: "254622075836"
     enabled: true
     enable_depth: true
     width: 640
@@ -31,7 +31,7 @@ cameras:
   - name: "innomaker"
     type: "opencv"
     enabled: true
-    index_or_path: "/dev/video7"
+    index_or_path: "/dev/video6"
     width: 640
     height: 480
     fps: 30

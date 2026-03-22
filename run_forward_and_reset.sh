@@ -56,7 +56,7 @@ cd "$SCRIPT_DIR"
 # (3) shake the bottle
 
 ## [필수] 태스크 명령어
-INSTRUCTION="arrange yellow, red, and green blocks from left to right"
+INSTRUCTION="distribute chocolate pies to each plate"
 
 # INSTRUCTION="make sandwich using the ingredients on the table"
 # INSTRUCTION="pick up the red block and place it on the blue dish"
@@ -73,7 +73,7 @@ INSTRUCTION="arrange yellow, red, and green blocks from left to right"
 # since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
 # [필수] 로봇 번호 (2 또는 3)
-ROBOT_ID=2
+ROBOT_ID=0
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"

@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/arrange_YRGblocks_left2right"
+dataset_repo_id: "local/arrange_YRGblocks_top2bottom"
 recording_fps: 30
 robot_type: "so101"
   

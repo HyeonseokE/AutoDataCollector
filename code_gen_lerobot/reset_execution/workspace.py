@@ -123,6 +123,7 @@ class ResetWorkspace(BaseWorkspace):
         pix2robot=None,
         max_attempts: int = 500,
         max_iou: float = 0.3,
+        y_min_abs: Optional[float] = None,
     ) -> Optional[List[float]]:
         """
         단일 객체용 랜덤 위치 생성 (reach + FOV + IoU 기반 충돌 검증).
@@ -136,6 +137,9 @@ class ResetWorkspace(BaseWorkspace):
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
             max_iou: grippable 장애물과 허용 최대 IoU (default: 0.5)
+            y_min_abs: 최소 |y| 제한 (robot base_link frame, meters).
+                       arrange 태스크에서 |y| > y_min_abs인 영역(테이블 상/하단)에만 배치.
+                       None이면 제한 없음.
 
         Returns:
             [x, y, z] 또는 None (실패 시)
@@ -157,6 +161,10 @@ class ResetWorkspace(BaseWorkspace):
             z = self.z_fixed
 
             candidate = [x, y, z]
+
+            # 조건 0: y_min_abs 제한 (arrange 태스크용 영역 분리 — |y| > threshold)
+            if y_min_abs is not None and abs(y) < y_min_abs:
+                continue
 
             # 조건 1: 기본 IK 검증
             if not self._check_ik_feasible(np.array(candidate)):
@@ -299,6 +307,7 @@ def generate_random_positions(
     seed: int = None,
     max_attempts: int = 500,
     bbox_margin_px: int = 10,
+    y_min_abs: Optional[float] = None,
 ) -> Dict[str, List[float]]:
     """
     랜덤 위치 생성 (IoU 기반 충돌 검증).
@@ -429,6 +438,7 @@ def generate_random_positions(
             obj_bbox_px=obj_bbox_px,
             pix2robot=pix2robot,
             max_attempts=max_attempts,
+            y_min_abs=y_min_abs,
         )
 
         if position is not None:
@@ -494,6 +504,7 @@ def draw_workspace_on_image(
     pix2robot_calibrator=None,
     workspace_bounds=None,
     coord_transformer=None,
+    task_type: str = "pick_place",
 ) -> np.ndarray:
     """
     로봇 워크스페이스를 이미지에 시각화 (pix2robot 직접 매핑 기반).
@@ -501,6 +512,7 @@ def draw_workspace_on_image(
     시각적 요소:
     - 도달 가능 영역 밝게 / 불가 영역 어둡게 (convex hull 마스킹)
     - CYAN 점선: min_reach / max_reach 원호 (로봇 base 중심)
+    - arrange 태스크: |y| > 0.12m 영역을 검정으로 마스킹 (reset 영역, 배치 불가)
 
     Args:
         image: BGR 이미지 (numpy array)
@@ -508,6 +520,7 @@ def draw_workspace_on_image(
         pix2robot_calibrator: Pix2RobotCalibrator 인스턴스 (우선 사용)
         workspace_bounds: (legacy, 미사용) 호환성 유지
         coord_transformer: (legacy, 미사용) 호환성 유지
+        task_type: 태스크 유형. "arrange"일 때 reset 영역 마스킹 적용.
 
     Returns:
         시각화된 이미지 (numpy array, copy)
@@ -571,6 +584,24 @@ def draw_workspace_on_image(
     # ── 도달 불가 영역 검정 마스킹 ──
     if np.any(ws_mask):
         result[ws_mask == 0] = (result[ws_mask == 0] * 0.4).astype(np.uint8)
+
+    # ── arrange 태스크: reset 영역 (|y| > 0.12m) 마스킹 ──
+    # 도달 가능 영역 내 reset 영역도 도달 불가와 동일한 밝기(0.4배)로 통일
+    if task_type == "arrange":
+        ARRANGE_Y_BOUNDARY = 0.12
+        for v in range(0, img_h, step_px):
+            for u in range(0, img_w, step_px):
+                if ws_mask[v, u] == 0:
+                    continue  # 이미 도달 불가로 어두워진 영역은 스킵
+                try:
+                    rx, ry, _ = p2r.pixel_to_robot(u, v)
+                    if abs(ry) > ARRANGE_Y_BOUNDARY:
+                        # 원본 이미지 기준 0.4배로 맞춤 (도달 불가 영역과 동일)
+                        result[v:v+step_px, u:u+step_px] = (
+                            image[v:v+step_px, u:u+step_px] * 0.4
+                        ).astype(np.uint8)
+                except Exception:
+                    continue
 
     COLOR_CYAN = (255, 255, 0)
 

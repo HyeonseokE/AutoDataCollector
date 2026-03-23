@@ -22,7 +22,7 @@ cd "$SCRIPT_DIR"
 
 # # Arrangement:                                                               
 # (1, 성공) place the red block between chocolate pies             
-# (2, 성공) arrange yellow, red, and green blocks from left to right
+# (2, 성공) arrange yellow, red, and purple blocks in a line from left to right
 # (3, 성공) stack the blocks in the order of red, green, and yellow
 
 # # Non-grasping:
@@ -56,7 +56,7 @@ cd "$SCRIPT_DIR"
 # (3) shake the bottle
 
 ## [필수] 태스크 명령어
-INSTRUCTION="distribute chocolate pies to each plate"
+INSTRUCTION="arrange yellow, red, and purple blocks in a line from top to bottom"
 
 # INSTRUCTION="make sandwich using the ingredients on the table"
 # INSTRUCTION="pick up the red block and place it on the blue dish"
@@ -73,7 +73,7 @@ INSTRUCTION="distribute chocolate pies to each plate"
 # since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
 # [필수] 로봇 번호 (2 또는 3)
-ROBOT_ID=0
+ROBOT_ID=2
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -81,6 +81,10 @@ SAVE_DIR="./results"
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=30
 NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+
+# [선택] 태스크 유형 (pick_place, arrange, stack)
+# arrange: seed 위치를 테이블 뒤쪽(x<0.15m)으로 제한하여 정렬 영역과 분리
+TASK_TYPE="arrange"
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
 USE_SERVER=false
@@ -93,7 +97,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/session_20260322_154610"
+RESUME_SESSION=""
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================
@@ -394,6 +398,7 @@ python execution_forward_and_reset.py \
     --timeout "$DETECTION_TIMEOUT" \
     --judge-timeout "$JUDGE_TIMEOUT" \
     --num-random-seeds "$NUM_RANDOM_SEEDS" \
+    --task-type "$TASK_TYPE" \
     --save "$SAVE_DIR" \
     --num-episodes "$NUM_EPISODES" \
     $CODEGEN_S2_ARG \

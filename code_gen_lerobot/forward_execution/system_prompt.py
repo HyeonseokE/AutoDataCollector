@@ -94,12 +94,14 @@ Image Layout (top-view, normalized 0–1000 coordinate system):
 
 Workspace Constraints:
   - The provided top-view image includes workspace annotations:
-    a green rectangle showing the table boundary, and cyan arcs showing each arm's reachable range.
-  - When using `move_to_pixel` or `execute_place_at_pixel`, you MUST specify positions
-    that fall WITHIN the reachable area (inside the cyan arcs and green rectangle).
-  - The reachable area is roughly y ≈ 150–750, x ≈ 100–900 in normalized coordinates.
-    Avoid placing objects near the image edges (y < 150 or y > 750) as these are
-    outside the robot's reach or at the table boundary.
+    a green rectangle shows the table boundary, and a cyan arc shows
+    the robot arm's reachable range.
+  - IMPORTANT: The green rectangle is only the table edge, NOT the reachable area.
+    You can ONLY place objects inside the cyan arc. Positions outside the cyan arc
+    are physically unreachable by the robot, even if they are on the table.
+  - When specifying pixel coordinates with `move_to_pixel` or `execute_place_at_pixel`,
+    verify that your chosen [y, x] position falls inside the cyan arc in the image.
+    If it does not, adjust the coordinates inward until the position is within the arc.
 
 Grasp Guidelines:                           
   - Always open the gripper before approaching the grasp pose.      

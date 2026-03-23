@@ -453,6 +453,7 @@ def lerobot_code_gen_multi_turn(
     skip_codegen: bool = False,
     canonical_labels: List[str] = None,
     canonical_point_labels: Dict[str, List[str]] = None,
+    task_type: str = "pick_place",
 ) -> Tuple[str, Dict, Dict]:
     """
     Crop-then-Point 멀티턴 LLM 코드 생성 파이프라인
@@ -933,7 +934,7 @@ def lerobot_code_gen_multi_turn(
             from .reset_execution.workspace import draw_workspace_on_image
             raw_img = cv2.imread(image_path)
             if raw_img is not None:
-                annotated = draw_workspace_on_image(raw_img, robot_id=robot_id)
+                annotated = draw_workspace_on_image(raw_img, robot_id=robot_id, task_type=task_type)
                 annotated_path = str(Path(image_path).parent / "workspace_annotated_codegen.jpg")
                 cv2.imwrite(annotated_path, annotated)
                 codegen_image = annotated_path

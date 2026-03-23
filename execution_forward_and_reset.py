@@ -139,6 +139,7 @@ class ForwardAndResetPipeline:
         cad_image_dirs: List[str] = None,
         side_view_image: str = None,
         codegen_model: str = None,
+        task_type: str = "pick_place",
     ):
         """
         초기화
@@ -155,6 +156,8 @@ class ForwardAndResetPipeline:
             recording_fps: 레코딩 FPS (기본: 30)
             multi_turn: True면 crop-then-point 멀티턴 LLM 코드 생성 사용
             cad_image_dirs: CAD 참조 이미지 디렉토리 리스트 (옵션)
+            task_type: 태스크 유형 ("arrange", "pick_place", "stack" 등).
+                      arrange일 때 seed 위치를 x < 0.15m로 제한하여 정렬 영역과 분리.
         """
         self.robot_id = robot_id
         self.llm_model = llm_model
@@ -168,6 +171,7 @@ class ForwardAndResetPipeline:
         self.cad_image_dirs = cad_image_dirs or []
         self.side_view_image = side_view_image
         self.codegen_model = codegen_model
+        self.task_type = task_type
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
 
@@ -620,6 +624,7 @@ class ForwardAndResetPipeline:
             skip_codegen=skip_codegen,
             canonical_labels=canonical_labels,
             canonical_point_labels=canonical_point_labels,
+            task_type=self.task_type,
         )
 
         # multi-turn 정보 저장
@@ -1793,9 +1798,9 @@ class ForwardAndResetPipeline:
                     reset_current_state_image_path = None
                     if self.multi_turn:
                         print(f"  [MultiTurn] Capturing current state for VLM...")
-                        if not (self.camera_manager and self.camera_manager.is_connected):
-                            if not self.initialize_camera():
-                                print(f"  {RED}Failed to initialize camera for reset VLM{RESET}")
+                        # Forward 후 카메라가 shutdown된 상태이므로 강제 재초기화
+                        if not self.initialize_camera():
+                            print(f"  {RED}Failed to initialize camera for reset VLM{RESET}")
                         time.sleep(0.3)
                         reset_current_frame = self.capture_frame()
                         if reset_current_frame is not None:
@@ -2526,12 +2531,16 @@ class ForwardAndResetPipeline:
         accepted_positions = None
 
         for attempt in range(10):
+            # arrange 태스크: seed 위치를 |y| > 0.12m (테이블 상/하단)으로 제한
+            seed_y_min_abs = 0.12 if self.task_type == "arrange" else None
+
             random_targets = generate_random_positions(
                 grippable_objects=grippable,
                 obstacle_objects=obstacles,
                 initial_positions=all_initial,
                 workspace=workspace,
                 pix2robot=pix2robot,
+                y_min_abs=seed_y_min_abs,
             )
             if not random_targets:
                 print(f"  [SeedGen] Attempt {attempt+1}: position generation failed, retrying...")
@@ -3656,6 +3665,14 @@ def main():
         help="Side-view image path for Turn Test waypoint trajectory prediction"
     )
 
+    parser.add_argument(
+        "--task-type",
+        type=str,
+        default="pick_place",
+        choices=["pick_place", "arrange", "stack"],
+        help="Task type (default: pick_place). 'arrange' restricts seed positions to x<0.15m to separate from arrangement area."
+    )
+
     args = parser.parse_args()
 
     # 서버 모드 설정 (환경변수로 전달)
@@ -3688,6 +3705,7 @@ def main():
         side_view_image=args.side_view_image,
         recording_fps=args.recording_fps,
         codegen_model=args.codegen_session2_model,
+        task_type=args.task_type,
     )
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기

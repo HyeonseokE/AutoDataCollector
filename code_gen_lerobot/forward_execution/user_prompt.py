@@ -606,6 +606,7 @@ if __name__ == "__main__":
    - `skill_description`: concise sentence describing the action (e.g., "Move gripper above chocolate_pie_1")
    - `verification_question`: Yes/No question to verify the outcome (e.g., "Is the gripper above chocolate_pie_1?")
 10. **NEVER hardcode coordinate values** (e.g., `[0.15, -0.25, 0.0]`). Use `positions` dict for detected objects, and `move_to_pixel([y, x])` / `execute_place_at_pixel([y, x])` with normalized 0–1000 coordinates for any location not in the dict.
+11. Before finalizing pixel coordinates, visually confirm each target position is inside the cyan arc (reachable area) in the provided image. If a position is outside the arc, move it inward.
 
 **Output**: Complete executable Python code (no code blocks, plain text).
 

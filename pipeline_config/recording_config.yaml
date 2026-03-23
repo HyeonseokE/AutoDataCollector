@@ -16,7 +16,7 @@ robot_type: "so101"
 cameras:
   - name: "realsense"
     type: "realsense"
-    serial_number: "254622075836"
+    serial_number: "335622072328"
     enabled: true
     enable_depth: true
     width: 640

@@ -81,9 +81,7 @@ SAVE_DIR="./results"
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=30
 NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
-
-# [선택] 태스크 유형 (pick_place, arrange, stack)
-# arrange: seed 위치를 테이블 뒤쪽(x<0.15m)으로 제한하여 정렬 영역과 분리
+# arrange: reset 위치를 테이블 가장자리로 제한하여 정렬 영역과 분리.
 TASK_TYPE="arrange"
 
 # 서버 추론 사용 여부 (true: vLLM 서버, false: 유료 API)
@@ -97,7 +95,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
+RESUME_SESSION="results/session_20260323_164649"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

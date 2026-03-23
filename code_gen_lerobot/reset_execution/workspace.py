@@ -447,13 +447,14 @@ def generate_random_positions(
             occupied = [occ for occ in occupied if occ["name"] != obj_name]
             if pix2robot is not None:
                 try:
+                    INTRA_SEED_MARGIN_PX = 15  # 같은 시드 내 물체 간 최소 간격 (pixels)
                     new_px = pix2robot.robot_to_pixel(position[0], position[1])
                     occupied.append({
                         "name": obj_name,
                         "center_px": new_px,
-                        "bbox_w": obj_bbox_px[0],
-                        "bbox_h": obj_bbox_px[1],
-                        "allow_overlap": False,  # 같은 시드 내 물체끼리 겹침 불허
+                        "bbox_w": obj_bbox_px[0] + INTRA_SEED_MARGIN_PX * 2,
+                        "bbox_h": obj_bbox_px[1] + INTRA_SEED_MARGIN_PX * 2,
+                        "allow_overlap": False,  # 같은 시드 내 물체끼리 겹침 불허 + margin
                     })
                 except Exception:
                     pass

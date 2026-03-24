@@ -24,7 +24,7 @@ class DryRunSkills:
     def __init__(self, robot_config: str = "", frame: str = "base_link", **kwargs):
         DryRunSkills._last_instance = self
         self.frame = frame
-        self.pick_offset = kwargs.get("pick_offset", 0.015)
+        self.pick_offset = kwargs.get("pick_offset", 0.02)
         self.kinematics = None
         self._saved_pitch = None
         self._pick_z = None
@@ -114,7 +114,7 @@ class DryRunSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.025
+        MIN_PICK_Z = 0.005  # match skills_lerobot.py
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = np.array([object_position[0], object_position[1], pick_z])
 
@@ -149,7 +149,7 @@ class DryRunSkills:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
 
-        MIN_PLACE_Z = 0.02
+        MIN_PLACE_Z = 0.005  # Minimum place height (0.5cm) — match skills_lerobot.py
         if is_table:
             place_z = max(place_position[2] - self.pick_offset, MIN_PLACE_Z)
         else:

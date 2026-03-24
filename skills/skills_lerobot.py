@@ -102,7 +102,7 @@ class LeRobotSkills:
         use_compensation: bool = True,
         use_deceleration: bool = True,
         verbose: bool = True,
-        pick_offset: float = 0.015,  # Pick/place offset from object top (meters, 1.5cm)
+        pick_offset: float = 0.02,  # Pick/place offset from object top (meters, 2cm)
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
     ):
@@ -891,8 +891,17 @@ class LeRobotSkills:
         # robot_id 추출 (robot config path에서)
         robot_id = self._extract_robot_id_int()
 
-        # 카메라 소스 결정: self.camera 또는 global shared_camera
+        # 카메라 소스 결정: self.camera → RecordingContext → global shared_camera
         camera_to_use = self.camera
+        if camera_to_use is None:
+            # RecordingContext의 camera_manager에서 realsense 가져오기
+            try:
+                from record_dataset.context import RecordingContext
+                if RecordingContext.is_active() and RecordingContext._camera_manager is not None:
+                    cm = RecordingContext._camera_manager
+                    camera_to_use = cm.get_camera("realsense")
+            except Exception:
+                pass
         if camera_to_use is None:
             # global shared_camera 확인 (pipeline에서 주입됨)
             import builtins
@@ -1506,7 +1515,7 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.015  # Minimum pick height (1.5cm) — gripper ground margin
+        MIN_PICK_Z = 0.005  # Minimum pick height (0.5cm) — gripper ground margin
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
@@ -1586,7 +1595,7 @@ class LeRobotSkills:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
 
-        MIN_PLACE_Z = 0.015  # Minimum place height (1.5cm) — ground margin
+        MIN_PLACE_Z = 0.005  # Minimum place height (0.5cm) — ground margin
 
         if is_table:
             # Placing on table: use target z (object's own height) as reference

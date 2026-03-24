@@ -189,4 +189,31 @@ ROBOT_API_DOC = '''class LeRobotSkills:
 
         Returns:
             True if push completed successfully.
+        """
+
+    def detect_objects(self, queries: list[str], timeout: float = 5.0,
+                       visualize: bool = False) -> dict:
+        """Re-detects objects in real-time using the camera during code execution.
+        Returns updated positions for the queried objects.
+        Use this after placing an object to get its new position (e.g., for stacking).
+
+        Args:
+            queries: List of object names to detect. Example: ["brown block", "green block"].
+            timeout: Detection timeout in seconds (default 5.0).
+            visualize: Whether to show detection visualization window (default False).
+
+        Returns:
+            Dict mapping object name to position info:
+            {
+                "brown block": {"position": [x, y, z], ...},
+                "green block": {"position": [x, y, z], ...},
+            }
+            Returns None for objects that could not be detected.
+
+        Example:
+            # After placing block A, re-detect to get its updated position
+            updated = skills.detect_objects(["block A"])
+            new_pos = updated["block A"]["position"]
+            # Now place block B on top of block A using the updated position
+            skills.execute_place_object(new_pos, is_table=False, ...)
         """'''

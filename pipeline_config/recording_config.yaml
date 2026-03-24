@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/arrange_YRGblocks_top2bottom"
+dataset_repo_id: "local/test_bolt_nut"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
 recording_fps: 30
 robot_type: "so101"
   
@@ -16,7 +16,7 @@ robot_type: "so101"
 cameras:
   - name: "realsense"
     type: "realsense"
-    serial_number: "335622072328"
+    serial_number: "254622075836"
     enabled: true
     enable_depth: true
     width: 640

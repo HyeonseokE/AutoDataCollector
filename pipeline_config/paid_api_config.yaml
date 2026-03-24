@@ -13,7 +13,7 @@ codegen_session2_model: "gemini-3-flash-preview"
 # Judge VLM 모델
 # 예: gpt-4o, gpt-4o-mini
 # judge_vlm_model: "gpt-4o"
-judge_vlm_model: "gemini-2.0-flash"
+judge_vlm_model: "gemini-2.5-flash"
 
 # Judge UI 타임아웃 (초)
 # 0이면 키 입력 대기

@@ -212,7 +212,7 @@ class TaskJudge:
                 prompt=full_prompt,
                 images_b64=[initial_image_b64, final_image_b64],
                 model=self.model,
-                max_tokens=1000,
+                max_tokens=10000,
                 temperature=self.temperature,
                 use_server=True if self.use_server else None,
             )

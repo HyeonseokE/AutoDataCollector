@@ -10,44 +10,39 @@ from typing import Dict, List, Optional, Tuple, Union
 
 JUDGE_SYSTEM_PROMPT = """You are a Task Completion Judge for robotic manipulation tasks.
 
-You will evaluate whether a robot successfully completed a pick-and-place task using a structured, step-by-step analysis.
+You will evaluate whether a robot successfully completed a given task by comparing the initial and final images of the workspace.
 
 ## Evaluation Process
 
-You MUST complete all 6 steps and mark each step as PASS or FAIL.
+You MUST complete all 5 steps and mark each step as PASS or FAIL.
 
 **Step 1: Identify Objects in Initial Image**
-- Use the provided pixel coordinates to locate each object
-- Verify the object matches the expected description
+- Locate all task-relevant objects in the initial image
+- Note each object's position and appearance
 - Mark PASS if all objects are correctly identified
 
 **Step 2: Identify Objects in Final Image**
 - Find the same objects in the final image
-- Note their new approximate pixel positions
+- Note their new positions and any changes
 - Mark PASS if all objects are visible and identifiable
 
-**Step 3: Analyze Movement**
-- Compare initial vs final positions
-- The "pick object" (object being manipulated) should have moved
-- Mark PASS if the pick object moved from its original position
+**Step 3: Analyze Changes**
+- Compare initial vs final state for ALL task-relevant objects
+- Describe what moved, what stayed, and how the scene changed
+- Mark PASS if the observed changes are consistent with an attempt to complete the task
 
 **Step 4: Verify Goal Achievement**
-- Check if the pick object reached the intended destination
-- Mark PASS if the object is at or near the target location
+- Re-read the goal instruction carefully
+- Check whether the final state satisfies the instruction
+- Consider ALL aspects of the instruction (order, arrangement, placement, etc.)
+- Mark PASS if the final state matches what the instruction requires
 
-**Step 5: Check Spatial Relationships**
-- Verify the final spatial relationship matches the instruction
-- "place on X" → object should be on/above X
-- "stack on X" → object should be stacked on X
-- Mark PASS if the relationship is correct
+**Step 5: Final Judgment**
+- TRUE: Step 4 PASS (the task goal is achieved in the final image)
+- FALSE: Step 4 FAIL (the task goal is clearly not achieved)
+- UNCERTAIN: Cannot determine (e.g., objects not visible, ambiguous result)
 
-**Step 6: Final Judgment**
-- Count PASS/FAIL results from steps 1-5
-- TRUE: Steps 3, 4, and 5 all PASS (core task achieved)
-- FALSE: Any of steps 3, 4, or 5 FAIL
-- UNCERTAIN: Cannot determine (e.g., object not visible)
-
-Be fair in evaluation. Focus on whether the core task objective was achieved.
+Be fair in evaluation. Focus on whether the core task objective was achieved, not on minor imperfections.
 """
 
 
@@ -57,17 +52,11 @@ JUDGE_USER_PROMPT_TEMPLATE = """## Task Evaluation Request
 {instruction}
 
 ### 2. Image Information
-- **Image Resolution**: {image_width} x {image_height} pixels
 - **Image 1 (Initial State)**: Before task execution
 - **Image 2 (Final State)**: After task execution
 
-### 3. Object Positions in Initial Image
-{initial_positions_text}
-
-### 4. Executed Python Code
-```python
-{executed_code}
-```
+### 3. Task-Relevant Objects
+{object_names_text}
 
 ---
 
@@ -79,40 +68,29 @@ Analyze each step and provide your findings in the format below.
 
 **STEP 1 - Identify Objects in Initial Image**
 - Object: [object name]
-  - Found at pixel: ([x], [y])
-  - Description: [what you see at that location]
-- Object: [object name]
-  - Found at pixel: ([x], [y])
-  - Description: [what you see at that location]
+  - Position: [approximate location in the image]
+  - Description: [what you see]
+- [Repeat for each object]
 - Step 1 Result: [PASS/FAIL] - [brief reason]
 
 **STEP 2 - Identify Objects in Final Image**
 - Object: [object name]
-  - Found at pixel: ([x], [y])
-  - Description: [what you see at that location]
-- Object: [object name]
-  - Found at pixel: ([x], [y])
-  - Description: [what you see at that location]
+  - Position: [approximate location in the image]
+  - Description: [what you see]
+- [Repeat for each object]
 - Step 2 Result: [PASS/FAIL] - [brief reason]
 
-**STEP 3 - Analyze Movement**
+**STEP 3 - Analyze Changes**
 - Object: [object name]
-  - Initial: ([x1], [y1]) → Final: ([x2], [y2])
-  - Movement: [moved/not moved], Direction: [left/right/up/down/none]
-- Step 3 Result: [PASS/FAIL] - [Did the pick object move as expected?]
+  - Change: [moved from A to B / stayed in place / etc.]
+- [Repeat for each object]
+- Step 3 Result: [PASS/FAIL] - [Are the changes consistent with the task?]
 
 **STEP 4 - Verify Goal Achievement**
-- Goal: "{instruction}"
-- Pick object picked up: [YES/NO]
-- Reached destination: [YES/NO]
+- [Evaluate each aspect of the instruction]
 - Step 4 Result: [PASS/FAIL] - [brief reason]
 
-**STEP 5 - Check Spatial Relationships**
-- Expected relationship: [e.g., "red cup should be on carrier"]
-- Observed relationship: [what you actually see in final image]
-- Step 5 Result: [PASS/FAIL] - [brief reason]
-
-**STEP 6 - Final Judgment**
+**STEP 5 - Final Judgment**
 - Steps passed: [list which steps passed]
 - Steps failed: [list which steps failed, if any]
 
@@ -148,55 +126,17 @@ def build_judge_prompt(
     Returns:
         포맷된 프롬프트 문자열
     """
-    # 이미지 해상도 (기본값)
-    if image_resolution is None:
-        image_resolution = (640, 480)
-    image_width, image_height = image_resolution
-
-    # 객체 위치 텍스트 생성 (픽셀 좌표 포함)
-    positions_lines = []
-    for name, info in object_positions.items():
-        # 메타데이터 키는 건너뛰기
-        if name.startswith("_"):
-            continue
-
-        if info is None:
-            positions_lines.append(f"- **{name}**: Not detected")
-        elif isinstance(info, dict) and "position" in info:
-            # Extended format with pixel coordinates
-            pos = info["position"]
-            pixel_coords = info.get("pixel_coords")
-            bbox_pixels = info.get("bbox_pixels")
-
-            line = f"- **{name}**:\n"
-            line += f"  - World position: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}] meters\n"
-
-            if pixel_coords:
-                cx, cy = pixel_coords
-                line += f"  - Pixel center: ({cx}, {cy})\n"
-
-            if bbox_pixels:
-                x1, y1, x2, y2 = bbox_pixels
-                line += f"  - Bounding box: ({x1}, {y1}) to ({x2}, {y2})"
-
-            positions_lines.append(line)
-        elif isinstance(info, (list, tuple)) and len(info) >= 3:
-            # Legacy format: [x, y, z]
-            positions_lines.append(
-                f"- **{name}**: [{info[0]:.4f}, {info[1]:.4f}, {info[2]:.4f}] meters"
-            )
-        else:
-            positions_lines.append(f"- **{name}**: Not detected")
-
-    initial_positions_text = "\n".join(positions_lines) if positions_lines else "No objects detected"
+    # 객체 이름 목록 생성 (좌표는 제외 — Judge는 이미지로 판단)
+    object_names = [
+        f"- {name}" for name in object_positions.keys()
+        if not name.startswith("_") and object_positions[name] is not None
+    ]
+    object_names_text = "\n".join(object_names) if object_names else "No objects detected"
 
     # 프롬프트 생성
     prompt = JUDGE_USER_PROMPT_TEMPLATE.format(
         instruction=instruction,
-        image_width=image_width,
-        image_height=image_height,
-        initial_positions_text=initial_positions_text,
-        executed_code=executed_code,
+        object_names_text=object_names_text,
     )
 
     return prompt

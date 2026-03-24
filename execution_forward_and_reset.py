@@ -1735,7 +1735,8 @@ class ForwardAndResetPipeline:
                         result_image=result_image,
                         detection_image=self.detection_image,
                     )
-            # 코드 캐시 갱신: 실행 성공이면 캐싱 (Judge FALSE면 무효화)
+            # 코드 캐시 갱신: 실행 성공 + Judge!=FALSE이면 캐싱
+            # 한 번이라도 TRUE가 나온 코드는 유지 (Judge=FALSE로 무효화하지 않음)
             judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
             should_cache = forward_success and judge_pred != 'FALSE'
             if should_cache:
@@ -1750,13 +1751,16 @@ class ForwardAndResetPipeline:
                     print(f"  {GREEN}[CodeReuse] Forward code cached (keys: {self.cached_forward_keys}){RESET}")
                     if self._cached_point_labels:
                         print(f"  {GREEN}[CodeReuse] Point labels cached: {self._cached_point_labels}{RESET}")
-            elif not forward_success or judge_pred == 'FALSE':
+            elif not forward_success:
+                # 실행 자체가 실패한 경우만 캐시 무효화 (코드 자체의 문제)
+                # Judge=FALSE는 detection/환경 문제일 수 있으므로 이전 성공 코드 유지
                 if self.cached_forward_code is not None:
-                    reason = "execution failed" if not forward_success else "Judge=FALSE"
-                    print(f"  {YELLOW}[CodeReuse] Cache invalidated ({reason}){RESET}")
+                    print(f"  {YELLOW}[CodeReuse] Cache invalidated (execution failed){RESET}")
                 self.cached_forward_code = None
                 self.cached_forward_keys = []
                 self._cached_point_labels = None
+            elif judge_pred == 'FALSE' and self.cached_forward_code is not None:
+                print(f"  {YELLOW}[CodeReuse] Judge=FALSE but keeping cached code (previously validated){RESET}")
 
             # Forward 로깅 종료
             forward_log_path = forward_logger.stop()
@@ -2532,7 +2536,7 @@ class ForwardAndResetPipeline:
 
         for attempt in range(10):
             # arrange 태스크: seed 위치를 |y| > 0.12m (테이블 상/하단)으로 제한
-            seed_y_min_abs = 0.12 if self.task_type == "arrange" else None
+            seed_y_min_abs = 0.15 if self.task_type == "arrange" else None
 
             random_targets = generate_random_positions(
                 grippable_objects=grippable,
@@ -2541,6 +2545,7 @@ class ForwardAndResetPipeline:
                 workspace=workspace,
                 pix2robot=pix2robot,
                 y_min_abs=seed_y_min_abs,
+                current_positions=current_positions,
             )
             if not random_targets:
                 print(f"  [SeedGen] Attempt {attempt+1}: position generation failed, retrying...")
@@ -2971,13 +2976,15 @@ class ForwardAndResetPipeline:
             # Reset 코드 재사용 또는 새로 생성
             if self.cached_reset_code is not None:
                 print(f"  {GREEN}[CodeReuse] Using cached reset code{RESET_C}")
-                # 검출로 current_positions 획득
+                # 검출로 current_positions 획득 (forward 함수 재사용, detection만 수행)
+                print(f"\n{CYAN}  [Restore] Running detection to find current positions...{RESET_C}")
                 self.generate_forward_code(
                     instruction, {},
                     image_path=tmp_path,
                     skip_codegen=True,
                     canonical_labels=list(target_positions.keys()),
                 )
+                print(f"{CYAN}  [Restore] Detection complete{RESET_C}")
                 current_pos = self.detected_positions
                 reset_code = self.cached_reset_code
             else:
@@ -3376,13 +3383,14 @@ class ForwardAndResetPipeline:
                     print(f"{RED}  → run_forward_and_reset.sh의 NUM_EPISODES와 NUM_RANDOM_SEEDS를 원래 세션 설정으로 맞춰주세요.{RESET}")
             print(f"\n{GREEN}  All batches complete, nothing to resume{RESET}")
         else:
-            # seed 확보 + restore
-            if seed_positions[first_incomplete] is None and first_incomplete > 0:
-                print(f"\n{MAGENTA}{BOLD}  Generating seed_{first_incomplete+1}...{RESET}")
-                seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
-            if seed_positions[first_incomplete] is not None:
-                print(f"\n{CYAN}{BOLD}  Restoring to seed_{first_incomplete+1}...{RESET}")
-                self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
+            # seed 확보 + restore (Batch 0/seed 1은 initial positions이므로 restore 스킵)
+            if first_incomplete > 0:
+                if seed_positions[first_incomplete] is None:
+                    print(f"\n{MAGENTA}{BOLD}  Generating seed_{first_incomplete+1}...{RESET}")
+                    seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
+                if seed_positions[first_incomplete] is not None:
+                    print(f"\n{CYAN}{BOLD}  Restoring to seed_{first_incomplete+1}...{RESET}")
+                    self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
 
             # 에피소드 루프
             for episode_idx in range(num_episodes):

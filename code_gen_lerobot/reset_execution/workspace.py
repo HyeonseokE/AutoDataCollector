@@ -308,6 +308,8 @@ def generate_random_positions(
     max_attempts: int = 500,
     bbox_margin_px: int = 10,
     y_min_abs: Optional[float] = None,
+    current_positions: Dict[str, dict] = None,
+    current_positions_margin_px: int = 15,
 ) -> Dict[str, List[float]]:
     """
     랜덤 위치 생성 (IoU 기반 충돌 검증).
@@ -405,6 +407,24 @@ def generate_random_positions(
             "bbox_h": bbox_px[1],
             "allow_overlap": True,  # IoU ≤ 0.5 허용
         })
+
+    # 4) 현재 위치의 물체 (고정 장애물, 겹침 불허 + margin)
+    if current_positions is not None:
+        for name, info in current_positions.items():
+            if info is None or name.startswith("_"):
+                continue
+            cur_info = info if isinstance(info, dict) else {"position": info}
+            center_px = _get_center_px(cur_info, pix2robot)
+            if center_px is None:
+                continue
+            bbox_px = _get_bbox_px(cur_info)
+            occupied.append({
+                "name": f"{name}_current",
+                "center_px": center_px,
+                "bbox_w": bbox_px[0] + current_positions_margin_px * 2,
+                "bbox_h": bbox_px[1] + current_positions_margin_px * 2,
+                "allow_overlap": False,  # 겹침 불허 + margin
+            })
 
     # 결과 저장
     target_positions = {}

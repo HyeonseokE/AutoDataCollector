@@ -204,27 +204,6 @@ def generate_skill_visualizations(
     saved.append(str(p))
 
     # =============================================
-    # Plot 2: World vs Robot XYZ
-    # =============================================
-    world_xyz = np.stack(df["skill.goal_position.world_xyzrpy"].values)
-    robot_xyz = np.stack(df["skill.goal_position.robot_xyzrpy"].values)
-
-    fig, axes = plt.subplots(3, 1, figsize=(16, 8), sharex=True)
-    fig.suptitle("World vs Robot Goal Position (XYZ)", fontsize=14)
-    labels = ["X", "Y", "Z"]
-    for i, (ax, lbl) in enumerate(zip(axes, labels)):
-        ax.plot(frames, world_xyz[:, i], label=f"world.{lbl}", linewidth=1.2)
-        ax.plot(frames, robot_xyz[:, i], label=f"robot.{lbl}", linewidth=1.2, linestyle="--")
-        ax.set_ylabel(f"{lbl} (m)")
-        ax.legend(fontsize=8, loc="upper right")
-    axes[-1].set_xlabel("Frame")
-    plt.tight_layout()
-    p = save_dir / "skill_analysis_coordinates.png"
-    fig.savefig(str(p), dpi=120)
-    plt.close(fig)
-    saved.append(str(p))
-
-    # =============================================
     # Plot 3: All 6 Goal Joints vs Observation State — (7,1) layout
     # =============================================
     joint_names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]

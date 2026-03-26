@@ -433,7 +433,7 @@ if __name__ == "__main__":
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
 4. `is_table=True` on table, `is_table=False` on another object.
-5. **Stacking**: After placing each object, call `skills.detect_objects(["object_name"])` to get its updated position (new z after stacking). Use the updated position as the target for the next object. Do NOT compute stack heights manually — always re-detect.
+5. **Re-detection**: When switching to the **2nd object onward**, ALWAYS call `skills.detect_objects([...all object names...])` right after `set_subtask()` to get updated positions. Update ALL local position variables with the returned values. This is critical for stacking (z height changes) and any task where objects have been moved. Do NOT compute heights manually — always re-detect. The 1st object does NOT need re-detection (scene is unchanged).
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
@@ -572,27 +572,30 @@ skills.move_to_pixel([500, 200], target_name="left side", skill_description="Mov
 skills.execute_place_at_pixel([500, 200], is_table=True, gripper_open_ratio=0.7, target_name="left side", skill_description="Place object_name at left side of table", verification_question="Is object_name placed at the left side?")
 skills.move_to_pixel([500, 200], target_name="left side", skill_description="Retract from left side", verification_question="Is the gripper clear of the left side?")
 
-# STACKING with re-detection — use detect_objects() to get updated positions after each place
+# STACKING with re-detection — re-detect from 2nd object onward
 # Example: stack B on A, then C on B
-# Step 1: Pick A, place on table (or target)
+# Step 1: 1st object — no re-detection needed (scene unchanged)
+skills.set_subtask("A", a_pos, target_pos)
 skills.execute_pick_object(a_pos, object_name="A", skill_description="Pick A", verification_question="Is A grasped?")
 skills.execute_place_object(target_pos, is_table=True, gripper_open_ratio=0.7, target_name="target", skill_description="Place A", verification_question="Is A placed?")
 
-# Step 2: Re-detect A to get its updated position after placement
-updated = skills.detect_objects(["A"])
-a_new_pos = updated["A"]["position"]
-
-# Step 3: Pick B, place on top of A using updated position
+# Step 2: 2nd object — move_to_initial_state → re-detect → pick → place
+skills.set_subtask("B", b_pos, a_pos)
+skills.move_to_initial_state()  # clear arm from camera view
+updated = skills.detect_objects(["A", "B", "C"])
+if updated["A"]: a_pos = updated["A"]["position"]  # A's z may have changed
+if updated["B"]: b_pos = updated["B"]["position"]
 skills.execute_pick_object(b_pos, object_name="B", skill_description="Pick B", verification_question="Is B grasped?")
-skills.execute_place_object(a_new_pos, is_table=False, gripper_open_ratio=0.7, target_name="A", skill_description="Place B on A", verification_question="Is B on A?")
+skills.execute_place_object(a_pos, is_table=False, gripper_open_ratio=0.7, target_name="A", skill_description="Place B on A", verification_question="Is B on A?")
 
-# Step 4: Re-detect B (now on A) to get stacked position
-updated = skills.detect_objects(["B"])
-b_new_pos = updated["B"]["position"]
-
-# Step 5: Pick C, place on top of B
+# Step 3: 3rd object — move_to_initial_state → re-detect again
+skills.set_subtask("C", c_pos, b_pos)
+skills.move_to_initial_state()  # clear arm from camera view
+updated = skills.detect_objects(["A", "B", "C"])
+if updated["B"]: b_pos = updated["B"]["position"]  # B is now on A, z updated
+if updated["C"]: c_pos = updated["C"]["position"]
 skills.execute_pick_object(c_pos, object_name="C", skill_description="Pick C", verification_question="Is C grasped?")
-skills.execute_place_object(b_new_pos, is_table=False, gripper_open_ratio=0.7, target_name="B", skill_description="Place C on B", verification_question="Is C on B?")
+skills.execute_place_object(b_pos, is_table=False, gripper_open_ratio=0.7, target_name="B", skill_description="Place C on B", verification_question="Is C on B?")
 
 # END — always last
 skills.move_to_free_state(skill_description="Move to safe position", verification_question="Is the robot at safe position?")
@@ -620,7 +623,7 @@ if __name__ == "__main__":
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
 4. `is_table=True` on table, `is_table=False` on another object.
-5. **Stacking**: After placing each object, call `skills.detect_objects(["object_name"])` to get its updated position (new z after stacking). Use the updated position as the target for the next object. Do NOT compute stack heights manually — always re-detect.
+5. **Re-detection**: When switching to the **2nd object onward**, ALWAYS call `skills.detect_objects([...all object names...])` right after `set_subtask()` to get updated positions. Update ALL local position variables with the returned values. This is critical for stacking (z height changes) and any task where objects have been moved. Do NOT compute heights manually — always re-detect. The 1st object does NOT need re-detection (scene is unchanged).
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.

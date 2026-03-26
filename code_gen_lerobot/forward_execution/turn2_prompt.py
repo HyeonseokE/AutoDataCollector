@@ -91,6 +91,8 @@ Return a JSON block:
 **Important**:
 - Look carefully at the cropped image and provide accurate coordinates.
 - Coordinates are normalized 0–1000 relative to this cropped image.
+- **Grasp stability**: Choose the grasp point that maximizes gripper contact and grip stability. Prefer the geometric center of the widest graspable surface. Avoid edges, corners, or thin protrusions where the gripper may slip.
+- **Task awareness**: Consider what the robot needs to do with this object. If the object will be stacked, placed precisely, or inserted, choose a grasp point that allows stable holding during the entire manipulation sequence.
 """.strip()
 
     # canonical point labels가 있으면 강제 추가

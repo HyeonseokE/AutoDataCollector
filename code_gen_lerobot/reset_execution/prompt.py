@@ -236,21 +236,32 @@ target_positions = {{
 ### **Skill Composition Patterns** (MUST follow exactly)
 
 ```python
-# PICK from current position — ALWAYS reference current_positions dict
-cur = current_positions["object_name"]["position"]
+# === STEP 1: Move 1st object to target (no re-detection needed — scene unchanged) ===
 approach_height = 0.20
-
-skills.gripper_open()
-skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name")
-skills.execute_pick_object(cur, object_name="object_name")
-skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name")
-
-# PLACE at target position — ALWAYS reference target_positions dict
+cur = current_positions["object_name"]["position"]
 tgt = target_positions["object_name"]["position"]
+skills.set_subtask("object_name", cur, tgt)
 
-skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target")
-skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_name="object_name target")
-skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target")
+# Step 1-1. Pick object_name from current position
+skills.gripper_open(skill_description="Open gripper for object_name", verification_question="Is the gripper open?")
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Move above object_name", verification_question="Is the gripper above object_name?")
+skills.execute_pick_object(cur, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped?")
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Lift object_name", verification_question="Is object_name lifted?")
+
+# Step 1-2. Place object_name at target position
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Move object_name above target position", verification_question="Is object_name above target position?")
+skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_name="object_name target", skill_description="Place object_name at target position", verification_question="Is object_name placed at target position?")
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Retract from object_name target", verification_question="Is the gripper clear of object_name?")
+
+# === STEP 2: Move 2nd object to target (move_to_initial → re-detect → pick → place) ===
+skills.set_subtask("next_object", current_positions["next_object"]["position"], target_positions["next_object"]["position"])
+skills.move_to_initial_state()  # clear arm from camera view before detection
+updated = skills.detect_objects(["object_name", "next_object", ...])  # ALL object names
+cur = updated["next_object"]["position"] if updated.get("next_object") else current_positions["next_object"]["position"]
+tgt = target_positions["next_object"]["position"]
+# ... (same pick → place pattern with updated cur)
+
+# === STEP 3+: repeat set_subtask → move_to_initial_state → detect_objects → update → pick → place ===
 ```
 
 ### **Code Template**
@@ -272,12 +283,13 @@ def execute_task():
 
         skills.move_to_initial_state()
 
-        # === RESET: Move each object from current to target ===
+        # For each object: set_subtask → PICK → PLACE
         # current_positions and target_positions are global variables (injected at runtime).
-        # Access them directly. Do NOT redefine or hardcode these dicts.
+        # MUST call skills.set_subtask() before each object's pick-place sequence.
 
         # ... (your reset logic referencing the global dicts) ...
 
+        skills.clear_subtask()
         skills.move_to_initial_state()
         skills.move_to_free_state()
 
@@ -291,15 +303,18 @@ if __name__ == "__main__":
 ### **Guidelines**
 
 1. Generate code that moves each object from current to target position
-2. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
-3. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
-4. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
-5. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-6. Use `approach_height = 0.20` for all approach/lift movements
-7. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
-8. Use `is_table=True` when placing on table
-9. Always include try/finally for proper cleanup
-10. Always start with `move_to_initial_state()`, end with `move_to_initial_state()` and `move_to_free_state()`
+2. **MUST call `skills.set_subtask(object_name, cur, tgt)` before each object's pick-place sequence** — this labels the recording
+3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
+4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
+4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
+5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
+6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
+7. Use `approach_height = 0.20` for all approach/lift movements
+8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
+9. Use `is_table=True` when placing on table
+10. Always include try/finally for proper cleanup
+11. Always start with `move_to_initial_state()`, end with `skills.clear_subtask()`, `move_to_initial_state()` and `move_to_free_state()`
+12. **ALWAYS pass `skill_description` and `verification_question` for every skill call** — as shown in the Skill Composition Patterns above
 
 ### **Output Format**
 - Provide complete executable Python code
@@ -423,21 +438,32 @@ target_positions = {{
 ### **Skill Composition Patterns** (MUST follow exactly)
 
 ```python
-# PICK from current position — ALWAYS reference current_positions dict
-cur = current_positions["object_name"]["position"]
+# === STEP 1: Move 1st object to target (no re-detection needed — scene unchanged) ===
 approach_height = 0.20
-
-skills.gripper_open()
-skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name")
-skills.execute_pick_object(cur, object_name="object_name")
-skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name")
-
-# PLACE at target position — ALWAYS reference target_positions dict
+cur = current_positions["object_name"]["position"]
 tgt = target_positions["object_name"]["position"]
+skills.set_subtask("object_name", cur, tgt)
 
-skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target")
-skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_name="object_name target")
-skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target")
+# Step 1-1. Pick object_name from current position
+skills.gripper_open(skill_description="Open gripper for object_name", verification_question="Is the gripper open?")
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Move above object_name", verification_question="Is the gripper above object_name?")
+skills.execute_pick_object(cur, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped?")
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Lift object_name", verification_question="Is object_name lifted?")
+
+# Step 1-2. Place object_name at target position
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Move object_name above target position", verification_question="Is object_name above target position?")
+skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_name="object_name target", skill_description="Place object_name at target position", verification_question="Is object_name placed at target position?")
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Retract from object_name target", verification_question="Is the gripper clear of object_name?")
+
+# === STEP 2: Move 2nd object to target (move_to_initial → re-detect → pick → place) ===
+skills.set_subtask("next_object", current_positions["next_object"]["position"], target_positions["next_object"]["position"])
+skills.move_to_initial_state()  # clear arm from camera view before detection
+updated = skills.detect_objects(["object_name", "next_object", ...])  # ALL object names
+cur = updated["next_object"]["position"] if updated.get("next_object") else current_positions["next_object"]["position"]
+tgt = target_positions["next_object"]["position"]
+# ... (same pick → place pattern with updated cur)
+
+# === STEP 3+: repeat set_subtask → move_to_initial_state → detect_objects → update → pick → place ===
 ```
 
 ### **Code Template**
@@ -461,12 +487,13 @@ def execute_task():
 
         skills.move_to_initial_state()
 
-        # === RESET: Move each object from current to target ===
+        # For each object: set_subtask → PICK → PLACE
+        # MUST call skills.set_subtask() before each object's pick-place sequence.
         # ALWAYS use: current_positions["name"]["position"] and target_positions["name"]["position"]
-        # Do NOT hardcode any coordinate values
 
         # ... (your reset logic referencing the dicts) ...
 
+        skills.clear_subtask()
         skills.move_to_initial_state()
         skills.move_to_free_state()
 
@@ -534,17 +561,20 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 ### **Guidelines**
 
 1. Generate code that moves each object from current to target position
-2. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
-3. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
-4. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
-5. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-6. Use `approach_height = 0.20` (20cm) for all approach/lift movements
-7. **Pitch Handling**: Pitch is automatically saved at pick and restored at place
-8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
-9. Use `is_table=True` when placing on table
-10. Always include try/finally for proper cleanup
-11. Always start with `move_to_initial_state()`, end with `move_to_initial_state()` and `move_to_free_state()`
-12. **Unstacking**: If objects are stacked, always unstack from top to bottom before moving them
+2. **MUST call `skills.set_subtask(object_name, cur, tgt)` before each object's pick-place sequence** — this labels the recording
+3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
+4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
+4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
+5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
+6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
+7. Use `approach_height = 0.20` (20cm) for all approach/lift movements
+8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place
+9. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
+10. Use `is_table=True` when placing on table
+11. Always include try/finally for proper cleanup
+12. Always start with `move_to_initial_state()`, end with `skills.clear_subtask()`, `move_to_initial_state()` and `move_to_free_state()`
+13. **Unstacking**: If objects are stacked, always unstack from top to bottom before moving them
+14. **ALWAYS pass `skill_description` and `verification_question` for every skill call** — as shown in the Skill Composition Patterns above
 
 ### **Output Format**
 - Provide complete executable Python code

@@ -216,4 +216,50 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             new_pos = updated["block A"]["position"]
             # Now place block B on top of block A using the updated position
             skills.execute_place_object(new_pos, is_table=False, ...)
+        """
+
+    def set_subtask(self, object_name: str,
+                    current_position: list = None,
+                    target_position: list = None) -> None:
+        """Set sub-task label for recording. Groups multiple skills under one higher-level label.
+        Call this before each object's pick-place sequence.
+
+        Args:
+            object_name: Name of the object being manipulated (e.g., "yellow block")
+            current_position: Current position [x, y, z] of the object
+            target_position: Target position [x, y, z] to move the object to
+        """
+
+    def clear_subtask(self) -> None:
+        """Clear the current sub-task label. Call after all objects are moved."""
+
+    def detect_objects(self, queries: list) -> dict:
+        """Re-detect objects in the current camera view using VLM + depth sensor.
+
+        Returns updated positions including z height (from RealSense depth).
+        IMPORTANT: Always call this after set_subtask() to refresh object positions
+        before picking/placing. This is critical when objects have been moved
+        (e.g., stacked on top of each other, changing their z height).
+
+        Args:
+            queries: List of object names to detect, e.g., ["red block", "yellow block"]
+
+        Returns:
+            Dict: {"object_name": {"position": [x, y, z], "pixel": (u, v), "bbox_px": (w, h)}}
+            Returns None for objects not found.
+
+        Pattern — always follow this sequence when switching to a new object:
+            # 1. Set subtask label
+            skills.set_subtask("purple block", purple_pos, target_pos)
+            # 2. Move to initial state (clear arm from camera view before detection)
+            skills.move_to_initial_state()
+            # 3. Re-detect ALL objects to get updated positions
+            updated = skills.detect_objects(["red block", "yellow block", "purple block"])
+            # 4. Update local variables with fresh positions
+            if updated["purple block"]:
+                purple_pos = updated["purple block"]["position"]
+            if updated["yellow block"]:
+                target_pos = updated["yellow block"]["position"]
+            # 5. Now pick/place with accurate coordinates
+            skills.execute_pick_object(purple_pos, ...)
         """'''

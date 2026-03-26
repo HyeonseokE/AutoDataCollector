@@ -103,6 +103,10 @@ class DatasetRecorder:
         # Observation feature enabled 설정 로드
         self._obs_enabled = load_observation_features_from_yaml(config_yaml)
 
+        # Subtask feature enabled 설정 로드
+        from record_dataset.config import load_subtask_features_from_yaml
+        self._subtask_enabled = load_subtask_features_from_yaml(config_yaml)
+
         print(f"[DatasetRecorder] Camera features: {[cam.to_feature_key() for cam in self.enabled_cameras]}")
         enabled_skills = [k for k, v in self._skill_enabled.items() if v]
         print(f"[DatasetRecorder] Skill features: {enabled_skills}")
@@ -259,6 +263,7 @@ class DatasetRecorder:
         images: Dict[str, np.ndarray],
         skill_label: Optional[str] = None,
         observation_extras: Optional[Dict[str, np.ndarray]] = None,
+        subtask_info: Optional[Dict] = None,
     ) -> None:
         """
         멀티 카메라 프레임 레코딩 + 스킬 라벨 + observation extras
@@ -319,7 +324,6 @@ class DatasetRecorder:
                 "skill.verification_question": skill_info["verification_question"],
                 "skill.progress": np.array([skill_info["progress"]], dtype=np.float32),
                 "skill.goal_position.joint": skill_info["goal_joint"],
-                "skill.goal_position.world_xyzrpy": skill_info["goal_world_xyzrpy"],
                 "skill.goal_position.robot_xyzrpy": skill_info["goal_robot_xyzrpy"],
                 "skill.goal_position.gripper": np.array([skill_info["goal_gripper"]], dtype=np.float32),
             }
@@ -330,7 +334,6 @@ class DatasetRecorder:
                 "skill.verification_question": "",
                 "skill.progress": np.array([0.0], dtype=np.float32),
                 "skill.goal_position.joint": np.zeros(6, dtype=np.float32),
-                "skill.goal_position.world_xyzrpy": np.zeros(6, dtype=np.float32),
                 "skill.goal_position.robot_xyzrpy": np.zeros(6, dtype=np.float32),
                 "skill.goal_position.gripper": np.array([0.0], dtype=np.float32),
             }
@@ -345,6 +348,17 @@ class DatasetRecorder:
             for key, value in observation_extras.items():
                 if self._obs_enabled.get(key, False):
                     frame[key] = value
+
+        # Sub-task info (상위 계층 라벨, 없으면 기본값으로 기록)
+        if self._subtask_enabled.get("subtask.natural_language", False):
+            frame["subtask.natural_language"] = subtask_info.get("natural_language", "") if subtask_info else ""
+        if self._subtask_enabled.get("subtask.object_name", False):
+            frame["subtask.object_name"] = subtask_info.get("object_name", "") if subtask_info else ""
+        if self._subtask_enabled.get("subtask.target_position", False):
+            frame["subtask.target_position"] = np.asarray(
+                subtask_info.get("target_position", [0.0, 0.0, 0.0]) if subtask_info else [0.0, 0.0, 0.0],
+                dtype=np.float32,
+            )
 
         # 각 카메라 이미지 추가
         for cam in self.enabled_cameras:

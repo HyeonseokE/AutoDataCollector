@@ -78,6 +78,7 @@ class DryRunSkills:
         target_pitch=None,
         target_name=None,
         skill_description=None,
+        verification_question=None,
     ) -> bool:
         if self.kinematics is None:
             return True
@@ -110,6 +111,7 @@ class DryRunSkills:
         object_position,
         object_name=None,
         skill_description=None,
+        verification_question=None,
     ) -> bool:
         object_position = np.array(object_position)
         object_height = object_position[2]
@@ -145,6 +147,7 @@ class DryRunSkills:
         gripper_open_ratio=1.0,
         target_name=None,
         skill_description=None,
+        verification_question=None,
     ) -> bool:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
@@ -164,6 +167,26 @@ class DryRunSkills:
             target_pitch=self._saved_pitch,
             target_name=target_name,
         )
+
+    def set_subtask(self, object_name=None, current_position=None, target_position=None):
+        """Sub-task label (no-op in dry run)."""
+        pass
+
+    def clear_subtask(self):
+        """Clear sub-task label (no-op in dry run)."""
+        pass
+
+    def move_to_pixel(self, pixel, **kwargs) -> bool:
+        """Pixel-based move (no-op in dry run — no pix2robot available)."""
+        return True
+
+    def execute_place_at_pixel(self, pixel, **kwargs) -> bool:
+        """Pixel-based place (no-op in dry run)."""
+        return True
+
+    def rotate_90degree(self, direction=1, **kwargs) -> bool:
+        """Rotate gripper (no-op in dry run)."""
+        return True
 
     def detect_objects(self, queries, **kwargs):
         return {q: None for q in queries}

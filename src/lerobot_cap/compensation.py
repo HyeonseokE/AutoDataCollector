@@ -306,6 +306,82 @@ def apply_adaptive_compensation(
     return compensated, factor
 
 
+# ============================================================================
+# Gravity Sag Pre-Compensation (Cartesian z offset before IK)
+# ============================================================================
+
+class GravitySagCompensator:
+    """Pre-compensate IK target z for gravity-induced arm sag.
+
+    At extended reach + high z positions, gravity causes the arm to droop
+    below the commanded height.  This compensator increases the IK target z
+    by the predicted sag amount so the actual end-effector lands at the
+    desired position after gravity pulls it down.
+
+    Model:
+        sag = gain * reach^reach_power * max(0, z - z_deadzone)
+
+    The parameters can be tuned per-robot via the compensation config JSON
+    under the ``gravity_sag`` key.
+    """
+
+    def __init__(
+        self,
+        gain: float = 1.5,
+        reach_power: float = 2.0,
+        z_deadzone: float = 0.05,
+        max_offset: float = 0.05,
+        enabled: bool = True,
+    ):
+        self.gain = gain
+        self.reach_power = reach_power
+        self.z_deadzone = z_deadzone
+        self.max_offset = max_offset
+        self.enabled = enabled
+
+    @classmethod
+    def from_config(cls, config: dict) -> "GravitySagCompensator":
+        """Create from ``gravity_sag`` section of compensation config."""
+        return cls(
+            gain=config.get("gain", 1.5),
+            reach_power=config.get("reach_power", 2.0),
+            z_deadzone=config.get("z_deadzone", 0.05),
+            max_offset=config.get("max_offset", 0.05),
+            enabled=config.get("enabled", True),
+        )
+
+    def compute_offset(self, target_position: np.ndarray) -> float:
+        """Compute z offset (meters, >= 0) for a given base_link target.
+
+        Args:
+            target_position: [x, y, z] in base_link frame (meters)
+
+        Returns:
+            Positive z offset to *add* to the IK target z.
+        """
+        if not self.enabled:
+            return 0.0
+
+        x, y, z = float(target_position[0]), float(target_position[1]), float(target_position[2])
+        reach = np.sqrt(x ** 2 + y ** 2)
+
+        z_factor = max(0.0, z - self.z_deadzone)
+        if z_factor <= 0.0:
+            return 0.0
+
+        offset = self.gain * (reach ** self.reach_power) * z_factor
+        return min(offset, self.max_offset)
+
+    def get_info(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "gain": self.gain,
+            "reach_power": self.reach_power,
+            "z_deadzone": self.z_deadzone,
+            "max_offset": self.max_offset,
+        }
+
+
 class AdaptiveCompensator:
     """
     Stateful adaptive compensator for trajectory execution.
@@ -537,5 +613,12 @@ class AdaptiveCompensator:
         instance.gravity_lut = gravity_lut
         instance.config_path = config_path
         instance.robot_id = config.get("robot_id", "unknown")
+
+        # Gravity sag pre-compensator (Cartesian z offset before IK)
+        sag_config = config.get("gravity_sag", None)
+        if sag_config is not None:
+            instance.gravity_sag = GravitySagCompensator.from_config(sag_config)
+        else:
+            instance.gravity_sag = None
 
         return instance

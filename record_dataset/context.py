@@ -104,10 +104,14 @@ class RecordingContext:
     _current_skill_type: Optional[str] = None
     _current_verification_question: Optional[str] = None
     _current_goal_joint: Optional[np.ndarray] = None
-    _current_goal_world_xyzrpy: Optional[np.ndarray] = None
     _current_goal_robot_xyzrpy: Optional[np.ndarray] = None
     _current_goal_gripper: Optional[float] = None
     _skill_start_state: Optional[np.ndarray] = None
+
+    # Sub-task level info (상위 계층 라벨, reset recording용)
+    _current_subtask_label: Optional[str] = None
+    _current_subtask_object_name: Optional[str] = None
+    _current_subtask_target_position: Optional[np.ndarray] = None
 
     def __init__(
         self,
@@ -249,6 +253,31 @@ class RecordingContext:
         return cls._current_skill_label
 
     @classmethod
+    def set_subtask(cls, label: str, object_name: str = "", target_position: list = None) -> None:
+        """현재 sub-task 라벨 설정 (상위 계층, 여러 skill을 묶음)"""
+        with cls._lock:
+            cls._current_subtask_label = label
+            cls._current_subtask_object_name = object_name
+            cls._current_subtask_target_position = np.array(target_position) if target_position else None
+
+    @classmethod
+    def clear_subtask(cls) -> None:
+        """sub-task 라벨 해제"""
+        with cls._lock:
+            cls._current_subtask_label = None
+            cls._current_subtask_object_name = None
+            cls._current_subtask_target_position = None
+
+    @classmethod
+    def get_subtask_info(cls) -> dict:
+        """현재 sub-task 정보 반환"""
+        return {
+            "natural_language": cls._current_subtask_label or "",
+            "object_name": cls._current_subtask_object_name or "",
+            "target_position": cls._current_subtask_target_position if cls._current_subtask_target_position is not None else np.zeros(3, dtype=np.float32),
+        }
+
+    @classmethod
     def set_kinematics(
         cls,
         kinematics,
@@ -298,7 +327,6 @@ class RecordingContext:
         obs_enabled = cls._obs_features_enabled or {}
 
         need_robot_ee = obs_enabled.get("observation.ee_pos.robot_xyzrpy", False)
-        need_world_ee = obs_enabled.get("observation.ee_pos.world_xyzrpy", False)
         need_gripper = obs_enabled.get("observation.gripper_binary", False)
         need_radian_state = obs_enabled.get("observation.radian.state", False)
         need_radian_action = obs_enabled.get("observation.radian.action", False)
@@ -306,7 +334,7 @@ class RecordingContext:
         need_radian_action_urdf0 = obs_enabled.get("observation.radian.action_urdf0", False)
 
         # FK 기반 EE 자세 계산
-        if (need_robot_ee or need_world_ee) and cls._kinematics is not None and cls._calibration_limits is not None:
+        if need_robot_ee and cls._kinematics is not None and cls._calibration_limits is not None:
             try:
                 # normalized (5 arm joints) → radians
                 arm_norm = np.asarray(state[:5], dtype=np.float64)
@@ -328,28 +356,10 @@ class RecordingContext:
 
                 if need_robot_ee:
                     extras["observation.ee_pos.robot_xyzrpy"] = robot_xyzrpy
-
-                if need_world_ee and cls._frame_transformer is not None:
-                    # robot(base_link) → world 역변환 (position만)
-                    try:
-                        if cls._frame_transformer.has_frame("world"):
-                            T = cls._frame_transformer.frames["world"]["T_base_from_frame"]
-                            T_inv = np.linalg.inv(T)
-                            p_base = np.array([pos[0], pos[1], pos[2], 1.0])
-                            world_pos = (T_inv @ p_base)[:3]
-                            world_xyzrpy = np.array([
-                                world_pos[0], world_pos[1], world_pos[2],
-                                roll, pitch, yaw
-                            ], dtype=np.float32)
-                            extras["observation.ee_pos.world_xyzrpy"] = world_xyzrpy
-                    except Exception:
-                        extras["observation.ee_pos.world_xyzrpy"] = np.zeros(6, dtype=np.float32)
             except Exception as e:
                 # FK 실패 시 zero 값 사용 (레코딩 중단하지 않음)
                 if need_robot_ee:
                     extras["observation.ee_pos.robot_xyzrpy"] = np.zeros(6, dtype=np.float32)
-                if need_world_ee:
-                    extras["observation.ee_pos.world_xyzrpy"] = np.zeros(6, dtype=np.float32)
 
         # Gripper binary (normalized 값 기반 threshold)
         if need_gripper:
@@ -415,7 +425,6 @@ class RecordingContext:
         label: str,
         skill_type: str,
         goal_joint: np.ndarray,
-        goal_world_xyzrpy: np.ndarray,
         goal_robot_xyzrpy: np.ndarray,
         goal_gripper: float,
         start_state: np.ndarray,
@@ -427,7 +436,6 @@ class RecordingContext:
             cls._current_skill_type = skill_type
             cls._current_verification_question = verification_question or ""
             cls._current_goal_joint = np.asarray(goal_joint, dtype=np.float32)
-            cls._current_goal_world_xyzrpy = np.asarray(goal_world_xyzrpy, dtype=np.float32)
             cls._current_goal_robot_xyzrpy = np.asarray(goal_robot_xyzrpy, dtype=np.float32)
             cls._current_goal_gripper = float(goal_gripper)
             cls._skill_start_state = np.asarray(start_state, dtype=np.float32)
@@ -442,7 +450,6 @@ class RecordingContext:
             cls._current_skill_type = None
             cls._current_verification_question = None
             cls._current_goal_joint = None
-            cls._current_goal_world_xyzrpy = None
             cls._current_goal_robot_xyzrpy = None
             cls._current_goal_gripper = None
             cls._skill_start_state = None
@@ -483,7 +490,6 @@ class RecordingContext:
             "verification_question": cls._current_verification_question or "",
             "progress": cls.get_skill_progress(current_state=current_state),
             "goal_joint": cls._current_goal_joint if cls._current_goal_joint is not None else np.zeros(6, dtype=np.float32),
-            "goal_world_xyzrpy": cls._current_goal_world_xyzrpy if cls._current_goal_world_xyzrpy is not None else np.zeros(6, dtype=np.float32),
             "goal_robot_xyzrpy": cls._current_goal_robot_xyzrpy if cls._current_goal_robot_xyzrpy is not None else np.zeros(6, dtype=np.float32),
             "goal_gripper": cls._current_goal_gripper if cls._current_goal_gripper is not None else 0.0,
         }
@@ -567,13 +573,15 @@ class RecordingContext:
             # FK 기반 observation extras 계산 (EE 자세, gripper binary, radian)
             obs_extras = cls._compute_observation_extras(state, action)
 
-            # 멀티 카메라 레코딩 (통합) + 스킬 라벨 + observation extras
+            # 멀티 카메라 레코딩 (통합) + 스킬 라벨 + observation extras + subtask
+            subtask_info = cls.get_subtask_info() if cls._current_subtask_label else None
             cls._recorder.record_frame_multi(
                 observation=state,
                 action=action,
                 images=images,
                 skill_label=cls._current_skill_label,
                 observation_extras=obs_extras,
+                subtask_info=subtask_info,
             )
 
             # 상태 업데이트

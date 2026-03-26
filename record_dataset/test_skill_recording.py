@@ -27,7 +27,6 @@ def test_config_features():
         "skill.type",
         "skill.progress",
         "skill.goal_position.joint",
-        "skill.goal_position.world_xyzrpy",
         "skill.goal_position.robot_xyzrpy",
         "skill.goal_position.gripper",
     ]
@@ -62,7 +61,6 @@ def test_recording_context():
     # set_skill_info 테스트 (with start_state for state-based progress)
     start_state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
     goal_joint = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0], dtype=np.float32)
-    goal_world = np.array([0.2, 0.1, 0.15, 0.0, -0.5, 0.0], dtype=np.float32)
     goal_robot = np.array([0.15, 0.05, 0.12, 0.0, -0.5, 0.0], dtype=np.float32)
     goal_gripper = 85.0
 
@@ -70,7 +68,6 @@ def test_recording_context():
         label="move to blue dish",
         skill_type="move",
         goal_joint=goal_joint,
-        goal_world_xyzrpy=goal_world,
         goal_robot_xyzrpy=goal_robot,
         goal_gripper=goal_gripper,
         start_state=start_state,
@@ -82,14 +79,12 @@ def test_recording_context():
     assert info["label"] == "move to blue dish", f"label mismatch: {info['label']}"
     assert info["type"] == "move", f"type mismatch: {info['type']}"
     assert np.allclose(info["goal_joint"], goal_joint), "goal_joint mismatch"
-    assert np.allclose(info["goal_world_xyzrpy"], goal_world), "goal_world_xyzrpy mismatch"
     assert np.allclose(info["goal_robot_xyzrpy"], goal_robot), "goal_robot_xyzrpy mismatch"
     assert info["goal_gripper"] == goal_gripper, f"goal_gripper mismatch: {info['goal_gripper']}"
 
     print(f"  ✓ label: {info['label']}")
     print(f"  ✓ type: {info['type']}")
     print(f"  ✓ goal_joint: {info['goal_joint']}")
-    print(f"  ✓ goal_world_xyzrpy: {info['goal_world_xyzrpy']}")
     print(f"  ✓ goal_robot_xyzrpy: {info['goal_robot_xyzrpy']}")
     print(f"  ✓ goal_gripper: {info['goal_gripper']}")
 
@@ -140,7 +135,6 @@ def test_state_based_progress_edge_cases():
         label="already at goal",
         skill_type="move",
         goal_joint=same_state,
-        goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
         goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),
         goal_gripper=85.0,
         start_state=same_state,
@@ -160,7 +154,6 @@ def test_state_based_progress_edge_cases():
         label="overshoot",
         skill_type="move",
         goal_joint=goal,
-        goal_world_xyzrpy=np.zeros(6, dtype=np.float32),
         goal_robot_xyzrpy=np.zeros(6, dtype=np.float32),
         goal_gripper=85.0,
         start_state=start,
@@ -209,7 +202,6 @@ def test_frame_data_structure():
         "skill.type": "move",
         "skill.progress": np.array([0.5], dtype=np.float32),
         "skill.goal_position.joint": np.zeros(6, dtype=np.float32),
-        "skill.goal_position.world_xyzrpy": np.zeros(6, dtype=np.float32),
         "skill.goal_position.robot_xyzrpy": np.zeros(6, dtype=np.float32),
         "skill.goal_position.gripper": np.array([85.0], dtype=np.float32),
     }

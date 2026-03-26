@@ -140,6 +140,8 @@ class ForwardAndResetPipeline:
         side_view_image: str = None,
         codegen_model: str = None,
         task_type: str = "pick_place",
+        reset_instruction: str = None,
+        skip_turn_test: bool = False,
     ):
         """
         초기화
@@ -172,6 +174,8 @@ class ForwardAndResetPipeline:
         self.side_view_image = side_view_image
         self.codegen_model = codegen_model
         self.task_type = task_type
+        self.reset_instruction = reset_instruction or "move objects to certain position"
+        self.skip_turn_test = skip_turn_test
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
 
@@ -198,6 +202,9 @@ class ForwardAndResetPipeline:
         # 이미지 해상도 저장 (Judge용)
         self.initial_image_resolution: Optional[Tuple[int, int]] = None  # (width, height)
         self.final_image_resolution: Optional[Tuple[int, int]] = None
+
+        # Reset recording
+        self.reset_dataset_recorder = None
 
         # Reset 관련 상태
         self.reset_initial_image: Optional[np.ndarray] = None
@@ -365,7 +372,31 @@ class ForwardAndResetPipeline:
             self.camera_manager.connect_all()
             print(f"[Recording] Cameras connected: {self.camera_manager.camera_names}")
 
-            # 3. 레코더 초기화 (YAML에서 features 동적 생성)
+            # 3. 기존 dataset 존재 여부 미리 체크 (forward + reset)
+            from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
+            reset_repo_id = self.dataset_repo_id + "_reset"
+            existing = []
+            for rid in [self.dataset_repo_id, reset_repo_id]:
+                ds_path = HF_LEROBOT_HOME / rid
+                if ds_path.exists() and not self.resume_recording:
+                    existing.append(str(ds_path))
+            if existing:
+                paths_str = "\n".join(f"     rm -rf {p}" for p in existing)
+                raise AssertionError(
+                    f"\n"
+                    f"========================================\n"
+                    f"Dataset already exists!\n"
+                    f"========================================\n"
+                    f"Paths:\n" + "\n".join(f"  - {p}" for p in existing) + "\n"
+                    f"\n"
+                    f"To continue, either:\n"
+                    f"  1. Delete the existing datasets:\n"
+                    f"{paths_str}\n"
+                    f"  2. Use a different repo_id\n"
+                    f"========================================"
+                )
+
+            # 4. 레코더 초기화 (YAML에서 features 동적 생성)
             self.dataset_recorder = DatasetRecorder(
                 repo_id=self.dataset_repo_id,
                 fps=self.recording_fps,
@@ -373,6 +404,16 @@ class ForwardAndResetPipeline:
             )
             print(f"[Recording] Recorder initialized successfully")
             print(f"[Recording] Features: {list(self.dataset_recorder.features.keys())}")
+
+            # 5. Reset 레코더 초기화 (별도 dataset)
+            print(f"\n[Recording] Initializing reset dataset recorder...")
+            print(f"  Reset Repo ID: {reset_repo_id}")
+            self.reset_dataset_recorder = DatasetRecorder(
+                repo_id=reset_repo_id,
+                fps=self.recording_fps,
+                resume=self.resume_recording,
+            )
+            print(f"[Recording] Reset recorder initialized")
 
             # Signal handler: Ctrl+C 시 finalize() 호출하여 데이터셋 보존
             self._install_recording_signal_handler()
@@ -415,14 +456,54 @@ class ForwardAndResetPipeline:
             except Exception as e:
                 print(f"[Recording] Warning: Failed to end episode: {e}")
 
+    def _start_reset_episode_recording(self, target_positions: Dict) -> None:
+        """Reset 에피소드 레코딩 시작 (별도 dataset, recorder 교체)"""
+        try:
+            from record_dataset.context import RecordingContext
+
+            # Reset recorder로 episode 시작
+            self.reset_dataset_recorder.start_episode(task=self.reset_instruction)
+            print(f"[Reset Recording] Episode started: {self.reset_instruction}")
+
+            # RecordingContext의 recorder를 reset recorder로 교체
+            self._saved_forward_recorder = RecordingContext._recorder
+            RecordingContext._recorder = self.reset_dataset_recorder
+        except Exception as e:
+            print(f"[Reset Recording] Warning: Failed to start: {e}")
+
+    def _end_reset_episode_recording(self, discard: bool = False) -> None:
+        """Reset 에피소드 레코딩 종료 (forward recorder로 복원)"""
+        try:
+            from record_dataset.context import RecordingContext
+
+            # Reset episode 종료
+            info = self.reset_dataset_recorder.end_episode(discard=discard)
+            if not discard:
+                print(f"[Reset Recording] Episode saved: {info.get('num_frames', 0)} frames")
+            else:
+                print(f"[Reset Recording] Episode discarded")
+
+            # Forward recorder로 복원
+            RecordingContext._recorder = self._saved_forward_recorder
+            RecordingContext.clear_subtask()
+        except Exception as e:
+            print(f"[Reset Recording] Warning: Failed to end: {e}")
+
     def _finalize_recording(self) -> None:
         """데이터셋 레코딩 완료 및 카메라 연결 해제"""
         if self.dataset_recorder and self.record_dataset:
             try:
                 self.dataset_recorder.finalize()
-                print(f"\n[Recording] Dataset finalized at: {self.dataset_recorder._dataset.root}")
+                print(f"\n[Recording] Forward dataset finalized at: {self.dataset_recorder._dataset.root}")
             except Exception as e:
-                print(f"[Recording] Warning: Failed to finalize dataset: {e}")
+                print(f"[Recording] Warning: Failed to finalize forward dataset: {e}")
+
+        if self.reset_dataset_recorder:
+            try:
+                self.reset_dataset_recorder.finalize()
+                print(f"[Recording] Reset dataset finalized at: {self.reset_dataset_recorder._dataset.root}")
+            except Exception as e:
+                print(f"[Recording] Warning: Failed to finalize reset dataset: {e}")
 
         # 멀티 카메라 연결 해제
         if self.camera_manager:
@@ -625,6 +706,7 @@ class ForwardAndResetPipeline:
             canonical_labels=canonical_labels,
             canonical_point_labels=canonical_point_labels,
             task_type=self.task_type,
+            skip_turn_test=self.skip_turn_test,
         )
 
         # multi-turn 정보 저장
@@ -784,8 +866,10 @@ class ForwardAndResetPipeline:
 
             # RecordingContext 설정 (비동기 캡처 활성화!)
             # LeRobotSkills.__init__()에서 이 컨텍스트를 확인하고 콜백을 가져감
+            # Reset phase에서는 reset_dataset_recorder를 사용
+            active_recorder = RecordingContext._recorder if RecordingContext._recorder else self.dataset_recorder
             RecordingContext.setup(
-                recorder=self.dataset_recorder,
+                recorder=active_recorder,
                 camera_manager=recording_camera,  # MultiCameraManager
                 target_fps=self.recording_fps,
                 control_hz=50,  # 제어 루프 주파수 (skills_lerobot.py의 time.sleep(0.02))
@@ -1165,6 +1249,7 @@ class ForwardAndResetPipeline:
         skip_reset: bool = False,
         reset_target_positions: Optional[Dict] = None,
         pre_reset_callback=None,
+        post_judge_callback=None,
     ) -> Dict:
         """
         전체 파이프라인 실행
@@ -1460,6 +1545,14 @@ class ForwardAndResetPipeline:
                         pos = info["position"]
                         print(f"    + {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
 
+                # seed_01_setup 즉시 저장 (forward detection 직후)
+                session_dir_path = Path(save_dir).parent if not use_timestamp_subdir else Path(result_dir)
+                seed1_dir = session_dir_path / "seed_01_setup"
+                seed1_dir.mkdir(parents=True, exist_ok=True)
+                with open(str(seed1_dir / "seed_positions.json"), 'w') as f:
+                    json.dump({"positions": self.first_episode_positions}, f, indent=2, default=str)
+                print(f"  [SeedGen] seed_01 (initial) saved: {seed1_dir / 'seed_positions.json'}")
+
             # [즉시 저장] Generated code
             code_path = Path(forward_dir) / "generated_code.py"
             code_path.write_text(self.generated_code)
@@ -1583,6 +1676,10 @@ class ForwardAndResetPipeline:
             # 레코딩 모드: 에피소드 시작
             if self.record_dataset:
                 self._start_episode_recording(task=instruction)
+
+            import builtins
+            builtins._current_execution_dir = forward_dir
+            builtins._scene_summary = self.multi_turn_info.get("turn0_response", "") if self.multi_turn_info else ""
 
             forward_success = self.execute_code(self.generated_code, self.detected_positions)
             result['forward']['execution_success'] = forward_success
@@ -1766,6 +1863,10 @@ class ForwardAndResetPipeline:
             forward_log_path = forward_logger.stop()
             print(f"\n  Forward log saved to: {forward_log_path}")
 
+            # Post-judge 콜백 (batch_info 저장 등, reset 전에 실행)
+            if post_judge_callback is not None:
+                post_judge_callback(result)
+
             # ================================================================
             # PHASE 3: RESET EXECUTION
             # ================================================================
@@ -1792,6 +1893,12 @@ class ForwardAndResetPipeline:
                 else:
                     reset_original_positions = self.detected_positions
                     print(f"  Reset target: current detected positions")
+
+                # 디버그: reset target 상세 출력
+                for _name, _info in reset_original_positions.items():
+                    _pos = _info.get("position") if isinstance(_info, dict) else _info
+                    if _pos and len(_pos) >= 3:
+                        print(f"    {_name}: [{_pos[0]:.4f}, {_pos[1]:.4f}, {_pos[2]:.4f}]")
 
                 # Step 1 & 2: Reset 코드 생성
                 multi_turn_str = "multi-turn VLM" if self.multi_turn else "single-turn"
@@ -1829,6 +1936,8 @@ class ForwardAndResetPipeline:
                         current_positions = self.detected_positions
                         target_positions = reset_original_positions
                         reset_code = self.cached_reset_code
+                        # 검출 결과를 reset_multi_turn_info에도 저장 (시각화/로그용)
+                        self.reset_multi_turn_info = getattr(self, 'multi_turn_info', None)
                     else:
                         # LLM으로 새로 생성
                         reset_code, _, current_positions, _ = self.generate_reset_code(
@@ -1904,9 +2013,16 @@ class ForwardAndResetPipeline:
                                 )
                             all_pts = reset_mt.get("all_points", [])
                             if t1_parsed and all_pts:
+                                # px, py are raw pixels — convert to normalized [norm_y, norm_x] (0-1000)
+                                # _visualize_turn2 expects point_pixel = [norm_y, norm_x]
+                                r_img_h, r_img_w = reset_base_img.shape[:2]
                                 t2_compat = {"grasp_points": [
                                     {"object_name": p["object_label"], "label": p["label"],
-                                     "role": p["role"], "point_pixel": [p["px"], p["py"]]}
+                                     "role": p["role"],
+                                     "point_pixel": [
+                                         int(p["py"] * 1000 / r_img_h),  # raw_py → norm_y
+                                         int(p["px"] * 1000 / r_img_w),  # raw_px → norm_x
+                                     ]}
                                     for p in all_pts
                                 ]}
                                 self._visualize_turn2(
@@ -1963,14 +2079,30 @@ class ForwardAndResetPipeline:
                         else:
                             print(f"  {YELLOW}Warning: Failed to capture reset initial image{RESET}")
 
-                    # Step 3: Reset 코드 실행
+                    # Step 3: Reset 코드 실행 (recording 포함)
                     print(f"\n{YELLOW}" + self._log("Executing reset code...", step="Step 3/4") + f"{RESET}")
                     self.reset_code = reset_code
+
+                    # Reset recording: forward recorder → reset recorder로 교체
+                    if self.record_dataset and self.reset_dataset_recorder:
+                        self._start_reset_episode_recording(target_positions)
+
+                    import builtins
+                    builtins._current_execution_dir = reset_dir
+                    reset_mt = getattr(self, 'reset_multi_turn_info', None)
+                    builtins._scene_summary = reset_mt.get("turn0_response", "") if reset_mt else ""
+
                     reset_success = self.execute_code(reset_code, current_positions, extra_globals={
                         "current_positions": current_positions,
                         "target_positions": target_positions,
                     })
                     result['reset']['execution_success'] = reset_success
+
+                    # Reset recording 종료
+                    if self.record_dataset and self.reset_dataset_recorder:
+                        reset_judge_pred = result.get('reset_judge', {}).get('prediction', 'TRUE')
+                        should_discard = not reset_success or reset_judge_pred == "FALSE"
+                        self._end_reset_episode_recording(discard=should_discard)
 
                     if reset_success:
                         print(f"  {GREEN}Reset execution SUCCESS{RESET}")
@@ -2530,12 +2662,35 @@ class ForwardAndResetPipeline:
             for name, info in prev_positions.items():
                 all_initial[f"{name}_pseed{i}"] = info
 
+        # Free state EE 주변 제외 영역 계산 (충돌 방지)
+        FREE_STATE_EXCLUSION_RADIUS = 0.08  # 8cm
+        exclusion_zones = []
+        try:
+            from lerobot_cap.kinematics import load_calibration_limits as _load_cl
+            free_state_path = Path(__file__).parent / "robot_configs" / "free_state" / f"robot{self.robot_id}_free_state.json"
+            if free_state_path.exists():
+                with open(free_state_path) as f:
+                    free_norm = np.array(json.load(f)["initial_state_normalized"])
+                _cl = _load_cl(
+                    str(Path(__file__).parent / "calibration" / "so101" / f"robot{self.robot_id}_calibration.json"),
+                    joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
+                )
+                free_rad = _cl.normalized_to_radians(free_norm)
+                free_ee = kin_engine.get_ee_position(free_rad)
+                exclusion_zones.append({
+                    "center": [float(free_ee[0]), float(free_ee[1])],
+                    "radius": FREE_STATE_EXCLUSION_RADIUS,
+                })
+                print(f"  [SeedGen] Free state exclusion: center=[{free_ee[0]:.3f}, {free_ee[1]:.3f}], radius={FREE_STATE_EXCLUSION_RADIUS}m")
+        except Exception as e:
+            print(f"  [SeedGen] Warning: Could not compute free state exclusion: {e}")
+
         # 랜덤 위치 생성 + dry_run 검증 (최대 10회 재시도)
         reset_code = self.cached_reset_code
         accepted_positions = None
 
         for attempt in range(10):
-            # arrange 태스크: seed 위치를 |y| > 0.12m (테이블 상/하단)으로 제한
+            # arrange 태스크: seed 위치를 |y| > 0.15m (테이블 상/하단)으로 제한
             seed_y_min_abs = 0.15 if self.task_type == "arrange" else None
 
             random_targets = generate_random_positions(
@@ -2546,6 +2701,7 @@ class ForwardAndResetPipeline:
                 pix2robot=pix2robot,
                 y_min_abs=seed_y_min_abs,
                 current_positions=current_positions,
+                exclusion_zones=exclusion_zones,
             )
             if not random_targets:
                 print(f"  [SeedGen] Attempt {attempt+1}: position generation failed, retrying...")
@@ -2872,7 +3028,11 @@ class ForwardAndResetPipeline:
                 continue
             with open(batch_info_path) as f:
                 bi = json.load(f)
-            batch_idx = bi.get("batch_index", -1)
+            # batch_seed_index (1-based) 또는 legacy batch_index (0-based) 호환
+            if "batch_seed_index" in bi:
+                batch_idx = bi["batch_seed_index"] - 1  # 1-based → 0-based
+            else:
+                batch_idx = bi.get("batch_index", -1)  # legacy 호환
             slot = bi.get("slot", -1)
             judge_pred = bi.get("judge", "")
             if 0 <= batch_idx < self.num_random_seeds and 0 <= slot < episodes_per_seed:
@@ -3145,8 +3305,8 @@ class ForwardAndResetPipeline:
             self._finalize_recording()
 
     def _save_batch_info(self, episode_dir: str, batch_index: int, slot: int, judge_pred: str) -> None:
-        """batch_info.json 저장."""
-        batch_info = {"batch_index": batch_index, "slot": slot, "judge": judge_pred}
+        """batch_info.json 저장. batch_seed_index는 1-based (seed 디렉토리와 일치)."""
+        batch_info = {"batch_seed_index": batch_index + 1, "slot": slot, "judge": judge_pred}
         bi_path = Path(episode_dir) / "batch_info.json"
         bi_path.parent.mkdir(parents=True, exist_ok=True)
         with open(bi_path, 'w') as f:
@@ -3241,6 +3401,13 @@ class ForwardAndResetPipeline:
                 pre_reset_cb = _make_next_seed
 
             try:
+                _slot = episode_idx % episodes_per_seed
+                _ep_dir = episode_dir
+                _bi = batch_index
+                def _post_judge(res):
+                    jp = res['judge'].get('prediction', 'UNCERTAIN')
+                    self._save_batch_info(_ep_dir, _bi, _slot, jp)
+
                 result = self.run(
                     instruction=instruction, objects=objects,
                     detection_timeout=detection_timeout,
@@ -3248,16 +3415,15 @@ class ForwardAndResetPipeline:
                     save_dir=episode_dir, use_timestamp_subdir=False,
                     skip_reset=skip_reset, reset_target_positions=reset_target,
                     pre_reset_callback=pre_reset_cb,
+                    post_judge_callback=_post_judge,
                 )
 
                 # first_episode_positions → seed_positions[0] 초기 설정
+                # (seed_01_setup 폴더/파일은 run() 내부에서 이미 저장됨)
                 if seed_positions[0] is None and self.first_episode_positions is not None:
                     seed_positions[0] = copy.deepcopy(self.first_episode_positions)
                     self._all_previous_seed_positions.append(seed_positions[0])
 
-                slot = episode_idx % episodes_per_seed
-                judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-                self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
                 self._update_results(all_results, result, episode_num, skip_reset)
 
             except Exception as e:
@@ -3427,18 +3593,25 @@ class ForwardAndResetPipeline:
                     reset_target = seed_positions[batch_index]  # 같은 배치 유지
 
                 try:
+                    _slot_r = slot
+                    _ep_dir_r = episode_dir
+                    _bi_r = batch_index
+                    def _post_judge_resume(res):
+                        jp = res['judge'].get('prediction', 'UNCERTAIN')
+                        self._save_batch_info(_ep_dir_r, _bi_r, _slot_r, jp)
+
                     result = self.run(
                         instruction=instruction, objects=objects,
                         detection_timeout=detection_timeout,
                         visualize_detection=visualize_detection,
                         save_dir=episode_dir, use_timestamp_subdir=False,
                         skip_reset=skip_reset, reset_target_positions=reset_target,
+                        post_judge_callback=_post_judge_resume,
                     )
 
                     judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
                     if judge_pred == 'TRUE':
                         batch_slots[batch_index][slot] = True
-                    self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
                     self._update_results(all_results, result, episode_num, skip_reset)
 
                 except Exception as e:
@@ -3681,6 +3854,19 @@ def main():
         help="Task type (default: pick_place). 'arrange' restricts seed positions to x<0.15m to separate from arrangement area."
     )
 
+    parser.add_argument(
+        "--reset-instruction",
+        type=str,
+        default=None,
+        help="Reset task instruction for recording. Default: 'move objects to certain position'"
+    )
+
+    parser.add_argument(
+        "--skip-turn-test",
+        action="store_true",
+        help="Skip Turn Test (Waypoint Trajectory Prediction) in multi-turn code generation"
+    )
+
     args = parser.parse_args()
 
     # 서버 모드 설정 (환경변수로 전달)
@@ -3714,6 +3900,8 @@ def main():
         recording_fps=args.recording_fps,
         codegen_model=args.codegen_session2_model,
         task_type=args.task_type,
+        reset_instruction=args.reset_instruction,
+        skip_turn_test=args.skip_turn_test,
     )
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기

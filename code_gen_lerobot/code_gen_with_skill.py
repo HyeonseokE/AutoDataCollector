@@ -454,6 +454,7 @@ def lerobot_code_gen_multi_turn(
     canonical_labels: List[str] = None,
     canonical_point_labels: Dict[str, List[str]] = None,
     task_type: str = "pick_place",
+    skip_turn_test: bool = False,
 ) -> Tuple[str, Dict, Dict]:
     """
     Crop-then-Point 멀티턴 LLM 코드 생성 파이프라인
@@ -841,7 +842,7 @@ def lerobot_code_gen_multi_turn(
     turn_test_sideview_waypoints = []
     turn_test_resp = ""
 
-    if len(all_points) >= 2:
+    if len(all_points) >= 2 and not skip_turn_test:
         print(f"\n{YELLOW}" + _log("Waypoint Trajectory", step="TurnTest") + f"{RESET}")
         print(f"    All detected points: {len(all_points)}")
         for pt in all_points:

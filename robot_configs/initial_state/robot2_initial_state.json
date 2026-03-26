@@ -1,13 +1,13 @@
 {
   "initial_state_normalized": [
-    3.9447731971740723,
-    -52.18487548828125,
-    52.222721099853516,
-    57.22840118408203,
-    -0.02442002482712269
+    2.2691292762756348,
+    -53.32475280761719,
+    42.141231536865234,
+    72.75862121582031,
+    -0.21978022158145905
   ],
-  "gripper_normalized": -99.86927795410156,
-  "recorded_at": "2026-03-17T15:17:27.147914",
+  "gripper_normalized": -100.0,
+  "recorded_at": "2026-03-25T20:18:04.086632",
   "robot_id": "robot2",
   "config_file": "/home/lerobot/AutoDataCollector/robot_configs/robot/so101_robot2.yaml",
   "state_type": "initial_state",

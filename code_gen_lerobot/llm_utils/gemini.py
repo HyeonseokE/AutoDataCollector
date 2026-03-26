@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, NotFound
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, NotFound, TooManyRequests
 
 # Vertex AI 설정 (환경변수로 override 가능)
 PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
@@ -70,12 +70,12 @@ def _send_with_retry(chat, contents, generation_config,
         try:
             return chat.send_message(contents,
                                      generation_config=generation_config)
-        except (ResourceExhausted, ServiceUnavailable, NotFound) as e:
+        except (ResourceExhausted, TooManyRequests, ServiceUnavailable, NotFound) as e:
             if attempt == max_retries:
                 raise
             delay = RETRY_DELAY
-            if isinstance(e, ResourceExhausted):
-                err_type = "Rate limit"
+            if isinstance(e, (ResourceExhausted, TooManyRequests)):
+                err_type = "Rate limit (429)"
             elif isinstance(e, NotFound):
                 err_type = "404 NotFound (preview model intermittent)"
             else:
@@ -203,6 +203,7 @@ def gemini_response(
     check_time: bool = True,
     system_prompt: Optional[str] = None,
     image_path: Optional[str] = None,
+    timeout: float = 120.0,
 ) -> str:
     _ensure_init(_get_location_for_model(model))
 
@@ -221,10 +222,33 @@ def gemini_response(
     stop = [s for s in stop_sequences if s] or None if stop_sequences else None
     gen_config = _make_gen_config(model, temperature=temperature, stop_sequences=stop)
 
-    response = gemini_model.generate_content(
-        contents,
-        generation_config=gen_config,
-    )
+    # Retry with backoff for 429 (quota exhausted) errors
+    MAX_RETRIES = 5
+    import concurrent.futures
+    for attempt in range(MAX_RETRIES):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                gemini_model.generate_content,
+                contents,
+                generation_config=gen_config,
+            )
+            try:
+                response = future.result(timeout=timeout)
+                break  # 성공 시 루프 탈출
+            except concurrent.futures.TimeoutError:
+                elapsed = time.time() - start_time
+                raise TimeoutError(
+                    f"[GEMINI] {model} did not respond within {timeout}s (elapsed: {elapsed:.1f}s)"
+                )
+            except Exception as e:
+                if "429" in str(e) or "Resource has been exhausted" in str(e):
+                    wait_time = 2 ** attempt * 5  # 5s, 10s, 20s, 40s, 80s
+                    print(f"[GEMINI] Rate limit (429). Retrying in {wait_time}s... (attempt {attempt+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                    if attempt == MAX_RETRIES - 1:
+                        raise  # 마지막 시도도 실패하면 예외 전파
+                else:
+                    raise  # 429 외 에러는 즉시 전파
 
     if check_time:
         elapsed = time.time() - start_time

@@ -36,7 +36,7 @@ from lerobot_cap.hardware import FeetechController
 from lerobot_cap.hardware.calibration import MotorCalibration
 from lerobot_cap.kinematics import KinematicsEngine, load_calibration_limits
 from lerobot_cap.planning import TrajectoryPlanner
-from lerobot_cap.compensation import AdaptiveCompensator
+from lerobot_cap.compensation import AdaptiveCompensator, GravitySagCompensator
 from lerobot_cap.transforms import FrameTransformer
 from lerobot_cap.workspace import BaseWorkspace
 
@@ -102,7 +102,7 @@ class LeRobotSkills:
         use_compensation: bool = True,
         use_deceleration: bool = True,
         verbose: bool = True,
-        pick_offset: float = 0.02,  # Pick/place offset from object top (meters, 2cm)
+        pick_offset: float = 0.015,  # Pick/place offset from object top (meters, 1.5cm)
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
     ):
@@ -133,6 +133,7 @@ class LeRobotSkills:
         self.calibration_limits = None
         self.frame_transformer: Optional[FrameTransformer] = None
         self.compensator: Optional[AdaptiveCompensator] = None
+        self.gravity_sag: Optional[GravitySagCompensator] = None
         self.initial_state: Optional[np.ndarray] = None
         self.initial_state_gripper: float = gripper_open_pos
         self.free_state: Optional[np.ndarray] = None
@@ -331,6 +332,11 @@ class LeRobotSkills:
                     target_z=0.1,  # Will be updated per movement
                 )
                 self._log(f"  Compensation config: {compensation_file}")
+                # Gravity sag pre-compensator (loaded from same config)
+                if self.compensator.gravity_sag is not None:
+                    self.gravity_sag = self.compensator.gravity_sag
+                    self._log(f"  Gravity sag compensation: gain={self.gravity_sag.gain}, "
+                              f"reach_power={self.gravity_sag.reach_power}")
 
         # Load Pix2Robot calibrator (if available)
         robot_id_int = int(robot_id_match.group(1)) if robot_id_match else 3
@@ -410,28 +416,16 @@ class LeRobotSkills:
                 return self.frame_transformer.transform_position(position, self.frame)
         return position
 
-    def _compute_goal_xyzrpy(self, joints_rad: np.ndarray, kinematics=None) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_goal_xyzrpy(self, joints_rad: np.ndarray, kinematics=None) -> np.ndarray:
         """
-        목표 joint로부터 world/robot xyzrpy 계산
+        목표 joint로부터 robot base_link frame xyzrpy 계산
 
         Returns:
-            (world_xyzrpy, robot_xyzrpy) 각각 (6,) 배열
+            robot_xyzrpy (6,) 배열
         """
         kin = kinematics if kinematics else self.kinematics
         robot_xyzrpy = _compute_ee_xyzrpy(kin, joints_rad)
-
-        # robot(base_link) frame -> world frame 역변환 (position만)
-        if self.frame != "base_link" and self.frame_transformer and self.frame_transformer.has_frame(self.frame):
-            T = self.frame_transformer.frames[self.frame]["T_base_from_frame"]
-            T_inv = np.linalg.inv(T)
-            p_base = np.array([robot_xyzrpy[0], robot_xyzrpy[1], robot_xyzrpy[2], 1.0])
-            world_pos = (T_inv @ p_base)[:3]
-        else:
-            world_pos = robot_xyzrpy[:3]
-
-        world_xyzrpy = np.array([world_pos[0], world_pos[1], world_pos[2],
-                                  robot_xyzrpy[3], robot_xyzrpy[4], robot_xyzrpy[5]], dtype=np.float32)
-        return world_xyzrpy, robot_xyzrpy
+        return robot_xyzrpy
 
     def _set_skill_recording(
         self,
@@ -458,13 +452,12 @@ class LeRobotSkills:
         start_state = self.robot.read_positions(normalize=True).copy()
         goal_arm_normalized = self._radians_to_normalized(goal_joint_5)
         goal_joint_6 = np.concatenate([goal_arm_normalized, [goal_gripper]])
-        world_xyzrpy, robot_xyzrpy = self._compute_goal_xyzrpy(goal_joint_5, kinematics)
+        robot_xyzrpy = self._compute_goal_xyzrpy(goal_joint_5, kinematics)
 
         RecordingContext.set_skill_info(
             label=label,
             skill_type=skill_type,
             goal_joint=goal_joint_6,
-            goal_world_xyzrpy=world_xyzrpy,
             goal_robot_xyzrpy=robot_xyzrpy,
             goal_gripper=goal_gripper,
             start_state=start_state,
@@ -907,36 +900,251 @@ class LeRobotSkills:
             import builtins
             camera_to_use = getattr(builtins, 'shared_camera', None)
 
-        self._log(f"\n[detect_objects] Starting detection...")
+        self._log(f"\n[detect_objects] Starting detection (Gemini VLM)...")
         self._log(f"  Queries: {queries}")
-        self._log(f"  Timeout: {timeout}s")
         self._log(f"  Robot ID: {robot_id}")
-        self._log(f"  Using shared camera: {camera_to_use is not None}")
 
         try:
-            # run_realtime_detection 호출
-            # external_camera가 있으면 공유 모드, 없으면 내부에서 생성
-            results = run_realtime_detection(
-                queries=queries,
-                timeout=timeout,
-                unit="m",
-                return_extended=True,
-                visualize=visualize,
-                robot_id=robot_id,
-                external_camera=camera_to_use,
-                skip_workspace_filter=True,  # 멀티로봇: workspace 필터링은 나중에
-                early_exit=True,  # skill에서는 검출 즉시 종료
-            )
+            import tempfile, json, re
+            from code_gen_lerobot.llm_utils.gemini import gemini_response
+            from code_gen_lerobot.prompt.skill_detect_object_prompt import detect_t1_prompt, detect_t2_prompt
 
-            # 결과 로깅
+            # 1. 카메라에서 현재 프레임 캡처 (color + depth)
+            frame = None
+            depth_frame = None
+            if camera_to_use is not None:
+                try:
+                    color, depth = camera_to_use.get_frames()
+                    frame = color
+                    depth_frame = depth  # depth image (uint16, mm) or None
+                except Exception:
+                    pass
+
+            if frame is None:
+                self._log("[detect_objects] Error: Cannot capture frame")
+                return {q: None for q in queries}
+
+            import cv2
+            tmp_path = tempfile.mktemp(suffix=".jpg")
+            cv2.imwrite(tmp_path, frame)
+            img_h, img_w = frame.shape[:2]
+            self._log(f"  [1/4] Frame captured ({img_w}x{img_h})")
+
+            # 2. Turn 1 + Turn 2 with retry (60s timeout per call, retry from Turn 1)
+            DETECT_TIMEOUT = 60.0
+            MAX_DETECT_RETRIES = 3
+
+            t1_prompt = detect_t1_prompt(queries)
+
+            detected = None
+            results = {q: None for q in queries}
+            CROP_PADDING = 50
+
+            for retry in range(MAX_DETECT_RETRIES):
+                try:
+                    # Turn 1: bbox detection
+                    self._log(f"  [2/4] Turn 1: bbox detection (attempt {retry+1}/{MAX_DETECT_RETRIES})...")
+                    t1_response = gemini_response(
+                        prompt=t1_prompt,
+                        model="gemini-3-flash-preview",
+                        image_path=tmp_path,
+                        check_time=True,
+                        timeout=DETECT_TIMEOUT,
+                    )
+
+                    json_match = re.search(r'\[.*\]', t1_response, re.DOTALL)
+                    if not json_match:
+                        self._log(f"  [detect_objects] Turn 1: No JSON, retrying...")
+                        continue
+                    detected = json.loads(json_match.group())
+
+                    # Turn 2: crop-then-point for each detected object
+                    self._log(f"  [3/4] Turn 2: crop-then-point ({len(detected)} objects)...")
+                    t2_failed = False
+
+                    for obj in detected:
+                        label = obj.get("label", "")
+                        box = obj.get("box_2d", [])
+                        if label not in results or len(box) != 4:
+                            continue
+
+                        ymin, xmin, ymax, xmax = box
+
+                        # Crop with padding
+                        ymin_p = max(0, ymin - CROP_PADDING)
+                        xmin_p = max(0, xmin - CROP_PADDING)
+                        ymax_p = min(1000, ymax + CROP_PADDING)
+                        xmax_p = min(1000, xmax + CROP_PADDING)
+
+                        crop_x1 = int(xmin_p * img_w / 1000)
+                        crop_y1 = int(ymin_p * img_h / 1000)
+                        crop_x2 = int(xmax_p * img_w / 1000)
+                        crop_y2 = int(ymax_p * img_h / 1000)
+
+                        crop_img = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                        crop_h, crop_w = crop_img.shape[:2]
+                        if crop_w < 5 or crop_h < 5:
+                            continue
+
+                        crop_path = tempfile.mktemp(suffix=".jpg")
+                        cv2.imwrite(crop_path, crop_img)
+
+                        # Turn 2: grasp point detection on crop (with per-object retry)
+                        import builtins as _builtins
+                        scene_summary = getattr(_builtins, '_scene_summary', '')
+                        t2_prompt = detect_t2_prompt(label, scene_summary=scene_summary)
+
+                        t2_response = None
+                        for t2_attempt in range(2):
+                            try:
+                                if t2_attempt > 0:
+                                    self._log(f"    {label}: retrying Turn 2 (attempt {t2_attempt+1})...")
+                                    time.sleep(3)  # rate limit 회피
+                                t2_response = gemini_response(
+                                    prompt=t2_prompt,
+                                    model="gemini-3-flash-preview",
+                                    image_path=crop_path,
+                                    check_time=True,
+                                    timeout=DETECT_TIMEOUT,
+                                )
+                                break
+                            except TimeoutError:
+                                self._log(f"    {label}: Turn 2 timeout (attempt {t2_attempt+1})")
+                                continue
+                        if t2_response is None:
+                            self._log(f"    {label}: Turn 2 all attempts failed, using bbox center")
+                            # fallback handled below by grasp_from_vlm check
+
+                        t2_parsed = None
+                        if t2_response:
+                            t2_json_match = re.search(r'\{.*\}', t2_response, re.DOTALL)
+                            if t2_json_match:
+                                try:
+                                    t2_parsed = json.loads(t2_json_match.group())
+                                except json.JSONDecodeError:
+                                    pass
+
+                        # Extract grasp center point from Turn 2 response
+                        grasp_px, grasp_py = None, None
+                        if t2_parsed:
+                            points = t2_parsed.get("critical_points") or t2_parsed.get("overhead_critical_points", [])
+                            for pt in points:
+                                if pt.get("role") == "grasp":
+                                    point_2d = pt.get("point_2d", [])
+                                    if len(point_2d) == 2:
+                                        norm_y, norm_x = point_2d
+                                        grasp_px = crop_x1 + int(norm_x * crop_w / 1000)
+                                        grasp_py = crop_y1 + int(norm_y * crop_h / 1000)
+                                        self._log(f"    {label}: grasp point ({norm_y},{norm_x}) → pixel ({grasp_px},{grasp_py})")
+                                    break
+
+                        # Fallback to bbox center if Turn 2 failed
+                        grasp_from_vlm = grasp_px is not None
+                        if not grasp_from_vlm:
+                            grasp_px = int((xmin + xmax) / 2 * img_w / 1000)
+                            grasp_py = int((ymin + ymax) / 2 * img_h / 1000)
+                            self._log(f"    {label}: Turn 2 failed, using bbox center ({grasp_px},{grasp_py})")
+
+                        # pix2robot 변환 (depth가 있으면 물체 높이 포함)
+                        if self.pix2robot is not None:
+                            depth_m = None
+                            if depth_frame is not None:
+                                half = 2
+                                y1 = max(0, grasp_py - half)
+                                y2 = min(img_h, grasp_py + half + 1)
+                                x1 = max(0, grasp_px - half)
+                                x2 = min(img_w, grasp_px + half + 1)
+                                patch = depth_frame[y1:y2, x1:x2]
+                                valid = patch[patch > 0]
+                                if len(valid) > 0:
+                                    depth_m = float(np.median(valid)) / 1000.0
+
+                            pos = self.pix2robot.pixel_to_robot(grasp_px, grasp_py, depth_m=depth_m)
+                            bw = int((xmax - xmin) * img_w / 1000)
+                            bh = int((ymax - ymin) * img_h / 1000)
+                            bbox_x1 = int(xmin * img_w / 1000)
+                            bbox_y1 = int(ymin * img_h / 1000)
+                            bbox_x2 = int(xmax * img_w / 1000)
+                            bbox_y2 = int(ymax * img_h / 1000)
+                            results[label] = {
+                                "position": pos,
+                                "pixel": (grasp_px, grasp_py),
+                                "bbox_px": (bw, bh),
+                                "bbox_rect": (bbox_x1, bbox_y1, bbox_x2, bbox_y2),
+                                "depth_m": depth_m,
+                                "grasp_from_vlm": grasp_from_vlm,
+                            }
+
+                    # Turn 1+2 성공 — break retry loop
+                    break
+
+                except TimeoutError as e:
+                    self._log(f"  [detect_objects] Timeout (attempt {retry+1}/{MAX_DETECT_RETRIES}): {e}")
+                    if retry < MAX_DETECT_RETRIES - 1:
+                        self._log(f"  [detect_objects] Retrying from Turn 1...")
+                    continue
+
+            # 4. 결과 로깅
             found_count = sum(1 for v in results.values() if v is not None)
-            self._log(f"[detect_objects] Found {found_count}/{len(queries)} objects")
+            self._log(f"  [4/4] Found {found_count}/{len(queries)} objects")
             for name, info in results.items():
                 if info:
                     pos = info["position"]
-                    self._log(f"  {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
+                    depth_str = f", depth={info['depth_m']:.3f}m" if info.get("depth_m") else ", depth=N/A"
+                    height_str = f", height={pos[2]*100:.1f}cm" if pos[2] > 0.001 else ""
+                    self._log(f"  {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]{height_str}{depth_str}")
                 else:
                     self._log(f"  {name}: NOT FOUND")
+
+            # 시각화 저장: bbox + 라벨을 이미지 위에 그려서 저장
+            try:
+                import builtins
+                exec_dir = getattr(builtins, '_current_execution_dir', None)
+                if exec_dir and frame is not None:
+                    vis_dir = Path(exec_dir) / "skill_detect_results"
+                    vis_dir.mkdir(parents=True, exist_ok=True)
+
+                    # 고유 파일명: 기존 파일 수 기반 인덱스
+                    existing = list(vis_dir.glob("detect_*.jpg"))
+                    idx = len(existing) + 1
+
+                    vis_img = frame.copy()
+                    no_point_labels = []
+                    for name, info in results.items():
+                        if info is None:
+                            continue
+                        pos = info["position"]
+
+                        # Turn 1 bbox (green, thin)
+                        bbox_rect = info.get("bbox_rect")
+                        if bbox_rect:
+                            bx1, by1, bx2, by2 = bbox_rect
+                            cv2.rectangle(vis_img, (bx1, by1), (bx2, by2), (0, 255, 0), 1)
+                            cv2.putText(vis_img, name, (bx1, by1 - 3),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+
+                        if info.get("grasp_from_vlm", False):
+                            # VLM grasp point (red dot + z height bold)
+                            gx, gy = info["pixel"]
+                            cv2.circle(vis_img, (gx, gy), 5, (0, 0, 255), -1)
+                            cv2.circle(vis_img, (gx, gy), 5, (255, 255, 255), 1)
+                            z_str = f"z={pos[2]*100:.1f}cm" if pos[2] > 0.001 else "z=0"
+                            cv2.putText(vis_img, z_str, (gx + 8, gy + 4),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+                        else:
+                            no_point_labels.append(name)
+
+                    # 상단에 point 미검출 객체 표시
+                    if no_point_labels:
+                        warn_text = f"No grasp point: {', '.join(no_point_labels)} (bbox center fallback)"
+                        cv2.putText(vis_img, warn_text, (5, 15),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+
+                    vis_path = str(vis_dir / f"detect_{idx:02d}.jpg")
+                    cv2.imwrite(vis_path, vis_img)
+                    self._log(f"  [detect_objects] Visualization saved: {vis_path}")
+            except Exception as e:
+                self._log(f"  [detect_objects] Visualization save failed: {e}")
 
             return results
 
@@ -946,6 +1154,46 @@ class LeRobotSkills:
             traceback.print_exc()
             return {q: None for q in queries}
         
+    # ========== Sub-task Label ==========
+    def set_subtask(
+        self,
+        object_name: str,
+        current_position: Union[List[float], np.ndarray] = None,
+        target_position: Union[List[float], np.ndarray] = None,
+    ) -> None:
+        """
+        Set sub-task label for recording. Groups multiple skills under one higher-level label.
+        Called at the beginning of each object's pick-place sequence.
+
+        Args:
+            object_name: Name of the object being manipulated (e.g., "yellow block")
+            current_position: Current position [x, y, z] of the object
+            target_position: Target position [x, y, z] to move the object to
+        """
+        target_pos = list(target_position) if target_position is not None else [0, 0, 0]
+        label = f"move {object_name} to [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}]"
+        self._log(f"\n[SubTask] {label}")
+
+        try:
+            from record_dataset.context import RecordingContext
+            if RecordingContext.is_active():
+                RecordingContext.set_subtask(
+                    label=label,
+                    object_name=object_name,
+                    target_position=target_pos,
+                )
+        except ImportError:
+            pass
+
+    def clear_subtask(self) -> None:
+        """Clear the current sub-task label."""
+        try:
+            from record_dataset.context import RecordingContext
+            if RecordingContext.is_active():
+                RecordingContext.clear_subtask()
+        except ImportError:
+            pass
+
     # ========== Primitive Skills ==========
     def move_to_initial_state(self, duration: Optional[float] = None, skill_description: Optional[str] = None, verification_question: Optional[str] = None) -> bool:
         """
@@ -1041,6 +1289,16 @@ class LeRobotSkills:
         if self.frame != "base_link":
             self._log(f"  -> base_link: [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
 
+        # Gravity sag pre-compensation: raise IK target z to offset expected droop
+        ik_target_position = target_position.copy()
+        if self.gravity_sag is not None:
+            sag_offset = self.gravity_sag.compute_offset(target_position)
+            if sag_offset > 0.001:  # Only log when meaningful (> 1mm)
+                ik_target_position[2] += sag_offset
+                reach = np.sqrt(target_position[0] ** 2 + target_position[1] ** 2)
+                self._log(f"  [Gravity Sag] reach={reach:.3f}m, z={target_position[2]:.3f}m "
+                          f"→ z_offset=+{sag_offset * 1000:.1f}mm")
+
         # 1st filter: Geometric reachability check (fast O(1) check)
         kinematics = active_planner.kinematics
         if not kinematics.is_position_reachable(target_position):
@@ -1068,8 +1326,9 @@ class LeRobotSkills:
             self._log(f"  Maintaining pitch at {np.degrees(current_pitch):.1f}°")
 
         # Plan trajectory with position-only IK but fixed wrist_roll and optional pitch constraint
+        # Use ik_target_position (with gravity sag offset) for IK planning
         trajectory, ik_info = active_planner.plan_to_position_multi(
-            target_position,
+            ik_target_position,
             current_joints,
             duration,
             num_random_samples=10,
@@ -1102,7 +1361,7 @@ class LeRobotSkills:
                     test_pitch = original_pitch + np.radians(offset_deg)
 
                     trajectory_retry, ik_info_retry = active_planner.plan_to_position_multi(
-                        target_position,
+                        ik_target_position,
                         current_joints,
                         duration,
                         num_random_samples=10,
@@ -1135,12 +1394,15 @@ class LeRobotSkills:
             else:
                 print(f"Warning: IK did not converge. Position may be unreachable.")
 
-        # Update compensator target z
+        # Update compensator target z (use original target_position for z-adaptive factor)
         if self.compensator:
             self.compensator = AdaptiveCompensator.from_config(
                 config_path=self.config.get("compensation_file"),
                 target_z=target_position[2],
             )
+            # Preserve gravity_sag reference (already loaded once)
+            if self.gravity_sag is not None:
+                self.compensator.gravity_sag = self.gravity_sag
 
         # Set skill recording info (after trajectory planning)
         label = skill_description or (f"move {target_name}" if target_name else "move to position")
@@ -1302,7 +1564,7 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        GRIPPER_MAX_RATIO = 0.25
+        GRIPPER_MAX_RATIO = 0.30
         clamped_ratio = min(ratio, GRIPPER_MAX_RATIO)
         target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
@@ -1515,7 +1777,7 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.005  # Minimum pick height (0.5cm) — gripper ground margin
+        MIN_PICK_Z = 0.01  # Minimum pick height (1cm) — gripper ground margin
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 

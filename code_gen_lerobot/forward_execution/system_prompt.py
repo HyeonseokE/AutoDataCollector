@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────
 # Multi-Turn Perception System Prompt (Turn 0~2)
 # ──────────────────────────────────────────────
-PERCEPTION_SYSTEM_PROMPT =   PERCEPTION_SYSTEM_PROMPT = '''
+PERCEPTION_SYSTEM_PROMPT ='''
 You are a vision-language assistant for a bi-arm robot manipulation system.
 One arm is mounted on the left side of a table and one arm is mounted on the right side.
 In the top-view image, 

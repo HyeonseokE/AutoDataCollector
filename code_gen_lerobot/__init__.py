@@ -38,8 +38,6 @@ Usage:
 from .forward_execution import (
     lerobot_code_gen,
     extract_code_from_response,
-    lerobot_spec_gen,
-    parse_spec_from_response,
 )
 
 from .execution_context import (
@@ -56,8 +54,6 @@ __all__ = [
     # Forward execution
     "lerobot_code_gen",
     "extract_code_from_response",
-    "lerobot_spec_gen",
-    "parse_spec_from_response",
     # Execution context
     "ExecutionContext",
     "ExecutionContextManager",

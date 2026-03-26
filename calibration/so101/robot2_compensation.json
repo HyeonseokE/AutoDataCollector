@@ -45,6 +45,15 @@
     "high_z_factor": 1.5
   },
 
+  "gravity_sag": {
+    "enabled": true,
+    "gain": 1.1,
+    "reach_power": 2.0,
+    "z_deadzone": 0.05,
+    "max_offset": 0.05,
+    "_comment": "sag = gain * reach^reach_power * max(0, z - z_deadzone). Calibrated from robot2 logs."
+  },
+
   "gravity_lut": {
     "joint_names": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
     "lut": {

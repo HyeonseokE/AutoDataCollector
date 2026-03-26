@@ -46,6 +46,8 @@ pipeline_multi/results_multi/
 # Local config
 .env
 openai_api_key.json
+run_forward_and_reset.sh
+pipeline_config/recording_config.yaml
 
 # Legacy folders (DO NOT MODIFY)
 code_gen/

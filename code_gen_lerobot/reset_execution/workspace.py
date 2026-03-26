@@ -124,6 +124,7 @@ class ResetWorkspace(BaseWorkspace):
         max_attempts: int = 500,
         max_iou: float = 0.3,
         y_min_abs: Optional[float] = None,
+        exclusion_zones: Optional[List[dict]] = None,
     ) -> Optional[List[float]]:
         """
         단일 객체용 랜덤 위치 생성 (reach + FOV + IoU 기반 충돌 검증).
@@ -140,6 +141,9 @@ class ResetWorkspace(BaseWorkspace):
             y_min_abs: 최소 |y| 제한 (robot base_link frame, meters).
                        arrange 태스크에서 |y| > y_min_abs인 영역(테이블 상/하단)에만 배치.
                        None이면 제한 없음.
+            exclusion_zones: 제외 영역 리스트 (robot base_link frame).
+                       [{"center": [x, y], "radius": float}, ...]
+                       예: free state EE 주변 8cm 제외.
 
         Returns:
             [x, y, z] 또는 None (실패 시)
@@ -165,6 +169,19 @@ class ResetWorkspace(BaseWorkspace):
             # 조건 0: y_min_abs 제한 (arrange 태스크용 영역 분리 — |y| > threshold)
             if y_min_abs is not None and abs(y) < y_min_abs:
                 continue
+
+            # 조건 0b: exclusion_zones 제한 (free state EE 주변 등)
+            if exclusion_zones:
+                in_exclusion = False
+                for zone in exclusion_zones:
+                    zx, zy = zone["center"]
+                    zr = zone["radius"]
+                    dist = np.sqrt((x - zx) ** 2 + (y - zy) ** 2)
+                    if dist < zr:
+                        in_exclusion = True
+                        break
+                if in_exclusion:
+                    continue
 
             # 조건 1: 기본 IK 검증
             if not self._check_ik_feasible(np.array(candidate)):
@@ -310,6 +327,7 @@ def generate_random_positions(
     y_min_abs: Optional[float] = None,
     current_positions: Dict[str, dict] = None,
     current_positions_margin_px: int = 15,
+    exclusion_zones: Optional[List[dict]] = None,
 ) -> Dict[str, List[float]]:
     """
     랜덤 위치 생성 (IoU 기반 충돌 검증).
@@ -459,6 +477,7 @@ def generate_random_positions(
             pix2robot=pix2robot,
             max_attempts=max_attempts,
             y_min_abs=y_min_abs,
+            exclusion_zones=exclusion_zones,
         )
 
         if position is not None:
@@ -624,13 +643,67 @@ def draw_workspace_on_image(
                 except Exception:
                     continue
 
+    # ── Free state EE exclusion zone (반경 8cm) 마스킹 ──
+    FREE_STATE_EXCLUSION_RADIUS = 0.08
+    free_ee = None
+    try:
+        from lerobot_cap.kinematics import load_calibration_limits as _load_cl
+        free_state_path = (
+            Path(__file__).parent.parent.parent
+            / "robot_configs" / "free_state" / f"robot{robot_id}_free_state.json"
+        )
+        calib_path_ee = (
+            Path(__file__).parent.parent.parent
+            / "calibration" / "so101" / f"robot{robot_id}_calibration.json"
+        )
+        urdf_path_ee = (
+            Path(__file__).parent.parent.parent
+            / "assets" / "urdf" / f"so101_robot{robot_id}.urdf"
+        )
+        if free_state_path.exists() and calib_path_ee.exists() and urdf_path_ee.exists():
+            import json as _json
+            with open(free_state_path) as f:
+                free_norm = np.array(_json.load(f)["initial_state_normalized"])
+            _cl = _load_cl(
+                str(calib_path_ee),
+                joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
+            )
+            from lerobot_cap.kinematics import KinematicsEngine as _KE
+            _kin = _KE(str(urdf_path_ee), end_effector_frame="gripper_frame_link",
+                       joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"])
+            free_rad = _cl.normalized_to_radians(free_norm)
+            free_ee = _kin.get_ee_position(free_rad)
+    except Exception:
+        pass
+
+    if free_ee is not None:
+        for v in range(0, img_h, step_px):
+            for u in range(0, img_w, step_px):
+                if ws_mask[v, u] == 0:
+                    continue
+                try:
+                    rx, ry, _ = p2r.pixel_to_robot(u, v)
+                    dist_ee = np.sqrt((rx - free_ee[0])**2 + (ry - free_ee[1])**2)
+                    if dist_ee < FREE_STATE_EXCLUSION_RADIUS:
+                        result[v:v+step_px, u:u+step_px] = (
+                            image[v:v+step_px, u:u+step_px] * 0.4
+                        ).astype(np.uint8)
+                        ws_mask[v:v+step_px, u:u+step_px] = 0  # 유효 영역에서도 제거
+                except Exception:
+                    continue
+
     COLOR_CYAN = (255, 255, 0)
 
-    # ── Min reach 원호 (Cyan 점선) ──
+    # ── Min reach 원호 (Cyan 점선) — exclusion zone 겹침 제거 ──
     for angle in range(0, 360, 3):
         rad = np.radians(angle)
         x = (min_reach + margin) * np.cos(rad)
         y = (min_reach + margin) * np.sin(rad)
+        # exclusion zone과 겹치면 스킵
+        if free_ee is not None:
+            dist_ee = np.sqrt((x - free_ee[0])**2 + (y - free_ee[1])**2)
+            if dist_ee < FREE_STATE_EXCLUSION_RADIUS + 0.01:
+                continue
         px = robot_to_px(x, y)
         if px is not None:
             cv2.circle(result, px, 2, COLOR_CYAN, -1)
@@ -643,6 +716,18 @@ def draw_workspace_on_image(
         px = robot_to_px(x, y)
         if px is not None:
             cv2.circle(result, px, 2, COLOR_CYAN, -1)
+
+    # ── Exclusion zone 경계 (Cyan 점선) — reach 안쪽만 ──
+    if free_ee is not None:
+        for angle in range(0, 360, 6):
+            rad = np.radians(angle)
+            x = free_ee[0] + FREE_STATE_EXCLUSION_RADIUS * np.cos(rad)
+            y = free_ee[1] + FREE_STATE_EXCLUSION_RADIUS * np.sin(rad)
+            dist_origin = np.sqrt(x*x + y*y)
+            if (min_reach + margin) <= dist_origin <= (max_reach - margin):
+                px = robot_to_px(x, y)
+                if px is not None:
+                    cv2.circle(result, px, 2, COLOR_CYAN, -1)
 
     # ── 가장자리 마진 사각형 (Green) ──
     edge_margin = 30

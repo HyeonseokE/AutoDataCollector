@@ -200,7 +200,7 @@ def _call_gemini_vlm(
     try:
         import vertexai
         from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
-        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, TooManyRequests
     except ImportError as e:
         print(f"[Gemini VLM] Failed to import Vertex AI SDK: {e}")
         return None
@@ -238,7 +238,7 @@ def _call_gemini_vlm(
                     generation_config=gen_config,
                 )
                 break
-            except (ResourceExhausted, ServiceUnavailable) as e:
+            except (ResourceExhausted, TooManyRequests, ServiceUnavailable) as e:
                 if attempt == max_retries:
                     raise
                 delay = 30 * (2 ** attempt)

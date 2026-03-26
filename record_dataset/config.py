@@ -127,7 +127,6 @@ def get_enabled_cameras() -> List[CameraConfigRecord]:
 # Observation feature keys (FK 기반 EE 자세 등)
 OBSERVATION_FEATURE_KEYS = [
     "observation.ee_pos.robot_xyzrpy",
-    "observation.ee_pos.world_xyzrpy",
     "observation.gripper_binary",
     "observation.radian.state",
     "observation.radian.action",
@@ -143,7 +142,6 @@ SKILL_FEATURE_KEYS = [
     "skill.type",
     "skill.progress",
     "skill.goal_position.joint",
-    "skill.goal_position.world_xyzrpy",
     "skill.goal_position.robot_xyzrpy",
     "skill.goal_position.gripper",
 ]
@@ -185,7 +183,7 @@ def load_skill_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
         gp = sf.get("goal_position", {})
         # goal_position이 bool이면 하위 전체에 적용
         if isinstance(gp, bool):
-            gp = {"joint": gp, "world_xyzrpy": gp, "robot_xyzrpy": gp, "gripper": gp}
+            gp = {"joint": gp, "robot_xyzrpy": gp, "gripper": gp}
 
         return {
             "skill.natural_language": sf.get("natural_language", True),
@@ -193,7 +191,6 @@ def load_skill_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
             "skill.type": sf.get("type", True),
             "skill.progress": sf.get("progress", True),
             "skill.goal_position.joint": gp.get("joint", True),
-            "skill.goal_position.world_xyzrpy": gp.get("world_xyzrpy", True),
             "skill.goal_position.robot_xyzrpy": gp.get("robot_xyzrpy", True),
             "skill.goal_position.gripper": gp.get("gripper", True),
         }
@@ -238,7 +235,7 @@ def load_observation_features_from_yaml(yaml_path: str = None) -> Dict[str, bool
         ep = of.get("ee_pos", {})
         # ee_pos가 bool이면 하위 전체에 적용
         if isinstance(ep, bool):
-            ep = {"robot_xyzrpy": ep, "world_xyzrpy": ep}
+            ep = {"robot_xyzrpy": ep}
 
         rd = of.get("radian", {})
         if isinstance(rd, bool):
@@ -246,7 +243,6 @@ def load_observation_features_from_yaml(yaml_path: str = None) -> Dict[str, bool
 
         return {
             "observation.ee_pos.robot_xyzrpy": ep.get("robot_xyzrpy", False),
-            "observation.ee_pos.world_xyzrpy": ep.get("world_xyzrpy", False),
             "observation.gripper_binary": of.get("gripper_binary", False),
             "observation.radian.state": rd.get("state", False),
             "observation.radian.action": rd.get("action", False),
@@ -257,6 +253,48 @@ def load_observation_features_from_yaml(yaml_path: str = None) -> Dict[str, bool
         print(f"[Config] Warning: Failed to load observation_features from {yaml_path}: {e}")
         return defaults
 
+
+
+def load_subtask_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
+    """
+    YAML에서 subtask feature enabled 설정 로드.
+
+    Returns:
+        Dict[str, bool]: 각 subtask feature의 enabled 여부
+    """
+    import yaml
+    from pathlib import Path
+
+    if yaml_path is None:
+        yaml_path = Path(__file__).parent.parent / "pipeline_config" / "recording_config.yaml"
+    else:
+        yaml_path = Path(yaml_path)
+
+    defaults = {
+        "subtask.natural_language": False,
+        "subtask.object_name": False,
+        "subtask.target_position": False,
+    }
+
+    if not yaml_path.exists():
+        return defaults
+
+    try:
+        with open(yaml_path, 'r') as f:
+            data = yaml.safe_load(f)
+
+        sf = data.get("subtask_features")
+        if not sf:
+            return defaults
+
+        return {
+            "subtask.natural_language": sf.get("natural_language", False),
+            "subtask.object_name": sf.get("object_name", False),
+            "subtask.target_position": sf.get("target_position", False),
+        }
+    except Exception as e:
+        print(f"[Config] Warning: Failed to load subtask_features from {yaml_path}: {e}")
+        return defaults
 
 
 def get_camera_feature_keys() -> List[str]:
@@ -272,6 +310,7 @@ def build_dataset_features(
     cameras: List[CameraConfigRecord] = None,
     skill_enabled: Dict[str, bool] = None,
     obs_enabled: Dict[str, bool] = None,
+    subtask_enabled: Dict[str, bool] = None,
 ) -> Dict[str, Any]:
     """
     데이터셋 features 스키마 빌드
@@ -320,10 +359,6 @@ def build_dataset_features(
             "dtype": "float32", "shape": (6,),
             "names": ["x", "y", "z", "roll", "pitch", "yaw"],
         },
-        "observation.ee_pos.world_xyzrpy": {
-            "dtype": "float32", "shape": (6,),
-            "names": ["x", "y", "z", "roll", "pitch", "yaw"],
-        },
         "observation.gripper_binary": {
             "dtype": "float32", "shape": (1,),
             "names": None,
@@ -358,13 +393,30 @@ def build_dataset_features(
         "skill.type": {"dtype": "string", "shape": (1,), "names": None},
         "skill.progress": {"dtype": "float32", "shape": (1,), "names": None},
         "skill.goal_position.joint": {"dtype": "float32", "shape": (NUM_JOINTS,), "names": JOINT_NAMES},
-        "skill.goal_position.world_xyzrpy": {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]},
         "skill.goal_position.robot_xyzrpy": {"dtype": "float32", "shape": (6,), "names": ["x", "y", "z", "roll", "pitch", "yaw"]},
         "skill.goal_position.gripper": {"dtype": "float32", "shape": (1,), "names": ["gripper.pos"]},
     }
 
     for key, schema in skill_schemas.items():
         if skill_enabled.get(key, True):
+            features[key] = schema
+
+    # Sub-task labels (enabled인 것만 추가)
+    if subtask_enabled is None:
+        subtask_enabled = {
+            "subtask.natural_language": False,
+            "subtask.object_name": False,
+            "subtask.target_position": False,
+        }
+
+    subtask_schemas = {
+        "subtask.natural_language": {"dtype": "string", "shape": (1,), "names": None},
+        "subtask.object_name": {"dtype": "string", "shape": (1,), "names": None},
+        "subtask.target_position": {"dtype": "float32", "shape": (3,), "names": ["x", "y", "z"]},
+    }
+
+    for key, schema in subtask_schemas.items():
+        if subtask_enabled.get(key, False):
             features[key] = schema
 
     return features
@@ -426,11 +478,6 @@ DATASET_FEATURES = {
         "dtype": "float32",
         "shape": (NUM_JOINTS,),
         "names": JOINT_NAMES,
-    },
-    "skill.goal_position.world_xyzrpy": {
-        "dtype": "float32",
-        "shape": (6,),
-        "names": ["x", "y", "z", "roll", "pitch", "yaw"],
     },
     "skill.goal_position.robot_xyzrpy": {
         "dtype": "float32",
@@ -597,7 +644,8 @@ def build_features_from_yaml(yaml_path: str = None) -> Dict[str, Any]:
     enabled_cameras = [cam for cam in cameras if cam.enabled]
     skill_enabled = load_skill_features_from_yaml(yaml_path)
     obs_enabled = load_observation_features_from_yaml(yaml_path)
-    return build_dataset_features(enabled_cameras, skill_enabled, obs_enabled)
+    subtask_enabled = load_subtask_features_from_yaml(yaml_path)
+    return build_dataset_features(enabled_cameras, skill_enabled, obs_enabled, subtask_enabled)
 
 
 # =============================================================================

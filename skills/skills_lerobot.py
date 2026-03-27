@@ -608,18 +608,15 @@ class LeRobotSkills:
         if end_gripper is None:
             end_gripper = start_gripper  # 변화 없음
 
-        num_points = 50
         start_time = time.time()
 
-        for i in range(num_points):
+        while True:
             elapsed = time.time() - start_time
-            expected_time = (i / (num_points - 1)) * duration
+            if elapsed >= duration:
+                break
 
-            if elapsed < expected_time:
-                time.sleep(expected_time - elapsed)
-
-            # Cosine smoothing
-            alpha = i / (num_points - 1)
+            # Cosine smoothing (time-based)
+            alpha = min(elapsed / duration, 1.0)
             smooth_alpha = (1 - np.cos(alpha * np.pi)) / 2
 
             # Arm + Gripper interpolation
@@ -643,9 +640,16 @@ class LeRobotSkills:
                         self._rec_err_logged = True
 
             if self.verbose:
-                progress = (i + 1) / num_points
+                progress = min(elapsed / duration, 1.0)
                 filled = int(30 * progress)
                 print(f"\r  [{'=' * filled}{'-' * (30 - filled)}] {progress*100:5.1f}%", end="", flush=True)
+
+            time.sleep(0.02)  # 50Hz
+
+        # Final position
+        arm_normalized = np.clip(end_normalized, -99.0, 99.0)
+        full_normalized = np.concatenate([arm_normalized, [end_gripper]])
+        self.robot.write_positions(full_normalized, normalize=True)
 
         if self.verbose:
             print()
@@ -1578,6 +1582,9 @@ class LeRobotSkills:
         )
 
         try:
+            # Update gripper binary state BEFORE motion (so recording captures correct state)
+            if HAS_RECORDING_CONTEXT and RecordingContext.is_active():
+                RecordingContext.set_gripper_state(is_open=True)
             self._log(f"Gripper: Opening to {clamped_ratio*100:.0f}% (pos={target_pos:.0f})...")
             self._execute_move_gripper_pose(target_pos, duration=duration)
             self._log(f"Gripper: Open ({clamped_ratio*100:.0f}%)")
@@ -1604,6 +1611,9 @@ class LeRobotSkills:
         )
 
         try:
+            # Update gripper binary state BEFORE motion (so recording captures correct state)
+            if HAS_RECORDING_CONTEXT and RecordingContext.is_active():
+                RecordingContext.set_gripper_state(is_open=False)
             self._log(f"Gripper: Closing to 95% (pos={target_pos:.0f})...")
             self._execute_move_gripper_pose(target_pos, duration=duration)
             self._log("Gripper: Closed (95%)")

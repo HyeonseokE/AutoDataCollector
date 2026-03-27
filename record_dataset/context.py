@@ -88,6 +88,9 @@ class RecordingContext:
     _last_record_step: int = -1
     _start_time: Optional[float] = None
 
+    # Gripper binary state (event-driven: set by gripper_open/close skill calls)
+    _gripper_is_open: bool = True  # default: open at start
+
     # Statistics
     _recorded_frames: int = 0
     _skipped_frames: int = 0
@@ -269,6 +272,11 @@ class RecordingContext:
             cls._current_subtask_target_position = None
 
     @classmethod
+    def set_gripper_state(cls, is_open: bool) -> None:
+        """Gripper binary 상태 설정 (gripper_open/close 호출 시)"""
+        cls._gripper_is_open = is_open
+
+    @classmethod
     def get_subtask_info(cls) -> dict:
         """현재 sub-task 정보 반환"""
         return {
@@ -361,11 +369,10 @@ class RecordingContext:
                 if need_robot_ee:
                     extras["observation.ee_pos.robot_xyzrpy"] = np.zeros(6, dtype=np.float32)
 
-        # Gripper binary (normalized 값 기반 threshold)
+        # Gripper binary (event-driven: updated by set_gripper_state())
         if need_gripper:
-            gripper_norm = float(state[5]) if len(state) > 5 else 0.0
             extras["observation.gripper_binary"] = np.array(
-                [1.0 if gripper_norm > 0 else 0.0], dtype=np.float32
+                [1.0 if cls._gripper_is_open else 0.0], dtype=np.float32
             )
 
         # Radian conversion (캘리브레이션 중앙 기준 + URDF 0° 기준)

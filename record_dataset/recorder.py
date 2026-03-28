@@ -381,6 +381,17 @@ class DatasetRecorder:
         self._dataset.add_frame(frame)
         self._frame_count += 1
 
+    def add_frame(self, frame: Dict[str, Any]) -> None:
+        """Add a pre-built frame dict directly to the dataset.
+
+        Used by MultiArmRecorder which builds its own 12-axis frames.
+        Skips shape validation since multi-arm uses different shapes.
+        """
+        if not self._is_recording:
+            raise RuntimeError("Not recording. Call start_episode() first.")
+        self._dataset.add_frame(frame)
+        self._frame_count += 1
+
     def end_episode(self, discard: bool = False) -> Dict[str, Any]:
         """
         현재 에피소드 종료 및 저장

@@ -19,9 +19,9 @@ from typing import Dict, List, Optional, Tuple
 from ..llm import llm_response
 from .prompt import (
     lerobot_reset_code_gen_prompt,
-    turn0_reset_scene_understanding_prompt,
     turn1_reset_bbox_detection_prompt,
 )
+from .turn0_prompt import turn0_reset_scene_understanding_prompt
 from .workspace import (
     classify_objects,
     generate_random_positions,
@@ -549,6 +549,8 @@ def lerobot_reset_code_gen_multi_turn(
     codegen_model: str = None,
     skip_codegen: bool = False,
     canonical_labels: List[str] = None,
+    robot_ids: List[int] = None,
+    original_positions_dual: Dict = None,
 ) -> Tuple[str, Dict, Dict, Dict, Dict, Dict]:
     """
     VLM Multi-Turn Reset 코드 생성 파이프라인.
@@ -571,7 +573,7 @@ def lerobot_reset_code_gen_multi_turn(
         reset_mode: "original" | "random"
         random_seed: 랜덤 위치 생성용 seed
         camera: RealSense camera (depth용)
-        coord_transformer: CoordinateTransformer (pix2world)
+        coord_transformer: Pix2RobotCalibrator 또는 호환 좌표 변환기
         workspace: ResetWorkspace 인스턴스
         current_episode: 현재 에피소드 번호
         total_episodes: 총 에피소드 수
@@ -669,19 +671,6 @@ def lerobot_reset_code_gen_multi_turn(
         except Exception:
             pass
 
-    if coord_transformer is None:
-        try:
-            from object_detection.localization.coordinate_transform import CoordinateTransformer
-            calib_path = Path(__file__).parent.parent.parent / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
-            if calib_path.exists():
-                coord_transformer = CoordinateTransformer(str(calib_path))
-                if not coord_transformer.is_ready:
-                    coord_transformer = None
-                else:
-                    print(f"  Fallback: CoordinateTransformer loaded")
-        except Exception as e:
-            print(f"  CoordinateTransformer not available: {e}")
-
     # Workspace 시각화 이미지 생성 (pix2robot 기반)
     reset_dir = Path(current_state_image_path).parent
     annotated_image_path = None
@@ -699,11 +688,21 @@ def lerobot_reset_code_gen_multi_turn(
     # ── Turn 0: Scene Understanding ──
     print(f"\n{YELLOW}" + _log("Turn 0 — Scene Understanding", step="Turn0") + f"{RESET_COLOR}")
     original_labels = list(original_positions.keys()) if original_positions else []
-    turn0_text = turn0_reset_scene_understanding_prompt(
-        original_instruction=original_instruction,
-        reset_mode=reset_mode,
-        original_object_labels=original_labels,
-    )
+
+    # Multi-arm: use multi-arm reset Turn 0 prompt
+    if robot_ids and len(robot_ids) >= 2:
+        from ..multi_arm.reset_execution.turn0_prompt import turn0_reset_scene_understanding_prompt as multi_arm_turn0
+        turn0_text = multi_arm_turn0(
+            original_instruction=original_instruction,
+            reset_mode=reset_mode,
+            original_object_labels=original_labels,
+        )
+    else:
+        turn0_text = turn0_reset_scene_understanding_prompt(
+            original_instruction=original_instruction,
+            reset_mode=reset_mode,
+            original_object_labels=original_labels,
+        )
     if original_labels:
         print(f"  Original labels provided to VLM: {original_labels}")
     # Image 1 = annotated current state (or original if no transformer)
@@ -944,22 +943,82 @@ def lerobot_reset_code_gen_multi_turn(
         # ── Code Generation (새 Session 2) ──
         session2_model = codegen_model or llm_model
         print(f"\n{YELLOW}" + _log(f"Code Generation (new session: {session2_model})", step="CodeGen") + f"{RESET_COLOR}")
-        from ..forward_execution.system_prompt import CODEGEN_SYSTEM_PROMPT
-        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT)
-        codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
-            {"text": codegen_reset_with_context_prompt(
+
+        # Multi-arm: use multi-arm reset system prompt + user prompt + workspace images
+        if robot_ids and len(robot_ids) >= 2:
+            from ..multi_arm.reset_execution.system_prompt import MULTI_ARM_CODEGEN_RESET_SYSTEM_PROMPT
+            from ..multi_arm.reset_execution.turn3_prompt import multi_arm_turn3_reset_codegen_prompt
+            from ..code_gen_with_skill import _points_to_positions
+
+            codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=MULTI_ARM_CODEGEN_RESET_SYSTEM_PROMPT)
+
+            # Build dual-arm current positions (pixel → per-arm robot frame)
+            current_dual = {
+                "left_arm": _points_to_positions(all_points, robot_id=robot_ids[0], camera=camera, valid_objects=valid_objects),
+                "right_arm": _points_to_positions(all_points, robot_id=robot_ids[1], camera=camera, valid_objects=valid_objects),
+            }
+
+            # Build dual-arm target positions from original per-arm data.
+            # target_positions is flat {obj: info}, but codegen needs per-arm coordinates.
+            # Use original_positions_dual (per-arm) with label_map to remap keys.
+            if original_positions_dual:
+                target_dual = {}
+                for arm_key in ["left_arm", "right_arm"]:
+                    arm_orig = original_positions_dual.get(arm_key, {})
+                    arm_target = {}
+                    for detected_name in target_positions:
+                        original_key = label_map.get(detected_name, detected_name)
+                        if original_key in arm_orig:
+                            arm_target[detected_name] = arm_orig[original_key]
+                    target_dual[arm_key] = arm_target
+            else:
+                # Fallback: same flat positions for both arms
+                target_dual = target_positions
+
+            codegen_text = multi_arm_turn3_reset_codegen_prompt(
+                current_positions=current_dual,
+                target_positions=target_dual,
+                robot_ids=robot_ids,
+                instruction=original_instruction,
                 context_summary=summary_resp,
-                target_positions=target_positions,
-                current_positions={
-                    name: grippable_objects[name]
-                    for name in grippable_objects
-                    if name in target_positions
-                },
-                robot_id=robot_id,
-                is_random_reset=(reset_mode == "random"),
-                all_points=all_points,
-            )},
-            turn_label="CodeGen (Reset)")
+            )
+
+            # Generate per-arm workspace images
+            codegen_workspace_images = []
+            current_img_for_ws = cv2.imread(current_state_image_path)
+            if current_img_for_ws is not None:
+                arm_labels = ["left_arm", "right_arm"]
+                for i, rid in enumerate(robot_ids):
+                    arm_annotated = draw_workspace_on_image(current_img_for_ws.copy(), robot_id=rid)
+                    arm_path = str(reset_dir / f"workspace_{arm_labels[i]}_robot{rid}.jpg")
+                    cv2.imwrite(arm_path, arm_annotated)
+                    codegen_workspace_images.append(arm_path)
+                    print(f"  Workspace image ({arm_labels[i]}/robot{rid}): {arm_path}")
+
+            codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
+                {"text": codegen_text, "image_paths": codegen_workspace_images},
+                turn_label="CodeGen (Reset Multi-Arm)")
+
+            # Override return values with per-arm dicts so runtime globals match the generated code
+            current_positions = current_dual
+            target_positions = target_dual
+        else:
+            from ..forward_execution.system_prompt import CODEGEN_SYSTEM_PROMPT
+            codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT)
+            codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
+                {"text": codegen_reset_with_context_prompt(
+                    context_summary=summary_resp,
+                    target_positions=target_positions,
+                    current_positions={
+                        name: grippable_objects[name]
+                        for name in grippable_objects
+                        if name in target_positions
+                    },
+                    robot_id=robot_id,
+                    is_random_reset=(reset_mode == "random"),
+                    all_points=all_points,
+                )},
+                turn_label="CodeGen (Reset)")
         _accumulate_usage("CodeGen")
 
         code = extract_code_from_response(codegen_resp)

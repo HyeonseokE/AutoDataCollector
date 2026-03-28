@@ -99,7 +99,7 @@ class RecordingContext:
     # Kinematics for FK-based observation features (EE pose)
     _kinematics = None           # KinematicsEngine instance
     _calibration_limits = None   # CalibrationLimits (normalized ↔ radians)
-    _frame_transformer = None    # FrameTransformer (robot ↔ world)
+
     _obs_features_enabled: Optional[Dict[str, bool]] = None
 
     # Skill-level subgoal info
@@ -301,12 +301,11 @@ class RecordingContext:
         Args:
             kinematics: KinematicsEngine 인스턴스 (FK 계산용)
             calibration_limits: CalibrationLimits (normalized ↔ radians 변환)
-            frame_transformer: FrameTransformer (robot ↔ world 변환, optional)
+            frame_transformer: deprecated, unused
         """
         with cls._lock:
             cls._kinematics = kinematics
             cls._calibration_limits = calibration_limits
-            cls._frame_transformer = frame_transformer
 
             # observation features 설정 로드
             try:

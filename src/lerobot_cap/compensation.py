@@ -393,7 +393,7 @@ class AdaptiveCompensator:
 
     Usage (from config file - recommended):
         compensator = AdaptiveCompensator.from_config(
-            config_path="calibration/so101/robot3_compensation.json",
+            config_path="robot_configs/motor_calibration/so101/robot3_compensation.json",
             target_z=0.12
         )
 
@@ -401,7 +401,7 @@ class AdaptiveCompensator:
         compensator = AdaptiveCompensator(
             target_z=0.12,
             use_preload=False,
-            gravity_lut_path="calibration/gravity_lut.json"
+            gravity_lut_path="robot_configs/motor_calibration/gravity_lut.json"
         )
 
         for waypoint in trajectory:

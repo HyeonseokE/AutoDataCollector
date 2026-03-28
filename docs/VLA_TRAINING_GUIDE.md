@@ -40,14 +40,6 @@ NUM_EPISODES=50               # 에피소드 수 (권장: 50-100)
 RECORD_DATASET=true           # 레코딩 활성화 (필수)
 ```
 
-### 1-2. 객체 설정 (`pipeline_config/detection_config.yaml`)
-
-```yaml
-objects:
-  - "yellow dice"    # INSTRUCTION에 맞게 수정
-  - "blue dish"
-```
-
 ---
 
 ## Step 2: 데이터 수집 실행

@@ -240,7 +240,7 @@ target_positions = {{
 approach_height = 0.20
 cur = current_positions["object_name"]["position"]
 tgt = target_positions["object_name"]["position"]
-skills.set_subtask("object_name", cur, tgt)
+skills.set_subtask("move object_name to target")
 
 # Step 1-1. Pick object_name from current position
 skills.gripper_open(skill_description="Open gripper for object_name", verification_question="Is the gripper open?")
@@ -254,7 +254,7 @@ skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_n
 skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Retract from object_name target", verification_question="Is the gripper clear of object_name?")
 
 # === STEP 2: Move 2nd object to target (move_to_initial → re-detect → pick → place) ===
-skills.set_subtask("next_object", current_positions["next_object"]["position"], target_positions["next_object"]["position"])
+skills.set_subtask("move next_object to target")
 skills.move_to_initial_state()  # clear arm from camera view before detection
 updated = skills.detect_objects(["object_name", "next_object", ...])  # ALL object names
 cur = updated["next_object"]["position"] if updated.get("next_object") else current_positions["next_object"]["position"]
@@ -303,7 +303,7 @@ if __name__ == "__main__":
 ### **Guidelines**
 
 1. Generate code that moves each object from current to target position
-2. **MUST call `skills.set_subtask(object_name, cur, tgt)` before each object's pick-place sequence** — this labels the recording
+2. **MUST call `skills.set_subtask("move object_name to target")` before each object's pick-place sequence** — this labels the recording
 3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
 4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
@@ -442,7 +442,7 @@ target_positions = {{
 approach_height = 0.20
 cur = current_positions["object_name"]["position"]
 tgt = target_positions["object_name"]["position"]
-skills.set_subtask("object_name", cur, tgt)
+skills.set_subtask("move object_name to target")
 
 # Step 1-1. Pick object_name from current position
 skills.gripper_open(skill_description="Open gripper for object_name", verification_question="Is the gripper open?")
@@ -456,7 +456,7 @@ skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_n
 skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Retract from object_name target", verification_question="Is the gripper clear of object_name?")
 
 # === STEP 2: Move 2nd object to target (move_to_initial → re-detect → pick → place) ===
-skills.set_subtask("next_object", current_positions["next_object"]["position"], target_positions["next_object"]["position"])
+skills.set_subtask("move next_object to target")
 skills.move_to_initial_state()  # clear arm from camera view before detection
 updated = skills.detect_objects(["object_name", "next_object", ...])  # ALL object names
 cur = updated["next_object"]["position"] if updated.get("next_object") else current_positions["next_object"]["position"]
@@ -561,7 +561,7 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 ### **Guidelines**
 
 1. Generate code that moves each object from current to target position
-2. **MUST call `skills.set_subtask(object_name, cur, tgt)` before each object's pick-place sequence** — this labels the recording
+2. **MUST call `skills.set_subtask("move object_name to target")` before each object's pick-place sequence** — this labels the recording
 3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
 4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`

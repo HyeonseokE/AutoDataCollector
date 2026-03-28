@@ -1465,17 +1465,8 @@ class ForwardAndResetPipeline:
                 print(f"\n{YELLOW}" + self._log("Checking workspace bounds...", tag="Validation") + f"{RESET}")
                 sys.path.insert(0, str(PROJECT_ROOT / "src"))
                 from lerobot_cap.workspace import BaseWorkspace
-                from lerobot_cap.transforms import FrameTransformer
 
-                # FrameTransformer 생성 (robot_id에 맞는 config 로드)
-                frame_config_path = PROJECT_ROOT / f"robot_configs/world2robot_matrices/robot{self.robot_id}_matrix.json"
-                if frame_config_path.exists():
-                    frame_transformer = FrameTransformer(str(frame_config_path))
-                else:
-                    frame_transformer = None
-                    print(f"  {YELLOW}[Warning] Frame config not found: {frame_config_path}{RESET}")
-
-                workspace = BaseWorkspace(frame_transformer=frame_transformer)
+                workspace = BaseWorkspace()
                 print(f"  Workspace: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
 
                 critical_error = False
@@ -1704,6 +1695,39 @@ class ForwardAndResetPipeline:
                         )
             except Exception as e:
                 print(f"  Warning: pixel move visualization failed: {e}")
+
+            # Update llm_cost with detect_objects token usage
+            try:
+                from skills.skills_lerobot import LeRobotSkills
+                skills_inst = LeRobotSkills._last_instance
+                if skills_inst and hasattr(skills_inst, '_detect_token_usage') and skills_inst._detect_token_usage:
+                    cost_path = Path(forward_dir) / "llm_cost.json"
+                    if cost_path.exists():
+                        with open(cost_path) as _f:
+                            _llm_cost = json.load(_f)
+                        detect_turns = skills_inst._detect_token_usage
+                        detect_summary = {
+                            "model": "gemini-3-flash-preview",
+                            "inference_time_s": round(sum(t.get("inference_time_s", 0) for t in detect_turns), 2),
+                            "input_tokens": sum(t.get("input_tokens", 0) for t in detect_turns),
+                            "output_tokens": sum(t.get("output_tokens", 0) for t in detect_turns),
+                            "total_tokens": sum(t.get("total_tokens", 0) for t in detect_turns),
+                            "num_calls": len(detect_turns),
+                            "turns": detect_turns,
+                        }
+                        _llm_cost["detect_objects"] = detect_summary
+                        _old_total = _llm_cost.pop("total", {})
+                        for _k in ["input_tokens", "output_tokens", "total_tokens"]:
+                            _old_total[_k] = _old_total.get(_k, 0) + detect_summary.get(_k, 0)
+                        _old_total["inference_time_s"] = round(
+                            _old_total.get("inference_time_s", 0) + detect_summary["inference_time_s"], 2)
+                        _llm_cost["total"] = _old_total
+                        with open(cost_path, 'w') as _f:
+                            json.dump(_llm_cost, _f, indent=2)
+                        print(f"  detect_objects cost merged (calls={len(detect_turns)}, in={detect_summary['input_tokens']}, out={detect_summary['output_tokens']})")
+                    skills_inst._detect_token_usage = []
+            except Exception as e:
+                print(f"  Warning: detect_objects cost merge failed: {e}")
 
             # Step 5: Context 저장
             print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 5/5") + f"{RESET}")
@@ -3682,16 +3706,17 @@ def main():
         "--objects", "-o",
         type=str,
         nargs="+",
-        required=True,
-        help="Objects to detect"
+        default=[],
+        help="Objects to detect (only used in single-turn mode)"
     )
 
     # 선택 인자
     parser.add_argument(
         "--robot", "-r",
         type=int,
-        default=3,
-        help="Robot number (default: 3)"
+        nargs="+",
+        default=[3],
+        help="Robot ID(s). Single: --robot 2, Dual: --robot 2 3"
     )
 
     parser.add_argument(
@@ -3725,7 +3750,7 @@ def main():
     parser.add_argument(
         "--visualize-detection",
         action="store_true",
-        help="Show real-time detection visualization"
+        help="Show real-time detection visualization (single-turn mode only)"
     )
 
     parser.add_argument(
@@ -3881,28 +3906,52 @@ def main():
         os.environ["JUDGE_SERVER_URL"] = args.judge_server_url
         os.environ["JUDGE_MODEL_NAME"] = args.judge_server_model
 
-    # 파이프라인 실행
-    pipeline = ForwardAndResetPipeline(
-        robot_id=args.robot,
-        llm_model=args.llm,
-        judge_model=args.judge_model,
-        judge_timeout_ms=int(args.judge_timeout * 1000),  # 초 → 밀리초 변환
-        num_random_seeds=args.num_random_seeds,
-        verbose=True,
-        # LeRobot 데이터셋 레코딩 옵션
-        record_dataset=args.record,
-        dataset_repo_id=args.dataset_repo_id,
-        resume_recording=bool(args.resume),
-        # Multi-turn 옵션
-        multi_turn=args.multi_turn,
-        cad_image_dirs=args.cad_image_dirs,
-        side_view_image=args.side_view_image,
-        recording_fps=args.recording_fps,
-        codegen_model=args.codegen_session2_model,
-        task_type=args.task_type,
-        reset_instruction=args.reset_instruction,
-        skip_turn_test=args.skip_turn_test,
-    )
+    # 파이프라인 실행: 로봇 수에 따라 분기
+    robot_ids = args.robot  # list of int (nargs="+")
+
+    if len(robot_ids) == 1:
+        # ── Single-arm: 기존 ForwardAndResetPipeline ──
+        pipeline = ForwardAndResetPipeline(
+            robot_id=robot_ids[0],
+            llm_model=args.llm,
+            judge_model=args.judge_model,
+            judge_timeout_ms=int(args.judge_timeout * 1000),
+            num_random_seeds=args.num_random_seeds,
+            verbose=True,
+            record_dataset=args.record,
+            dataset_repo_id=args.dataset_repo_id,
+            resume_recording=bool(args.resume),
+            multi_turn=args.multi_turn,
+            cad_image_dirs=args.cad_image_dirs,
+            side_view_image=args.side_view_image,
+            recording_fps=args.recording_fps,
+            codegen_model=args.codegen_session2_model,
+            task_type=args.task_type,
+            reset_instruction=args.reset_instruction,
+            skip_turn_test=args.skip_turn_test,
+        )
+    else:
+        # ── Multi-arm: UnifiedMultiArmPipeline ──
+        from unified_multi_arm import UnifiedMultiArmPipeline
+        pipeline = UnifiedMultiArmPipeline(
+            robot_ids=robot_ids,
+            llm_model=args.llm,
+            judge_model=args.judge_model,
+            judge_timeout_ms=int(args.judge_timeout * 1000),
+            num_random_seeds=args.num_random_seeds,
+            verbose=True,
+            record_dataset=args.record,
+            dataset_repo_id=args.dataset_repo_id,
+            resume_recording=bool(args.resume),
+            multi_turn=args.multi_turn,
+            cad_image_dirs=args.cad_image_dirs,
+            side_view_image=args.side_view_image,
+            recording_fps=args.recording_fps,
+            codegen_model=args.codegen_session2_model,
+            task_type=args.task_type,
+            reset_instruction=args.reset_instruction,
+            skip_turn_test=args.skip_turn_test,
+        )
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기
     if args.resume:

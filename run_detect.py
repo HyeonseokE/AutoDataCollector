@@ -78,36 +78,6 @@ def draw_workspace_overlay(
     overlay_valid = np.zeros_like(image)
     overlay_invalid = np.zeros_like(image)
 
-    # Robot frame config 로드하여 robot base 위치 획득
-    # Base_link origin의 World frame 좌표 = -R^T @ t (역변환)
-    # Transformer가 내부적으로 Y축을 반전하므로, World frame Y 그대로 전달
-    robot_x_cm = 5.1   # default (World frame)
-    robot_y_cm = -25.1  # default (World frame, transformer가 내부에서 +25.1로 반전)
-
-    try:
-        frame_config_path = PROJECT_ROOT / f"robot_configs/world2robot_matrices/robot{robot_id}_matrix.json"
-        if frame_config_path.exists():
-            with open(frame_config_path, 'r') as f:
-                frame_config = json.load(f)
-
-            # 방법 1: frames.world.translation 직접 사용 (Base origin in World frame)
-            frames_world = frame_config.get("frames", {}).get("world", {})
-            if "translation" in frames_world:
-                translation = frames_world["translation"]
-                robot_x_cm = translation[0] * 100  # m -> cm
-                robot_y_cm = translation[1] * 100  # m -> cm (World frame Y 그대로)
-            else:
-                # 방법 2: _raw_transform에서 역변환 계산
-                raw_transform = frame_config.get("_raw_transform", {})
-                R = np.array(raw_transform.get("rotation_matrix", np.eye(3).tolist()))
-                t = np.array(raw_transform.get("translation", [0.05, -0.25, 0]))
-                base_in_world = -R.T @ t
-                robot_x_cm = base_in_world[0] * 100
-                robot_y_cm = base_in_world[1] * 100
-    except Exception as e:
-        print(f"[Warning] Failed to load frame config: {e}")
-        pass  # 기본값 사용
-
     # 실제 workspace 기반으로 그리드 범위 계산
     min_reach_cm = workspace.min_reach * 100  # 5cm
     max_reach_cm = workspace.max_reach * 100  # 40.7cm
@@ -314,17 +284,7 @@ def draw_workspace_overlay(
     max_reach_label_pos = None
     x_min_label_pos = None
 
-    # Robot base 회전 행렬 로드
     base_rotation_matrix = None
-    try:
-        frame_config_path = PROJECT_ROOT / f"robot_configs/world2robot_matrices/robot{robot_id}_matrix.json"
-        if frame_config_path.exists():
-            with open(frame_config_path, 'r') as f:
-                frame_config = json.load(f)
-            raw_transform = frame_config.get("_raw_transform", {})
-            base_rotation_matrix = raw_transform.get("rotation_matrix")
-    except Exception as e:
-        print(f"[Warning] Failed to load rotation matrix: {e}")
 
     # Robot base 위치 시각화 - 좌표축 형태 (회전 적용)
     try:
@@ -461,7 +421,6 @@ def run_realtime_detection(
     try:
         from object_detection.camera import RealSenseD435
         from object_detection.detection import GroundingDINODetector
-        from object_detection.localization import CoordinateTransformer
     except ImportError as e:
         print(f"[Error] Could not import object_detection modules: {e}")
         return {}
@@ -517,33 +476,15 @@ def run_realtime_detection(
     except Exception as e:
         print(f"[System] Pix2Robot not available: {e}")
 
-    # Fallback: 기존 CoordinateTransformer
-    transformer = CoordinateTransformer()
     if pix2robot is None:
-        calibration_file = PROJECT_ROOT / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
-        if calibration_file.exists():
-            transformer.load_calibration(str(calibration_file))
-            transformer.set_camera_intrinsics(camera.get_intrinsics())
-            print("[System] Fallback: CoordinateTransformer loaded")
-        else:
-            print("[Warning] No calibration found! Robot coordinates will be unavailable.")
+        print("[Warning] No Pix2Robot calibration found! Robot coordinates will be unavailable.")
 
-    # Workspace 로드 (FrameTransformer 포함)
-    print("[System] Loading workspace with frame transformer...")
+    # Workspace 로드
+    print("[System] Loading workspace...")
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     from lerobot_cap.workspace import BaseWorkspace
-    from lerobot_cap.transforms import FrameTransformer
 
-    # FrameTransformer 생성 (robot_id에 맞는 config 로드)
-    frame_config_path = PROJECT_ROOT / f"robot_configs/world2robot_matrices/robot{robot_id}_matrix.json"
-    if frame_config_path.exists():
-        frame_transformer = FrameTransformer(str(frame_config_path))
-        print(f"[System] Frame transformer loaded: {frame_config_path.name}")
-    else:
-        frame_transformer = None
-        print(f"[Warning] Frame config not found: {frame_config_path}")
-
-    workspace = BaseWorkspace(frame_transformer=frame_transformer)
+    workspace = BaseWorkspace()
     print(f"[System] Workspace loaded: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
 
     # 쿼리 문자열 생성 (Grounding DINO 형식)
@@ -649,29 +590,6 @@ def run_realtime_detection(
                         except Exception:
                             pass
 
-                    # 2) Fallback: 기존 CoordinateTransformer
-                    if robot_coords is None and transformer.is_ready:
-                        depth_m = camera.get_depth_at_pixel(cx, cy, depth)
-                        world_coords_cm = transformer.pixel_depth_to_world(cx, cy, depth_m)
-
-                        if unit == "m":
-                            robot_coords = (
-                                world_coords_cm[0] / 100.0,
-                                world_coords_cm[1] / 100.0,
-                                world_coords_cm[2] / 100.0
-                            )
-                        else:
-                            robot_coords = (
-                                world_coords_cm[0],
-                                world_coords_cm[1],
-                                world_coords_cm[2]
-                            )
-                        position_m = np.array([
-                            world_coords_cm[0] / 100.0,
-                            world_coords_cm[1] / 100.0,
-                            world_coords_cm[2] / 100.0
-                        ])
-
                     if robot_coords is None:
                         continue
 
@@ -747,7 +665,7 @@ def run_realtime_detection(
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
             # Workspace overlay 그리기 (항상 표시)
-            vis_image = draw_workspace_overlay(vis_image, transformer, workspace, robot_id=robot_id)
+            vis_image = draw_workspace_overlay(vis_image, None, workspace, robot_id=robot_id)
 
             # 검출 시각화 이미지 저장 (좌표 포함, UI 요소 제외)
             last_vis_image = vis_image.copy()
@@ -804,15 +722,6 @@ def run_realtime_detection(
             print("[System] Cleanup complete (camera stopped)")
         else:
             print("[System] Cleanup complete (shared camera kept alive)")
-
-    # Z값 처리: 3D 캘리브레이션이 없으면 기본값 사용
-    # (3D 캘리브레이션이 있으면 pixel_depth_to_world에서 이미 정확한 Z 반환)
-    if transformer.transform_matrix_3d is None:
-        # 2D 캘리브레이션만 있는 경우: Z를 테이블 높이(1cm)로 고정
-        for q in queries:
-            if last_positions.get(q) is not None:
-                pos = last_positions[q]
-                last_positions[q] = (pos[0], pos[1], 0.01)
 
     # Z값 보정: z > 50cm인 경우 9cm로 하드코딩 (depth 센서 오류 보정)
     for q in queries:

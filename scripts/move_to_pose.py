@@ -40,7 +40,6 @@ from lerobot_cap.hardware import FeetechController
 from lerobot_cap.kinematics import KinematicsEngine, load_calibration_limits
 from lerobot_cap.planning import TrajectoryPlanner
 from lerobot_cap.compensation import AdaptiveCompensator
-from lerobot_cap.transforms import FrameTransformer
 
 
 def extract_robot_id(config_path: str) -> str:
@@ -224,33 +223,11 @@ def main():
     # Target position (in specified frame)
     target_position_input = np.array([args.x, args.y, args.z])
 
-    # Coordinate frame transformation
-    frame_transformer = None
+    # Coordinate frame
     if args.frame != "base_link":
-        frames_file = config.get("frames_file")
-        if frames_file and Path(frames_file).exists():
-            frame_transformer = FrameTransformer(frames_file)
-            if frame_transformer.has_frame(args.frame):
-                target_position = frame_transformer.transform_position(target_position_input, args.frame)
-                frame_info = frame_transformer.get_frame_info(args.frame)
-                print(f"\n[좌표 변환: {args.frame} → base_link]")
-                print(f"  로봇 위치 ({args.frame} 기준): {frame_info['robot_position']} m")
-                print(f"  로봇 회전 ({args.frame} 기준): {frame_info['robot_rpy']} deg")
-                print(f"  ─────────────────────────────────────")
-                print(f"  입력 ({args.frame}):  x={args.x:+.4f}, y={args.y:+.4f}, z={args.z:+.4f}")
-                print(f"  변환 (base_link): x={target_position[0]:+.4f}, y={target_position[1]:+.4f}, z={target_position[2]:+.4f}")
-            else:
-                print(f"\nWarning: Frame '{args.frame}' not found in {frames_file}")
-                print(f"  Available frames: {frame_transformer.get_available_frames()}")
-                print(f"  Using input as base_link coordinates")
-                target_position = target_position_input
-        else:
-            print(f"\nWarning: frames_file not configured or not found")
-            print(f"  Using input as base_link coordinates")
-            target_position = target_position_input
-    else:
-        target_position = target_position_input
-        print(f"\nTarget EE position: x={args.x:.3f}, y={args.y:.3f}, z={args.z:.3f}")
+        print(f"\nWarning: frame '{args.frame}' is not supported. Using base_link.")
+    target_position = target_position_input
+    print(f"\nTarget EE position: x={args.x:.3f}, y={args.y:.3f}, z={args.z:.3f}")
 
     # Target orientation (optional)
     # By default, use position-only IK (robot finds natural orientation)
@@ -714,7 +691,7 @@ def main():
                 compensator = AdaptiveCompensator(
                     target_z=args.z,
                     override_factor=args.compensation_factor,
-                    gravity_lut_path="calibration/gravity_lut.json",
+                    gravity_lut_path="robot_configs/motor_calibration/gravity_lut.json",
                 )
                 print(f"  Compensation: using legacy defaults (no config file)")
             comp_info = compensator.get_info()

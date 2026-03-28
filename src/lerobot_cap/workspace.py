@@ -19,7 +19,6 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from lerobot_cap.kinematics.engine import KinematicsEngine
-    from lerobot_cap.transforms import FrameTransformer
 
 
 class BaseWorkspace:
@@ -37,17 +36,16 @@ class BaseWorkspace:
     def __init__(
         self,
         kinematics_engine: Optional["KinematicsEngine"] = None,
-        frame_transformer: Optional["FrameTransformer"] = None,
         min_reach: float = 0.20,
         max_reach: float = 0.407,
         z_floor: float = -0.02,  # 캘리브레이션 오차 허용 (-2cm)
+        **kwargs,
     ):
         """
         Initialize BaseWorkspace.
 
         Args:
             kinematics_engine: KinematicsEngine 인스턴스 (reach limits 자동 로드)
-            frame_transformer: FrameTransformer 인스턴스
             min_reach: 최소 도달 거리 (kinematics_engine 없을 때 사용)
             max_reach: 최대 도달 거리 (kinematics_engine 없을 때 사용)
             z_floor: 바닥 높이
@@ -62,7 +60,6 @@ class BaseWorkspace:
             self.max_reach = max_reach
             self._kinematics = None
 
-        self._transformer = frame_transformer
         self.z_floor = z_floor
 
     def is_reachable(
@@ -139,14 +136,12 @@ _base_workspace: Optional[BaseWorkspace] = None
 
 def get_base_workspace(
     kinematics_engine: Optional["KinematicsEngine"] = None,
-    frame_transformer: Optional["FrameTransformer"] = None,
 ) -> BaseWorkspace:
     """
     BaseWorkspace 싱글톤 인스턴스 반환.
 
     Args:
         kinematics_engine: KinematicsEngine (첫 호출 시 필요)
-        frame_transformer: FrameTransformer (첫 호출 시 필요)
 
     Returns:
         BaseWorkspace instance
@@ -154,6 +149,6 @@ def get_base_workspace(
     global _base_workspace
 
     if _base_workspace is None:
-        _base_workspace = BaseWorkspace(kinematics_engine, frame_transformer)
+        _base_workspace = BaseWorkspace(kinematics_engine)
 
     return _base_workspace

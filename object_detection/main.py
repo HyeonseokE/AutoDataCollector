@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Object Detection & Localization System
-자연어로 객체를 찾아 월드 좌표계 기준 위치를 반환
+Object Detection System
+자연어로 객체를 찾아 픽셀 좌표 및 depth를 반환
 
 사용법:
-    python main.py --calibrate          # 캘리브레이션 수행
     python main.py --query "red cup"    # 객체 찾기
     python main.py --interactive        # 대화형 모드
 """
@@ -17,13 +16,11 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from camera import RealSenseD435
-from pix2world_extrinsic import GridCalibrator
 from detection import GroundingDINODetector, Detection
-from localization import CoordinateTransformer, ObjectLocalizer
 
 
 class ObjectLocalizationSystem:
-    """자연어 기반 객체 위치 추정 시스템"""
+    """자연어 기반 객체 탐지 시스템"""
 
     def __init__(self, config_path: str = "config/config.yaml"):
         """
@@ -37,10 +34,6 @@ class ObjectLocalizationSystem:
         # 컴포넌트 초기화
         self.camera: Optional[RealSenseD435] = None
         self.detector: Optional[GroundingDINODetector] = None
-        self.calibrator: Optional[GridCalibrator] = None
-        self.transformer: Optional[CoordinateTransformer] = None
-
-        self.calibration_file = Path(__file__).parent.parent / self.config['calibration']['save_path']
 
     def _load_config(self, config_path: str) -> dict:
         """설정 파일 로드"""
@@ -52,7 +45,6 @@ class ObjectLocalizationSystem:
             # 기본 설정
             return {
                 'camera': {'width': 640, 'height': 480, 'fps': 30},
-                'calibration': {'grid_size_cm': 1.0, 'save_path': 'robot_configs/pix2world_matrices/pix2world_transform_data.npz'},
                 'detection': {'box_threshold': 0.25, 'text_threshold': 0.25, 'device': 'cuda'}
             }
 
@@ -69,15 +61,6 @@ class ObjectLocalizationSystem:
         )
         self.camera.start()
         print("[System] Camera initialized")
-
-        # 캘리브레이션 로드
-        self.transformer = CoordinateTransformer()
-        if self.calibration_file.exists():
-            self.transformer.load_calibration(str(self.calibration_file))
-            self.transformer.set_camera_intrinsics(self.camera.get_intrinsics())
-            print("[System] Calibration loaded")
-        else:
-            print("[System] Warning: No calibration found. Run with --calibrate first")
 
         # 탐지기 초기화 (선택적)
         if load_detector:
@@ -96,46 +79,6 @@ class ObjectLocalizationSystem:
             self.camera.stop()
         print("[System] Shutdown complete")
 
-    def run_calibration(self) -> bool:
-        """캘리브레이션 수행"""
-        print("\n" + "="*60)
-        print("Starting Calibration")
-        print("="*60)
-
-        # 이미지 캡처
-        print("Press 's' to capture image for calibration, 'q' to quit")
-
-        while True:
-            color, depth = self.camera.get_frames()
-            if color is None:
-                continue
-
-            cv2.imshow("Calibration - Press 's' to capture", color)
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord('s'):
-                cv2.destroyAllWindows()
-                break
-            elif key == ord('q'):
-                cv2.destroyAllWindows()
-                return False
-
-        # 캘리브레이션 수행
-        cal_cfg = self.config['calibration']
-        self.calibrator = GridCalibrator(grid_size_cm=cal_cfg['grid_size_cm'])
-
-        if self.calibrator.calibrate_interactive(color):
-            self.calibrator.save(str(self.calibration_file))
-
-            # Transformer 업데이트
-            self.transformer = CoordinateTransformer(str(self.calibration_file))
-            self.transformer.set_camera_intrinsics(self.camera.get_intrinsics())
-
-            print("\n[System] Calibration saved successfully!")
-            return True
-
-        return False
-
     def find_object(self, query: str) -> Optional[dict]:
         """
         자연어 쿼리로 객체 찾기
@@ -148,15 +91,10 @@ class ObjectLocalizationSystem:
                 'label': str,
                 'confidence': float,
                 'pixel': (u, v),
-                'world_coords': (x, y, z),  # cm
                 'depth_m': float
             }
             또는 못 찾으면 None
         """
-        if not self.transformer.is_ready:
-            print("[System] Error: Calibration not loaded")
-            return None
-
         if self.detector is None:
             print("[System] Error: Detector not initialized")
             return None
@@ -172,18 +110,13 @@ class ObjectLocalizationSystem:
             print(f"[System] Object not found: '{query}'")
             return None
 
-        # 좌표 변환
         cx, cy = detection.center
         depth_m = self.camera.get_depth_at_pixel(cx, cy, depth)
-
-        # 월드 좌표 계산
-        world_coords = self.transformer.pixel_to_world_2d(cx, cy)
 
         result = {
             'label': detection.label,
             'confidence': detection.confidence,
             'pixel': (cx, cy),
-            'world_coords': world_coords,
             'depth_m': depth_m
         }
 
@@ -197,7 +130,6 @@ class ObjectLocalizationSystem:
         print("Commands:")
         print("  - Type object name to find (e.g., 'red cup')")
         print("  - 'v' : Toggle visualization")
-        print("  - 'c' : Run calibration")
         print("  - 'q' : Quit")
         print("="*60 + "\n")
 
@@ -216,14 +148,12 @@ class ObjectLocalizationSystem:
             if current_query and self.detector:
                 vis_image, detections = self.detector.detect_and_draw(color, current_query)
 
-                if detections and self.transformer.is_ready:
+                if detections:
                     for det in detections:
                         cx, cy = det.center
-                        world_coords = self.transformer.pixel_to_world_2d(cx, cy)
                         depth_m = self.camera.get_depth_at_pixel(cx, cy, depth)
 
-                        # 좌표 표시
-                        coord_text = f"World: ({world_coords[0]:.1f}, {world_coords[1]:.1f}, {world_coords[2]:.1f}) cm"
+                        coord_text = f"Pixel: ({cx}, {cy})"
                         cv2.putText(vis_image, coord_text,
                                    (det.bbox[0], det.bbox[3] + 20),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
@@ -240,11 +170,6 @@ class ObjectLocalizationSystem:
             cv2.putText(display, status, (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-            calib_status = "Calibrated" if self.transformer.is_ready else "NOT CALIBRATED"
-            cv2.putText(display, calib_status, (10, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                       (0, 255, 0) if self.transformer.is_ready else (0, 0, 255), 2)
-
             if show_visualization:
                 cv2.imshow("Object Localization", display)
 
@@ -256,9 +181,6 @@ class ObjectLocalizationSystem:
                 show_visualization = not show_visualization
                 if not show_visualization:
                     cv2.destroyAllWindows()
-            elif key == ord('c'):
-                cv2.destroyAllWindows()
-                self.run_calibration()
             elif key == ord('n'):
                 # 새 쿼리 입력
                 print("\nEnter object to find: ", end="", flush=True)
@@ -269,30 +191,12 @@ class ObjectLocalizationSystem:
                         print(f"\n[Result] Found '{result['label']}'")
                         print(f"  Confidence: {result['confidence']:.2f}")
                         print(f"  Pixel: {result['pixel']}")
-                        print(f"  World Coords: ({result['world_coords'][0]:.2f}, {result['world_coords'][1]:.2f}, {result['world_coords'][2]:.2f}) cm")
                         print(f"  Depth: {result['depth_m']*100:.2f} cm")
 
         cv2.destroyAllWindows()
 
-    def get_object_position(self, query: str) -> Optional[Tuple[float, float, float]]:
-        """
-        간단한 API: 객체 이름 → 월드 좌표
-
-        Args:
-            query: 객체 설명
-
-        Returns:
-            (x, y, z) 월드 좌표 (cm) 또는 None
-        """
-        result = self.find_object(query)
-        if result:
-            return result['world_coords']
-        return None
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Object Detection & Localization System")
-    parser.add_argument('--calibrate', action='store_true', help='Run calibration')
+    parser = argparse.ArgumentParser(description="Object Detection System")
     parser.add_argument('--query', type=str, help='Object to find (e.g., "red cup")')
     parser.add_argument('--interactive', action='store_true', help='Run interactive mode')
     parser.add_argument('--config', type=str, default='config/config.yaml', help='Config file path')
@@ -303,13 +207,8 @@ def main():
     system = ObjectLocalizationSystem(args.config)
 
     try:
-        # 캘리브레이션 모드
-        if args.calibrate:
-            system.initialize(load_detector=False)
-            system.run_calibration()
-
         # 단일 쿼리 모드
-        elif args.query:
+        if args.query:
             system.initialize(load_detector=True)
             result = system.find_object(args.query)
 
@@ -317,7 +216,8 @@ def main():
                 print(f"\n{'='*50}")
                 print(f"Object: {result['label']}")
                 print(f"Confidence: {result['confidence']:.2f}")
-                print(f"World Position: ({result['world_coords'][0]:.2f}, {result['world_coords'][1]:.2f}, {result['world_coords'][2]:.2f}) cm")
+                print(f"Pixel: {result['pixel']}")
+                print(f"Depth: {result['depth_m']*100:.2f} cm")
                 print(f"{'='*50}\n")
             else:
                 print(f"\nObject '{args.query}' not found\n")
@@ -330,7 +230,6 @@ def main():
         # 기본: 대화형 모드
         else:
             print("Usage:")
-            print("  python main.py --calibrate      # Run calibration")
             print("  python main.py --query 'object' # Find object")
             print("  python main.py --interactive    # Interactive mode")
 

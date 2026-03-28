@@ -267,59 +267,36 @@ class SubgoalExecutor:
     def _load_coordinate_transformer(self):
         """Load coordinate transformer for robot->pixel projection."""
         try:
-            from object_detection.localization.coordinate_transform import CoordinateTransformer
-            import json
+            from pix2robot_calibrator import Pix2RobotCalibrator
 
-            # Load calibration
-            calib_path = "robot_configs/pix2world_matrices/pix2world_transform_data.npz"
-            transformer = CoordinateTransformer(calib_path)
+            calib_path = f"robot_configs/pix2robot_matrices/robot{self.robot_id}_pix2robot_data.npz"
+            calibrator = Pix2RobotCalibrator(robot_id=self.robot_id)
+            if not calibrator.load(calib_path):
+                self._log("  Warning: Pix2Robot calibration not loaded")
+                return None
 
-            if not transformer.is_ready:
-                self._log("  Warning: Coordinate transformer not ready")
-                return None, None
-
-            # Load robot->world transform matrix
-            matrix_path = f"robot_configs/world2robot_matrices/robot{self.robot_id}_matrix.json"
-            with open(matrix_path) as f:
-                matrix_data = json.load(f)
-
-            # World→Robot transform (we need Robot→World, so invert)
-            T_world2robot = np.array(matrix_data["_raw_transform"]["transform_4x4"])
-            T_robot2world = np.linalg.inv(T_world2robot)
-
-            return transformer, T_robot2world
+            return calibrator
 
         except Exception as e:
             self._log(f"  Warning: Could not load transformer: {e}")
-            return None, None
+            return None
 
     def _robot_to_pixel(
         self,
         xyz_robot: np.ndarray,
-        transformer,
-        T_robot2world: np.ndarray,
+        calibrator,
     ) -> tuple[int, int] | None:
         """Convert robot base frame XYZ to pixel coordinates.
 
         Args:
             xyz_robot: (3,) position in robot base frame (meters)
-            transformer: CoordinateTransformer instance
-            T_robot2world: 4x4 Robot→World transform matrix
+            calibrator: Pix2RobotCalibrator instance
 
         Returns:
             (u, v) pixel coordinates or None if out of bounds
         """
-        # Robot frame → World frame
-        p_robot = np.array([xyz_robot[0], xyz_robot[1], xyz_robot[2], 1.0])
-        p_world = T_robot2world @ p_robot
-        x_world, y_world = p_world[0], p_world[1]
-
-        # World frame (meters) → World frame (cm) for transformer
-        x_cm = x_world * 100
-        y_cm = y_world * 100
-
         try:
-            u, v = transformer.world_to_pixel(x_cm, y_cm)
+            u, v = calibrator.robot_to_pixel(xyz_robot[0], xyz_robot[1], xyz_robot[2])
             return int(u), int(v)
         except Exception:
             return None
@@ -336,7 +313,7 @@ class SubgoalExecutor:
         h, w = vis.shape[:2]
 
         # Load coordinate transformer
-        transformer, T_robot2world = self._load_coordinate_transformer()
+        calibrator = self._load_coordinate_transformer()
 
         # Colors for visualization
         COLORS = [
@@ -354,11 +331,11 @@ class SubgoalExecutor:
 
         # Draw subgoal positions on image
         pixel_positions = []
-        if transformer is not None and T_robot2world is not None:
+        if calibrator is not None:
             for i in range(result['n_subgoals']):
                 pose = result['poses'][i]
                 xyz = pose[:3]
-                pixel = self._robot_to_pixel(xyz, transformer, T_robot2world)
+                pixel = self._robot_to_pixel(xyz, calibrator)
 
                 if pixel is not None:
                     u, v = pixel

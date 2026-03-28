@@ -4,10 +4,10 @@ YAML Config Parser for Shell Scripts
 
 Usage:
     # Parse entire config to shell variables
-    eval "$(python3 pipeline_config/parse_yaml.py pipeline_config/detection_config.yaml)"
+    eval "$(python3 pipeline_config/parse_yaml.py pipeline_config/paid_api_config.yaml)"
 
     # Get specific value
-    python3 pipeline_config/parse_yaml.py pipeline_config/detection_config.yaml detection_timeout
+    python3 pipeline_config/parse_yaml.py pipeline_config/paid_api_config.yaml codegen_llm_model
 """
 
 import sys

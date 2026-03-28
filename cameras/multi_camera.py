@@ -185,7 +185,7 @@ class MultiCameraManager:
 
     def async_read_all(self) -> Dict[str, np.ndarray]:
         """
-        모든 카메라에서 async_read로 이미지 읽기
+        모든 카메라에서 async_read로 이미지 읽기 (병렬)
 
         Returns:
             Dict[str, np.ndarray]: {camera_name: image}
@@ -193,13 +193,31 @@ class MultiCameraManager:
         if not self._is_connected:
             raise RuntimeError("[MultiCamera] Not connected")
 
-        images = {}
+        if len(self.cameras) <= 1:
+            # 카메라 1대면 순차로 충분
+            images = {}
+            for name, camera in self.cameras.items():
+                try:
+                    images[name] = camera.async_read()
+                except Exception as e:
+                    print(f"  [ERROR] async_read {name}: {e}")
+            return images
 
-        for name, camera in self.cameras.items():
-            try:
-                images[name] = camera.async_read()
-            except Exception as e:
-                print(f"  [ERROR] async_read {name}: {e}")
+        # 2대 이상: 병렬 캡처
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        images = {}
+        with ThreadPoolExecutor(max_workers=len(self.cameras)) as executor:
+            futures = {
+                executor.submit(camera.async_read): name
+                for name, camera in self.cameras.items()
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    images[name] = future.result()
+                except Exception as e:
+                    print(f"  [ERROR] async_read {name}: {e}")
 
         return images
 

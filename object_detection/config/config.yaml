@@ -9,15 +9,6 @@ camera:
   min_depth: 0.1
   max_depth: 2.0
 
-# Grid Calibration Settings
-calibration:
-  grid_size_cm: 1.0  # 그리드 한 칸 크기 (cm)
-  # 캘리브레이션에 사용할 점 개수 (최소 4개, 많을수록 정확)
-  min_points: 4
-  recommended_points: 9
-  # 저장 경로
-  save_path: "robot_configs/pix2world_matrices/pix2world_transform_data.npz"
-
 # Detection Settings
 detection:
   # Grounding DINO 설정

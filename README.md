@@ -135,11 +135,9 @@ object_detection/
 │   └── realsense.py     # RGB-D 프레임 캡처
 ├── detection/           # Vision-Language 모델
 │   └── grounding_detector.py  # Grounding DINO
-├── calibration/         # 카메라-로봇 캘리브레이션
-│   └── transform_data.npz     # Homography 행렬
 ├── localization/        # 좌표 변환
 │   └── coordinate_transform.py
-└── main.py              # ObjectLocalizationSystem
+└── main.py              # ObjectDetectionSystem
 ```
 
 **사용 예시:**
@@ -293,7 +291,6 @@ src/lerobot_cap/
 │   └── calibration_limits.py  # 관절 한계 변환
 ├── planning/           # 궤적 계획
 │   └── trajectory.py   # TrajectoryPlanner (Multi-IK, 보간)
-├── transforms.py       # FrameTransformer (좌표계 변환)
 └── compensation.py     # AdaptiveCompensator (중력 보상)
 ```
 
@@ -366,7 +363,7 @@ from lerobot_cap.planning import TrajectoryPlanner
 from lerobot_cap.kinematics import KinematicsEngine, load_calibration_limits
 
 kinematics = KinematicsEngine("assets/urdf/so101.urdf")
-calibration_limits = load_calibration_limits("calibration/so101/robot3_calibration.json")
+calibration_limits = load_calibration_limits("robot_configs/motor_calibration/so101/robot3_calibration.json")
 
 planner = TrajectoryPlanner(
     kinematics,
@@ -393,37 +390,14 @@ print(f"Trajectory duration: {trajectory.duration}s")
 print(f"Waypoints: {len(trajectory.joint_positions)}")
 ```
 
-### 4. FrameTransformer (`transforms.py`)
-
-World ↔ Robot Base Link 좌표 변환
-
-```python
-from lerobot_cap.transforms import FrameTransformer
-
-# 로봇 외부 캘리브레이션 로드
-transformer = FrameTransformer("robot_configs/world2robot_matrices/robot3_matrix.json")
-
-# World 좌표 → Base Link 좌표
-world_position = [0.5, 0.2, 0.1]  # meters
-base_position = transformer.transform_position(world_position, from_frame="world")
-print(f"Base link position: {base_position}")
-
-# 방향 벡터 변환 (회전만 적용, 평행이동 없음)
-# offset은 방향이므로 회전만 필요
-offset_robot = [0.0, -0.02, 0.0]  # robot frame에서 -Y 방향 2cm
-T_world_from_base = transformer.frames["world"]["T_frame_from_base"]
-R = T_world_from_base[:3, :3]
-offset_world = R @ offset_robot
-```
-
-### 5. CalibrationLimits (`kinematics/calibration_limits.py`)
+### 4. CalibrationLimits (`kinematics/calibration_limits.py`)
 
 정규화 ↔ 라디안 변환
 
 ```python
 from lerobot_cap.kinematics import load_calibration_limits
 
-limits = load_calibration_limits("calibration/so101/robot3_calibration.json")
+limits = load_calibration_limits("robot_configs/motor_calibration/so101/robot3_calibration.json")
 
 # 정규화 값 (-100 ~ +100) → 라디안
 normalized = [0.0, -30.0, 45.0, 20.0, 0.0]
@@ -446,7 +420,7 @@ robot_configs/
 ├── initial_state.json       # 초기 상태 (홈 포지션)
 └── free_state.json          # 안전 주차 상태
 
-calibration/so101/
+robot_configs/motor_calibration/so101/
 ├── robot2_calibration.json  # Robot 2 모터 캘리브레이션
 ├── robot3_calibration.json  # Robot 3 모터 캘리브레이션
 └── robot3_compensation.json # 중력 보상 LUT
@@ -469,9 +443,8 @@ kinematics:
   urdf_path: assets/urdf/so101_robot3.urdf
   end_effector_frame: gripper_frame_link
 
-calibration_file: calibration/so101/robot3_calibration.json
-compensation_file: calibration/so101/robot3_compensation.json
-frames_file: robot_configs/world2robot_matrices/robot3_matrix.json
+calibration_file: robot_configs/motor_calibration/so101/robot3_calibration.json
+compensation_file: robot_configs/motor_calibration/so101/robot3_compensation.json
 ```
 
 ---
@@ -521,7 +494,6 @@ lerobot_CaP_distillation/
 │   ├── hardware/           # Motor controllers
 │   ├── kinematics/         # FK/IK (Pinocchio)
 │   ├── planning/           # Trajectory planning
-│   ├── transforms.py       # Coordinate transforms
 │   └── compensation.py     # Gravity compensation
 ├── skills/                 # High-level primitive skills
 │   ├── skills_lerobot.py   # LeRobotSkills class
@@ -533,9 +505,8 @@ lerobot_CaP_distillation/
 ├── object_detection/       # Vision-language detection
 │   ├── camera/
 │   ├── detection/
-│   └── calibration/
 ├── robot_configs/                # Configuration files
-├── calibration/            # Motor calibration data
+│   └── motor_calibration/  # Motor calibration data
 ├── assets/urdf/            # Robot URDF files
 ├── scripts/                # Utility scripts
 └── run_code_gen_with_judge.py  # Main pipeline script

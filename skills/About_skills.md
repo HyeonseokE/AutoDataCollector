@@ -155,9 +155,7 @@
 
   추가로 필요한 구현
 
-  1. World 좌표 변환 통합
-    - robot_configs/world2robot_matrices/robot{N}_matrix.json의 world→base 변환행렬 사용
-  2. 안전 높이 조정
+  1. 안전 높이 조정
     - Franka: intermediate_z_stop = 0.6m
     - SO-101: 작업공간에 맞게 조정 필요 (약 0.15~0.25m)
   3. 속도/가속도 파라미터
@@ -188,8 +186,7 @@ LeRobotSkills
 │   ├── FeetechController    - Feetech 모터 직접 제어
 │   ├── KinematicsEngine     - Pinocchio FK/IK
 │   ├── TrajectoryPlanner    - 궤적 계획
-│   ├── AdaptiveCompensator  - 보상 (백래시/중력)
-│   └── FrameTransformer     - 좌표계 변환 (world → base_link)
+│   └── AdaptiveCompensator  - 보상 (백래시/중력)
 ├── 유틸리티 함수
 │   ├── _normalized_to_radians() - 정규화 → 라디안
 │   ├── _radians_to_normalized() - 라디안 → 정규화
@@ -221,7 +218,7 @@ from skills.skills_lerobot import LeRobotSkills
 # 초기화
 skills = LeRobotSkills(
     robot_config="robot_configs/robot/so101_robot3.yaml",
-    frame="world",                # 좌표계 (world 또는 base_link)
+    frame="base_link",            # 좌표계 (base_link)
     gripper_open_pos=85.0,        # 그리퍼 열림 위치
     gripper_close_pos=-70.0,      # 그리퍼 닫힘 위치
     movement_duration=3.0,        # 이동 시간
@@ -310,7 +307,7 @@ PLACE_X=0.2 PLACE_Y=-0.05 PLACE_Z=0.02 \
 | IK | MoveIt IK | Pinocchio + Multi-IK with orientation |
 | 궤적 | Cartesian path | Joint-space trajectory |
 | 보상 | MoveIt 자동 처리 | AdaptiveCompensator |
-| 좌표 변환 | TF2 | FrameTransformer (Kabsch) |
+| 좌표 변환 | TF2 | Pix2Robot (direct calibration) |
 
 ### move_to_position 동작 방식
 

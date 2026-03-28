@@ -44,7 +44,6 @@ class ResetWorkspace(BaseWorkspace):
     def __init__(
         self,
         kinematics_engine: Optional["KinematicsEngine"] = None,
-        frame_transformer=None,
         z_fixed: float = 0.01,
     ):
         """
@@ -52,10 +51,9 @@ class ResetWorkspace(BaseWorkspace):
 
         Args:
             kinematics_engine: KinematicsEngine 인스턴스
-            frame_transformer: FrameTransformer 인스턴스
             z_fixed: 고정 Z 높이 (테이블 표면, meters)
         """
-        super().__init__(kinematics_engine, frame_transformer)
+        super().__init__(kinematics_engine)
 
         self.z_fixed = z_fixed
 
@@ -654,7 +652,7 @@ def draw_workspace_on_image(
         )
         calib_path_ee = (
             Path(__file__).parent.parent.parent
-            / "calibration" / "so101" / f"robot{robot_id}_calibration.json"
+            / "robot_configs" / "motor_calibration" / "so101" / f"robot{robot_id}_calibration.json"
         )
         urdf_path_ee = (
             Path(__file__).parent.parent.parent
@@ -774,6 +772,116 @@ if __name__ == "__main__":
         reachable = ws.is_reachable(np.array(pos))
         valid = ws.is_valid(np.array(pos))
         print(f"  {pos} -> reachable={reachable}, valid={valid}")
+
+
+# =============================================================================
+# Multi-Robot Seed Position Generation
+# =============================================================================
+
+def generate_multi_robot_seed_positions(
+    grippable_objects: Dict[str, dict],
+    obstacle_objects: Dict[str, dict],
+    initial_positions: Dict[str, List[float]],
+    workspaces: Dict[int, "ResetWorkspace"],
+    pix2robots: Dict[int, object] = None,
+    seed: int = None,
+    max_attempts: int = 500,
+    bbox_margin_px: int = 10,
+    y_min_abs: Optional[float] = None,
+    current_positions: Dict[str, dict] = None,
+    current_positions_margin_px: int = 15,
+    exclusion_zones: Optional[List[dict]] = None,
+    previous_seed_positions: Optional[List[Dict]] = None,
+) -> Dict[str, List[float]]:
+    """
+    Generate random seed positions for multi-robot setup.
+
+    The workspace is the UNION of all robots' workspaces. A position is valid
+    if at least one robot can reach it. This ensures objects are always
+    manipulable by at least one arm.
+
+    Args:
+        grippable_objects: Objects to move {name: {"position": [...], "bbox_px": (w,h)}}.
+        obstacle_objects: Stationary obstacle objects.
+        initial_positions: Objects' initial positions.
+        workspaces: Per-robot ResetWorkspace instances {robot_id: ResetWorkspace}.
+        pix2robots: Per-robot Pix2RobotCalibrator instances.
+        seed: Random seed for reproducibility.
+        max_attempts: Max attempts per object.
+        bbox_margin_px: Margin for non-grippable object collision check.
+        y_min_abs: |y| constraint for arrange task.
+        current_positions: Current object positions for collision avoidance.
+        current_positions_margin_px: Margin for current position collision.
+        exclusion_zones: Zones to avoid (e.g., free state EE positions).
+        previous_seed_positions: Previous seed positions to avoid collision.
+
+    Returns:
+        {object_name: [x, y, z]} generated positions.
+    """
+    robot_ids = list(workspaces.keys())
+
+    if not robot_ids:
+        # Fallback to single-robot generate_random_positions
+        return generate_random_positions(
+            grippable_objects=grippable_objects,
+            obstacle_objects=obstacle_objects,
+            initial_positions=initial_positions,
+            workspace=None,
+            seed=seed,
+            max_attempts=max_attempts,
+            bbox_margin_px=bbox_margin_px,
+            y_min_abs=y_min_abs,
+            current_positions=current_positions,
+            current_positions_margin_px=current_positions_margin_px,
+            exclusion_zones=exclusion_zones,
+        )
+
+    # Use first robot's pix2robot for pixel↔position conversion
+    # (shared camera means same pixel space)
+    primary_pix2robot = None
+    if pix2robots:
+        for rid in robot_ids:
+            if rid in pix2robots and pix2robots[rid] is not None:
+                primary_pix2robot = pix2robots[rid]
+                break
+
+    # Create a union workspace that accepts if ANY robot can reach
+    class UnionWorkspace(ResetWorkspace):
+        """Workspace that is valid if any robot's workspace accepts."""
+        def __init__(self, ws_list):
+            # Initialize with first workspace's parameters
+            first_ws = ws_list[0] if ws_list else None
+            super().__init__(
+                kinematics_engine=first_ws._kinematics if first_ws else None,
+                frame_transformer=first_ws._frame_transformer if first_ws else None,
+            )
+            self._workspaces = ws_list
+
+        def is_valid(self, position: np.ndarray) -> bool:
+            return any(ws.is_valid(position) for ws in self._workspaces)
+
+        def is_reachable(self, position: np.ndarray) -> bool:
+            return any(ws.is_reachable(position) for ws in self._workspaces)
+
+    union_ws = UnionWorkspace(list(workspaces.values()))
+
+    # Merge exclusion zones from all robots' free states
+    all_exclusion_zones = list(exclusion_zones or [])
+
+    return generate_random_positions(
+        grippable_objects=grippable_objects,
+        obstacle_objects=obstacle_objects,
+        initial_positions=initial_positions,
+        workspace=union_ws,
+        pix2robot=primary_pix2robot,
+        seed=seed,
+        max_attempts=max_attempts,
+        bbox_margin_px=bbox_margin_px,
+        y_min_abs=y_min_abs,
+        current_positions=current_positions,
+        current_positions_margin_px=current_positions_margin_px,
+        exclusion_zones=all_exclusion_zones,
+    )
 
     print()
 

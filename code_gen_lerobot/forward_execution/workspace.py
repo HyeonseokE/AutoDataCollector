@@ -29,7 +29,6 @@ class ForwardWorkspace(BaseWorkspace):
     def __init__(
         self,
         kinematics_engine: Optional["KinematicsEngine"] = None,
-        frame_transformer=None,
         z_min_world: float = 0.01,
         z_max_world: float = 0.18,
     ):
@@ -38,11 +37,10 @@ class ForwardWorkspace(BaseWorkspace):
 
         Args:
             kinematics_engine: KinematicsEngine 인스턴스
-            frame_transformer: FrameTransformer 인스턴스
             z_min_world: 최소 Z 높이 (테이블 표면, world frame)
             z_max_world: 최대 Z 높이 (pitch 유지 가능 범위, world frame)
         """
-        super().__init__(kinematics_engine, frame_transformer)
+        super().__init__(kinematics_engine)
 
         # Forward 전용 제약 (world frame)
         self.z_min_world = z_min_world

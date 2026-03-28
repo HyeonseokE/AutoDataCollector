@@ -320,43 +320,18 @@ def _points_to_positions(
     except Exception as e:
         print(f"  [CropPoint] Pix2Robot not available: {e}")
 
-    # Fallback: 기존 CoordinateTransformer (pix2robot가 없을 때)
-    transformer = None
-    use_3d = False
-    if pix2robot is None:
-        try:
-            from object_detection.localization.coordinate_transform import CoordinateTransformer
-            calib_path = Path(__file__).parent.parent / "robot_configs" / "pix2world_matrices" / "pix2world_transform_data.npz"
-            if calib_path.exists():
-                transformer = CoordinateTransformer(str(calib_path))
-                if not transformer.is_ready:
-                    transformer = None
-                else:
-                    use_3d = (transformer.transform_matrix_3d is not None
-                              and transformer.camera_intrinsics is not None
-                              and camera is not None)
-                    mode = "3D" if use_3d else "2D"
-                    print(f"  [CropPoint] Fallback: CoordinateTransformer [{mode}]")
-        except Exception as e:
-            print(f"  [CropPoint] CoordinateTransformer not available: {e}")
-
-    # Depth 프레임 (pix2robot 높이 추정 + fallback 3D 변환용)
+    # Depth 프레임 (pix2robot 높이 추정용)
     depth_frame = None
     if camera is not None:
         try:
             _, depth_frame = camera.get_frames()
-            if depth_frame is None and use_3d:
-                use_3d = False
         except Exception:
-            if use_3d:
-                use_3d = False
+            pass
 
     # pixel→robot 변환 헬퍼
-    Z_MAX = 0.15  # 15cm — 테이블 위 물체 최대 높이
     Z_DEFAULT = 0.02  # z 이상 시 대체값 (2cm)
 
     def _pixel_to_robot(px, py):
-        # 1) Pix2Robot 직접 변환 (depth로 물체 높이 추정)
         if pix2robot is not None:
             try:
                 obj_depth = None
@@ -368,26 +343,6 @@ def _points_to_positions(
                 return pos, True
             except Exception as e:
                 print(f"    pix2robot failed ({px},{py}): {e}")
-
-        # 2) Fallback: 기존 pix2world 변환
-        if transformer:
-            try:
-                if use_3d and depth_frame is not None:
-                    obj_depth_m = camera.get_depth_at_pixel(px, py, depth_frame)
-                    if obj_depth_m > 0.05:
-                        wx, wy, wz = transformer.pixel_depth_to_world(px, py, obj_depth_m)
-                        pos = [wx / 100.0, wy / 100.0, wz / 100.0]
-                        if 0.0 <= pos[2] <= Z_MAX:
-                            return pos, True
-                        else:
-                            pos[2] = Z_DEFAULT
-                            return pos, True
-
-                wx, wy, _ = transformer.pixel_to_world_2d(px, py)
-                pos = [wx / 100.0, wy / 100.0, Z_DEFAULT]
-                return pos, True
-            except Exception as e:
-                print(f"    pixel→world fallback failed ({px},{py}): {e}")
         return [0.0, 0.0, 0.03], False
 
     # bbox_px 맵 구축 (valid_objects에서 추출)
@@ -455,6 +410,7 @@ def lerobot_code_gen_multi_turn(
     canonical_point_labels: Dict[str, List[str]] = None,
     task_type: str = "pick_place",
     skip_turn_test: bool = False,
+    robot_ids: List[int] = None,
 ) -> Tuple[str, Dict, Dict]:
     """
     Crop-then-Point 멀티턴 LLM 코드 생성 파이프라인
@@ -931,25 +887,57 @@ def lerobot_code_gen_multi_turn(
 
         # Generate workspace-annotated image for codegen
         codegen_image = image_path
+        codegen_extra_images = []  # multi-arm: per-arm workspace images
         try:
             from .reset_execution.workspace import draw_workspace_on_image
             raw_img = cv2.imread(image_path)
             if raw_img is not None:
-                annotated = draw_workspace_on_image(raw_img, robot_id=robot_id, task_type=task_type)
-                annotated_path = str(Path(image_path).parent / "workspace_annotated_codegen.jpg")
-                cv2.imwrite(annotated_path, annotated)
-                codegen_image = annotated_path
-                print(f"  Workspace annotated image: {annotated_path}")
+                if robot_ids and len(robot_ids) >= 2:
+                    # Multi-arm: separate workspace image per arm
+                    arm_labels = ["left_arm", "right_arm"]
+                    for i, rid in enumerate(robot_ids):
+                        arm_annotated = draw_workspace_on_image(raw_img.copy(), robot_id=rid, task_type=task_type)
+                        arm_path = str(Path(image_path).parent / f"workspace_{arm_labels[i]}_robot{rid}.jpg")
+                        cv2.imwrite(arm_path, arm_annotated)
+                        codegen_extra_images.append(arm_path)
+                        print(f"  Workspace image ({arm_labels[i]}/robot{rid}): {arm_path}")
+                else:
+                    annotated = draw_workspace_on_image(raw_img, robot_id=robot_id, task_type=task_type)
+                    annotated_path = str(Path(image_path).parent / "workspace_annotated_codegen.jpg")
+                    cv2.imwrite(annotated_path, annotated)
+                    codegen_image = annotated_path
+                    print(f"  Workspace annotated image: {annotated_path}")
         except Exception as e:
             print(f"  Warning: workspace annotation failed: {e}")
 
-        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT)
-        codegen_msg = {
-            "text": codegen_with_context_prompt(
+        # Multi-arm: use multi-arm system prompt and user prompt for Turn 3
+        if robot_ids and len(robot_ids) >= 2:
+            from .multi_arm.forward_execution.system_prompt import MULTI_ARM_CODEGEN_SYSTEM_PROMPT
+            codegen_system_prompt = MULTI_ARM_CODEGEN_SYSTEM_PROMPT
+        else:
+            codegen_system_prompt = CODEGEN_SYSTEM_PROMPT
+
+        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=codegen_system_prompt)
+
+        if robot_ids and len(robot_ids) >= 2:
+            from .multi_arm.forward_execution.turn3_prompt import multi_arm_turn3_codegen_prompt
+            codegen_text = multi_arm_turn3_codegen_prompt(
+                instruction=instruction,
+                robot_ids=robot_ids,
+                all_points=all_points,
+                context_summary=summary_resp,
+                positions=positions,
+            )
+        else:
+            codegen_text = codegen_with_context_prompt(
                 instruction=instruction, robot_id=robot_id,
                 all_points=all_points, context_summary=summary_resp,
-                positions=positions),
-            "image_path": codegen_image,
+                positions=positions)
+
+        codegen_msg = {
+            "text": codegen_text,
+            "image_path": codegen_image if not codegen_extra_images else None,
+            "image_paths": codegen_extra_images if codegen_extra_images else [],
         }
         codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
             codegen_msg,

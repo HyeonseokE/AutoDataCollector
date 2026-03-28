@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import cv2
 from object_detection.camera.realsense import RealSenseD435
 from object_detection.detection.grounding_detector import GroundingDINODetector
-from object_detection.localization.coordinate_transform import CoordinateTransformer
+from pix2robot_calibrator import Pix2RobotCalibrator
 from skills.skills_lerobot import LeRobotSkills
 
 
@@ -34,7 +34,7 @@ def main():
     args = parser.parse_args()
 
     robot_config = f"robot_configs/robot/so101_robot{args.robot}.yaml"
-    pix2world_file = "robot_configs/pix2world_matrices/pix2world_transform_data.npz"
+    pix2robot_file = f"robot_configs/pix2robot_matrices/robot{args.robot}_pix2robot_data.npz"
 
     # ========== 1. Camera ==========
     print("\n[1/5] Camera initialization...")
@@ -81,23 +81,19 @@ def main():
         cv2.imwrite(args.save_image, vis)
         print(f"  Saved: {args.save_image}")
 
-    # ========== 3. Pixel → World ==========
-    print(f"\n[3/5] Pixel → World coordinate transform...")
-    transformer = CoordinateTransformer(pix2world_file)
-    transformer.set_camera_intrinsics(intrinsics)
+    # ========== 3. Pixel → Robot ==========
+    print(f"\n[3/5] Pixel → Robot coordinate transform...")
+    pix2robot = Pix2RobotCalibrator(robot_id=args.robot)
+    if not pix2robot.load(pix2robot_file):
+        print("ERROR: Failed to load Pix2Robot calibration")
+        camera.stop()
+        return 1
 
     depth_m = camera.get_depth_at_pixel(cx, cy, depth)
     print(f"  Pixel: ({cx}, {cy}), depth={depth_m:.3f}m")
 
-    if depth_m > 0 and transformer.transform_matrix_3d is not None:
-        wx, wy, wz = transformer.pixel_depth_to_world(cx, cy, depth_m)
-        print(f"  World (3D): ({wx:.2f}, {wy:.2f}, {wz:.2f}) cm")
-    else:
-        wx, wy, wz = transformer.pixel_to_world_2d(cx, cy)
-        print(f"  World (2D): ({wx:.2f}, {wy:.2f}, {wz:.2f}) cm")
-
-    # cm → meters
-    world_pos = np.array([wx / 100.0, wy / 100.0, wz / 100.0])
+    obj_depth = depth_m if depth_m > 0.05 else None
+    world_pos = np.array(pix2robot.pixel_to_robot(cx, cy, depth_m=obj_depth))
 
     # Z clamping (table objects should be near z=0)
     Z_MAX = 0.15
@@ -106,7 +102,7 @@ def main():
         print(f"  [Z-FIX] z={world_pos[2]*100:.1f}cm out of range, clamping to {Z_DEFAULT*100:.0f}cm")
         world_pos[2] = Z_DEFAULT
 
-    print(f"  World position: [{world_pos[0]:.4f}, {world_pos[1]:.4f}, {world_pos[2]:.4f}] m")
+    print(f"  Robot position: [{world_pos[0]:.4f}, {world_pos[1]:.4f}, {world_pos[2]:.4f}] m")
 
     camera.stop()
 

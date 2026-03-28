@@ -218,16 +218,12 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             skills.execute_place_object(new_pos, is_table=False, ...)
         """
 
-    def set_subtask(self, object_name: str,
-                    current_position: list = None,
-                    target_position: list = None) -> None:
+    def set_subtask(self, description: str) -> None:
         """Set sub-task label for recording. Groups multiple skills under one higher-level label.
         Call this before each object's pick-place sequence.
 
         Args:
-            object_name: Name of the object being manipulated (e.g., "yellow block")
-            current_position: Current position [x, y, z] of the object
-            target_position: Target position [x, y, z] to move the object to
+            description: Short description of the subtask (e.g., "pick red block and place at center")
         """
 
     def clear_subtask(self) -> None:
@@ -250,7 +246,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
 
         Pattern — always follow this sequence when switching to a new object:
             # 1. Set subtask label
-            skills.set_subtask("purple block", purple_pos, target_pos)
+            skills.set_subtask("pick purple block and place at target")
             # 2. Move to initial state (clear arm from camera view before detection)
             skills.move_to_initial_state()
             # 3. Re-detect ALL objects to get updated positions

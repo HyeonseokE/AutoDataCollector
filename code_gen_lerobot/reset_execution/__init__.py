@@ -30,6 +30,7 @@ from .workspace import (
     is_grippable,
     classify_objects,
     generate_random_positions,
+    generate_multi_robot_seed_positions,
     draw_workspace_on_image,
     GRIPPER_MAX_OPEN_PX,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "is_grippable",
     "classify_objects",
     "generate_random_positions",
+    "generate_multi_robot_seed_positions",
     "draw_workspace_on_image",
     "GRIPPER_MAX_OPEN_PX",
 ]

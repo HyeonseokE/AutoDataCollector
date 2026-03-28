@@ -204,7 +204,8 @@ def gemini_response(
     system_prompt: Optional[str] = None,
     image_path: Optional[str] = None,
     timeout: float = 120.0,
-) -> str:
+    return_usage: bool = False,
+):
     _ensure_init(_get_location_for_model(model))
 
     start_time = time.time()
@@ -250,11 +251,23 @@ def gemini_response(
                 else:
                     raise  # 429 외 에러는 즉시 전파
 
+    elapsed = time.time() - start_time
     if check_time:
-        elapsed = time.time() - start_time
         has_image = " + image" if image_path else ""
         has_system = " + system_prompt" if system_prompt else ""
         print(f"[GEMINI/VertexAI] Model: {model}{has_system}{has_image}, Response time: {elapsed:.2f}s")
+
+    if return_usage:
+        usage = {}
+        meta = getattr(response, 'usage_metadata', None)
+        if meta:
+            usage = {
+                "input_tokens": getattr(meta, 'prompt_token_count', 0) or 0,
+                "output_tokens": getattr(meta, 'candidates_token_count', 0) or 0,
+                "total_tokens": getattr(meta, 'total_token_count', 0) or 0,
+                "inference_time_s": round(elapsed, 2),
+            }
+        return response.text, usage
 
     return response.text
 

@@ -53,11 +53,14 @@ FRAME_SKIP_RATIO = CONTROL_HZ / DEFAULT_FPS
 class CameraConfigRecord:
     """카메라 레코딩 설정
 
-    LeRobot 공식 설정 방식과 호환:
-    --robot.cameras="{ front: {type: intelrealsense, index_or_path: /dev/video0, ...}}"
+    LeRobot 공식 bi_so_follower 패턴과 호환:
+      - shared: 공용 카메라 → observation.images.{name}
+      - left_arm: 왼팔 카메라 → observation.images.left_{name}
+      - right_arm: 오른팔 카메라 → observation.images.right_{name}
     """
-    name: str              # 카메라 식별자 (예: "realsense", "innomaker")
+    name: str              # 카메라 식별자 (예: "top", "wrist")
     type: str              # "realsense" 또는 "opencv"
+    group: str = "shared"  # "shared" | "left_arm" | "right_arm"
     enabled: bool = True   # 레코딩 활성화 여부
     width: int = 640
     height: int = 480
@@ -75,13 +78,27 @@ class CameraConfigRecord:
     serial_number: Optional[str] = None
     enable_depth: bool = False
 
+    @property
+    def feature_name(self) -> str:
+        """최종 feature name (group prefix 포함).
+
+        shared  → "top"
+        left_arm  → "left_wrist"
+        right_arm → "right_wrist"
+        """
+        if self.group == "left_arm":
+            return f"left_{self.name}"
+        elif self.group == "right_arm":
+            return f"right_{self.name}"
+        return self.name
+
     def get_device_path(self) -> Optional[str]:
         """장치 경로 반환 (index_or_path 또는 device_path)"""
         return self.index_or_path or self.device_path
 
     def to_feature_key(self) -> str:
         """LeRobot 데이터셋 feature 키"""
-        return f"observation.images.{self.name}"
+        return f"observation.images.{self.feature_name}"
 
     def to_feature_schema(self) -> Dict[str, Any]:
         """LeRobot 데이터셋 feature 스키마"""
@@ -422,6 +439,143 @@ def build_dataset_features(
     return features
 
 
+# =============================================================================
+# Multi-Arm Features (ALOHA-style concat 12-axis)
+# =============================================================================
+
+# Multi-arm joint names: left_ and right_ prefix
+MULTI_ARM_MOTOR_NAMES = [
+    "left_shoulder_pan", "left_shoulder_lift", "left_elbow_flex",
+    "left_wrist_flex", "left_wrist_roll", "left_gripper",
+    "right_shoulder_pan", "right_shoulder_lift", "right_elbow_flex",
+    "right_wrist_flex", "right_wrist_roll", "right_gripper",
+]
+MULTI_ARM_JOINT_NAMES = [f"{motor}.pos" for motor in MULTI_ARM_MOTOR_NAMES]
+MULTI_ARM_NUM_JOINTS = 12  # 6 left + 6 right
+
+# Multi-arm default cameras (shared RealSense + per-arm Innomaker)
+DEFAULT_MULTI_ARM_CAMERAS = [
+    CameraConfigRecord(
+        name="realsense", type="realsense", enabled=True,
+        width=640, height=480, fps=30,
+    ),
+    CameraConfigRecord(
+        name="left_innomaker", type="opencv", enabled=True,
+        device_path="/dev/video7", width=640, height=480, fps=30, fourcc="MJPG",
+    ),
+    CameraConfigRecord(
+        name="right_innomaker", type="opencv", enabled=True,
+        device_path="/dev/video8", width=640, height=480, fps=30, fourcc="MJPG",
+    ),
+]
+
+
+def build_multi_arm_features(
+    cameras: List[CameraConfigRecord] = None,
+    skill_enabled: Dict[str, bool] = None,
+    obs_enabled: Dict[str, bool] = None,
+    subtask_enabled: Dict[str, bool] = None,
+) -> Dict[str, Any]:
+    """
+    Build dataset features for multi-arm (ALOHA-style) recording.
+
+    State/action are 12-axis (concat left 6 + right 6).
+    Skill and observation features are split into left_*/right_*.
+    """
+    if cameras is None:
+        cameras = [cam for cam in DEFAULT_MULTI_ARM_CAMERAS if cam.enabled]
+
+    features = {
+        # Concat state: [left_6, right_6] = 12-axis (normalized -100 to +100)
+        "observation.state": {
+            "dtype": "float32",
+            "shape": (MULTI_ARM_NUM_JOINTS,),
+            "names": MULTI_ARM_JOINT_NAMES,
+        },
+        # Concat action: [left_6, right_6] = 12-axis
+        "action": {
+            "dtype": "float32",
+            "shape": (MULTI_ARM_NUM_JOINTS,),
+            "names": MULTI_ARM_JOINT_NAMES,
+        },
+    }
+
+    # Camera images
+    for cam in cameras:
+        features[cam.to_feature_key()] = cam.to_feature_schema()
+
+    # Per-arm observation features
+    per_arm_obs_schemas = {}
+    for prefix in ("left", "right"):
+        arm_joint_names = [f"{prefix}_{m}.pos" for m in MOTOR_NAMES]
+        per_arm_obs_schemas.update({
+            f"observation.ee_pos.{prefix}_robot_xyzrpy": {
+                "dtype": "float32", "shape": (6,),
+                "names": ["x", "y", "z", "roll", "pitch", "yaw"],
+            },
+            f"{prefix}_observation.gripper_binary": {
+                "dtype": "float32", "shape": (1,),
+                "names": None,
+            },
+            f"observation.radian.{prefix}_state": {
+                "dtype": "float32", "shape": (NUM_JOINTS,),
+                "names": arm_joint_names,
+            },
+            f"observation.radian.{prefix}_action": {
+                "dtype": "float32", "shape": (NUM_JOINTS,),
+                "names": arm_joint_names,
+            },
+        })
+
+    if obs_enabled is None:
+        obs_enabled = {}
+    for key, schema in per_arm_obs_schemas.items():
+        if obs_enabled.get(key, True):
+            features[key] = schema
+
+    # Per-arm skill features
+    for prefix in ("left", "right"):
+        skill_schemas = {
+            f"{prefix}_skill.natural_language": {"dtype": "string", "shape": (1,), "names": None},
+            f"{prefix}_skill.verification_question": {"dtype": "string", "shape": (1,), "names": None},
+            f"{prefix}_skill.type": {"dtype": "string", "shape": (1,), "names": None},
+            f"{prefix}_skill.progress": {"dtype": "float32", "shape": (1,), "names": None},
+            f"{prefix}_skill.goal_position.joint": {
+                "dtype": "float32", "shape": (NUM_JOINTS,),
+                "names": [f"{prefix}_{m}.pos" for m in MOTOR_NAMES],
+            },
+            f"{prefix}_skill.goal_position.robot_xyzrpy": {
+                "dtype": "float32", "shape": (6,),
+                "names": ["x", "y", "z", "roll", "pitch", "yaw"],
+            },
+            f"{prefix}_skill.goal_position.gripper": {
+                "dtype": "float32", "shape": (1,),
+                "names": ["gripper.pos"],
+            },
+        }
+        if skill_enabled is None:
+            se = {k: True for k in skill_schemas}
+        else:
+            se = skill_enabled
+        for key, schema in skill_schemas.items():
+            if se.get(key, True):
+                features[key] = schema
+
+    # Subtask features (shared — task-level, not per-arm)
+    if subtask_enabled is None:
+        subtask_enabled = {}
+    subtask_schemas = {
+        "subtask.natural_language": {"dtype": "string", "shape": (1,), "names": None},
+        "subtask.object_name": {"dtype": "string", "shape": (1,), "names": None},
+        "subtask.target_position": {"dtype": "float32", "shape": (3,), "names": ["x", "y", "z"]},
+    }
+    for key, schema in subtask_schemas.items():
+        if subtask_enabled.get(key, False):
+            features[key] = schema
+
+    return features
+
+
 # 기본 features (공식 LeRobot 형식)
 # names 필드는 공식 형식: ["shoulder_pan.pos", "shoulder_lift.pos", ...]
 DATASET_FEATURES = {
@@ -514,9 +668,41 @@ DATASET_FEATURES_LEGACY = {
 # Dynamic Camera Loading from YAML
 # =============================================================================
 
+def _parse_camera_entry(cam_data: dict, group: str = "shared") -> 'CameraConfigRecord':
+    """YAML 카메라 항목 하나를 CameraConfigRecord로 변환."""
+    return CameraConfigRecord(
+        name=cam_data.get("name", "camera"),
+        type=cam_data.get("type", "opencv"),
+        group=group,
+        enabled=cam_data.get("enabled", True),
+        width=cam_data.get("width", 640),
+        height=cam_data.get("height", 480),
+        fps=cam_data.get("fps", 30),
+        index_or_path=cam_data.get("index_or_path"),
+        device_path=cam_data.get("device_path"),
+        device_index=cam_data.get("device_index"),
+        fourcc=cam_data.get("fourcc", "MJPG"),
+        serial_number=cam_data.get("serial_number"),
+        enable_depth=cam_data.get("enable_depth", False),
+    )
+
+
 def load_cameras_from_yaml(yaml_path: str = None) -> List[CameraConfigRecord]:
     """
-    YAML 파일에서 카메라 설정을 동적으로 로드
+    YAML 파일에서 카메라 설정을 동적으로 로드.
+
+    두 가지 YAML 구조를 지원:
+      1) 기존 flat 리스트 (싱글암 호환):
+           cameras:
+             - name: "realsense" ...
+      2) 새 그룹 구조 (멀티암):
+           cameras:
+             shared:
+               - name: "top" ...
+             left_arm:
+               - name: "wrist" ...
+             right_arm:
+               - name: "wrist" ...
 
     Args:
         yaml_path: recording_config.yaml 경로 (None이면 기본 경로)
@@ -528,7 +714,6 @@ def load_cameras_from_yaml(yaml_path: str = None) -> List[CameraConfigRecord]:
     from pathlib import Path
 
     if yaml_path is None:
-        # 기본 경로: pipeline_config/recording_config.yaml
         yaml_path = Path(__file__).parent.parent / "pipeline_config" / "recording_config.yaml"
     else:
         yaml_path = Path(yaml_path)
@@ -547,27 +732,26 @@ def load_cameras_from_yaml(yaml_path: str = None) -> List[CameraConfigRecord]:
             return DEFAULT_CAMERAS.copy()
 
         cameras = []
-        for cam_data in cameras_data:
-            cam = CameraConfigRecord(
-                name=cam_data.get("name", "camera"),
-                type=cam_data.get("type", "opencv"),
-                enabled=cam_data.get("enabled", True),
-                width=cam_data.get("width", 640),
-                height=cam_data.get("height", 480),
-                fps=cam_data.get("fps", 30),
-                index_or_path=cam_data.get("index_or_path"),  # LeRobot 호환
-                device_path=cam_data.get("device_path"),      # 레거시 호환
-                device_index=cam_data.get("device_index"),
-                fourcc=cam_data.get("fourcc", "MJPG"),
-                serial_number=cam_data.get("serial_number"),
-                enable_depth=cam_data.get("enable_depth", False),
-            )
-            cameras.append(cam)
+
+        if isinstance(cameras_data, list):
+            # 기존 flat 리스트 (싱글암 호환)
+            for cam_data in cameras_data:
+                cameras.append(_parse_camera_entry(cam_data, group="shared"))
+
+        elif isinstance(cameras_data, dict):
+            # 새 그룹 구조 (shared / left_arm / right_arm)
+            for group_key in ["shared", "left_arm", "right_arm"]:
+                group_cams = cameras_data.get(group_key, [])
+                if group_cams is None:
+                    continue
+                for cam_data in group_cams:
+                    cameras.append(_parse_camera_entry(cam_data, group=group_key))
 
         print(f"[Config] Loaded {len(cameras)} camera(s) from {yaml_path}")
         for cam in cameras:
             status = "enabled" if cam.enabled else "disabled"
-            print(f"  - {cam.name} ({cam.type}): {cam.width}x{cam.height}@{cam.fps}fps [{status}]")
+            group_str = f" [{cam.group}]" if cam.group != "shared" else ""
+            print(f"  - {cam.feature_name} ({cam.type}): {cam.width}x{cam.height}@{cam.fps}fps [{status}]{group_str}")
 
         return cameras
 
@@ -605,9 +789,12 @@ def create_camera_manager_from_config(yaml_path: str = None):
         if not cam.enabled:
             continue
 
+        # feature_name을 카메라 등록 이름으로 사용 (shared: "top", left_arm: "left_wrist", ...)
+        cam_name = cam.feature_name
+
         if cam.type == "realsense":
             configs.append(RealSenseCameraConfig(
-                name=cam.name,
+                name=cam_name,
                 width=cam.width,
                 height=cam.height,
                 fps=cam.fps,
@@ -615,10 +802,9 @@ def create_camera_manager_from_config(yaml_path: str = None):
                 enable_depth=cam.enable_depth,
             ))
         else:  # opencv
-            # index_or_path 우선, 없으면 device_path 사용
             device = cam.get_device_path() or "/dev/video0"
             configs.append(OpenCVCameraConfig(
-                name=cam.name,
+                name=cam_name,
                 device_path=device,
                 device_index=cam.device_index,
                 width=cam.width,

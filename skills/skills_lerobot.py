@@ -143,6 +143,9 @@ class LeRobotSkills:
         self.current_gripper_pos = gripper_open_pos
         self.is_connected = False
 
+        # Skill info callback for multi-arm recording (bypasses RecordingContext)
+        self.skill_info_callback = None
+
         # Base workspace for reachability validation
         self.workspace = None
 
@@ -436,6 +439,27 @@ class LeRobotSkills:
             "position": [round(p, 4) for p in position] if position else None,
         })
 
+        # Multi-arm callback (bypasses RecordingContext)
+        if self.skill_info_callback is not None:
+            try:
+                start_state = self.robot.read_positions(normalize=True).copy()
+                goal_arm_normalized = self._radians_to_normalized(goal_joint_5)
+                goal_joint_6 = np.concatenate([goal_arm_normalized, [goal_gripper]])
+                robot_xyzrpy = self._compute_goal_xyzrpy(goal_joint_5, kinematics)
+                self.skill_info_callback({
+                    "type": skill_type,
+                    "natural_language": label,
+                    "verification_question": verification_question or "",
+                    "progress": 0.0,
+                    "goal_joint": goal_joint_6,
+                    "goal_xyzrpy": robot_xyzrpy,
+                    "goal_gripper": goal_gripper,
+                    "start_state": start_state,
+                })
+            except Exception:
+                pass
+            return
+
         if not HAS_RECORDING_CONTEXT or not RecordingContext.is_active():
             return
 
@@ -456,6 +480,10 @@ class LeRobotSkills:
 
     def _clear_skill_recording(self) -> None:
         """스킬 레코딩 정보 해제 (헬퍼)"""
+        if self.skill_info_callback is not None:
+            from record_dataset.multi_arm_recorder import MultiArmRecorder
+            self.skill_info_callback(MultiArmRecorder._default_skill_info("standby"))
+            return
         if HAS_RECORDING_CONTEXT and RecordingContext.is_active():
             RecordingContext.clear_skill_info()
 

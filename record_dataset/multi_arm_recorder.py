@@ -222,11 +222,22 @@ class MultiArmRecorder:
                 frame[f"observation.images.{cam_name}"] = img
 
         # Add per-arm skill features
-        for prefix, skill in [("left", left_skill), ("right", right_skill)]:
+        for prefix, skill, arm_state in [("left", left_skill, left_state), ("right", right_skill, right_state)]:
             frame[f"{prefix}_skill.type"] = skill.get("type", "standby")
             frame[f"{prefix}_skill.natural_language"] = skill.get("natural_language", "standby")
             frame[f"{prefix}_skill.verification_question"] = skill.get("verification_question", "")
-            frame[f"{prefix}_skill.progress"] = np.asarray([skill.get("progress", 0.0)], dtype=np.float32)
+            # Dynamic progress: 1.0 - (||goal - current|| / ||goal - start||)
+            progress = skill.get("progress", 0.0)
+            start = skill.get("start_state")
+            goal = skill.get("goal_joint")
+            if start is not None and goal is not None:
+                start_to_goal = np.linalg.norm(goal - start)
+                if start_to_goal > 1e-6:
+                    current_to_goal = np.linalg.norm(goal - arm_state)
+                    progress = float(np.clip(1.0 - current_to_goal / start_to_goal, 0.0, 1.0))
+                else:
+                    progress = 1.0
+            frame[f"{prefix}_skill.progress"] = np.asarray([progress], dtype=np.float32)
             frame[f"{prefix}_skill.goal_position.joint"] = np.asarray(
                 skill.get("goal_joint", np.zeros(NUM_JOINTS)), dtype=np.float32
             )
@@ -282,12 +293,9 @@ class MultiArmRecorder:
             ("right", right_arm, right_state, right_action),
         ]:
             # EE pose via FK
-            if arm.kinematics is not None:
+            if arm.kinematics is not None and arm.calibration_limits is not None:
                 try:
-                    from lerobot_cap.kinematics import normalized_to_radians
-                    joints_rad = normalized_to_radians(
-                        state[:5], arm.calibration_limits
-                    )
+                    joints_rad = arm.calibration_limits.normalized_to_radians(state[:5])
                     ee_xyzrpy = _compute_ee_xyzrpy(arm.kinematics, joints_rad)
                     frame[f"observation.ee_pos.{prefix}_robot_xyzrpy"] = ee_xyzrpy
                 except Exception:
@@ -295,17 +303,16 @@ class MultiArmRecorder:
             else:
                 frame[f"observation.ee_pos.{prefix}_robot_xyzrpy"] = np.zeros(6, dtype=np.float32)
 
-            # Gripper binary (event-based: open=1.0, close=0.0)
-            gripper_pos = arm.current_gripper_pos
+            # Gripper binary from actual state (state[5] = gripper joint, >0 = open)
+            gripper_pos = float(state[5]) if len(state) > 5 else 0.0
             gripper_binary = 1.0 if gripper_pos > 0 else 0.0
             frame[f"{prefix}_observation.gripper_binary"] = np.asarray([gripper_binary], dtype=np.float32)
 
             # Radian state/action (5 arm joints)
             if arm.calibration_limits is not None:
                 try:
-                    from lerobot_cap.kinematics import normalized_to_radians
-                    rad_state = normalized_to_radians(state[:5], arm.calibration_limits)
-                    rad_action = normalized_to_radians(action[:5], arm.calibration_limits)
+                    rad_state = arm.calibration_limits.normalized_to_radians(state[:5])
+                    rad_action = arm.calibration_limits.normalized_to_radians(action[:5])
                     # Pad to 6 (include gripper as-is)
                     frame[f"observation.radian.{prefix}_state"] = np.append(
                         rad_state, state[5]

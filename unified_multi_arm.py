@@ -516,6 +516,10 @@ class UnifiedMultiArmPipeline:
             self.multi_arm.left_arm.recording_callback = make_callback(mar.set_left_state, mar.set_left_action)
             self.multi_arm.right_arm.recording_callback = make_callback(mar.set_right_state, mar.set_right_action)
 
+            # Skill info callbacks (bypass RecordingContext for multi-arm)
+            self.multi_arm.left_arm.skill_info_callback = mar.set_left_skill_info
+            self.multi_arm.right_arm.skill_info_callback = mar.set_right_skill_info
+
             # exec(code) defines execute_task() but doesn't call it yet
             exec(code, exec_globals)
 
@@ -547,8 +551,10 @@ class UnifiedMultiArmPipeline:
             elif "execute_reset_task" in exec_globals:
                 exec_globals["execute_reset_task"]()
 
-            # Restore original connect
+            # Restore original connect and clear callbacks
             self.multi_arm.connect = original_connect
+            self.multi_arm.left_arm.skill_info_callback = None
+            self.multi_arm.right_arm.skill_info_callback = None
 
             mar.stop()
             stats = mar.get_stats()

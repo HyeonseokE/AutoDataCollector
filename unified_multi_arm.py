@@ -245,12 +245,37 @@ class UnifiedMultiArmPipeline:
                 self.camera_manager.connect_all()
                 print(f"[Recording] Cameras connected: {self.camera_manager.camera_names}")
 
-            # 3. Dataset recorder with 12-axis multi-arm features
-            # 연결 성공한 카메라만 feature에 포함 (미연결 카메라 → Missing features 방지)
+            # 3. YAML에 enabled된 카메라가 모두 연결되었는지 검증
             cameras = load_cameras_from_yaml()
-            connected_names = set(self.camera_manager.camera_names) if self.camera_manager else set()
-            connected_cameras = [cam for cam in cameras if cam.enabled and cam.feature_name in connected_names]
-            multi_arm_features = build_multi_arm_features(cameras=connected_cameras)
+            enabled_cameras = [cam for cam in cameras if cam.enabled]
+            connected_names = set(self.camera_manager.camera_names)
+            expected_names = {cam.feature_name for cam in enabled_cameras}
+            missing = expected_names - connected_names
+            if missing:
+                missing_details = []
+                for cam in enabled_cameras:
+                    if cam.feature_name in missing:
+                        device = cam.get_device_path() or cam.serial_number or "unknown"
+                        missing_details.append(f"  - {cam.feature_name} ({cam.type}, device={device})")
+                raise AssertionError(
+                    f"\n"
+                    f"========================================\n"
+                    f"Camera connection failed!\n"
+                    f"========================================\n"
+                    f"The following cameras are enabled in recording_config.yaml\n"
+                    f"but failed to connect:\n"
+                    + "\n".join(missing_details) + "\n"
+                    f"\n"
+                    f"To fix, either:\n"
+                    f"  1. Connect the camera hardware and verify device path\n"
+                    f"     (run: v4l2-ctl --list-devices)\n"
+                    f"  2. Set 'enabled: false' for unavailable cameras in\n"
+                    f"     pipeline_config/recording_config.yaml\n"
+                    f"========================================"
+                )
+
+            # 4. Dataset recorder with 12-axis multi-arm features
+            multi_arm_features = build_multi_arm_features(cameras=enabled_cameras)
 
             self.dataset_recorder = DatasetRecorder(
                 repo_id=self.dataset_repo_id,

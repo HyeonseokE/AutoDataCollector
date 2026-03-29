@@ -305,6 +305,7 @@ if __name__ == "__main__":
 1. Generate code that moves each object from current to target position
 2. **MUST call `skills.set_subtask("move object_name to target")` before each object's pick-place sequence** — this labels the recording
 3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
+   - **CRITICAL**: After re-detection, you MUST **re-assign ALL local variables** (e.g., `cur`, `tgt`) from the updated dict. Previously extracted variables still reference OLD values.
 4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
@@ -563,6 +564,7 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 1. Generate code that moves each object from current to target position
 2. **MUST call `skills.set_subtask("move object_name to target")` before each object's pick-place sequence** — this labels the recording
 3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
+   - **CRITICAL**: After re-detection, you MUST **re-assign ALL local variables** (e.g., `cur`, `tgt`) from the updated dict. Previously extracted variables still reference OLD values.
 4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes

@@ -435,6 +435,7 @@ if __name__ == "__main__":
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
 6. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arm from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection (scene is unchanged).
+   - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
@@ -638,6 +639,7 @@ if __name__ == "__main__":
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
 6. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arm from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection (scene is unchanged).
+   - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.

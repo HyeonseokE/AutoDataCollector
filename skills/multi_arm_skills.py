@@ -485,6 +485,449 @@ class MultiArmSkills:
         )
 
     # ─────────────────────────────────────────────
+    # Bimanual: synchronized single-loop control
+    # ─────────────────────────────────────────────
+
+    # Minimum duration for bimanual moves (deformable objects need slow, gentle motion)
+    BIMANUAL_MIN_DURATION = 3.0
+
+    def bimanual_move(
+        self,
+        left_arm,
+        right_arm,
+        duration: Optional[float] = None,
+        left_skill_description: Optional[str] = None,
+        right_skill_description: Optional[str] = None,
+        left_verification_question: Optional[str] = None,
+        right_verification_question: Optional[str] = None,
+        open_gripper_during_move: bool = False,
+    ) -> Dict[str, bool]:
+        """
+        Move both arms in a single control loop with identical progress.
+
+        Unlike move_to_position (independent threads per arm), this runs ONE
+        50Hz loop that queries both trajectories at the same elapsed time,
+        guaranteeing identical progress ratio. Use when both arms hold the
+        same object (e.g., towel folding, sheet stretching).
+
+        Args:
+            left_arm: [x,y,z] target for left arm.
+            right_arm: [x,y,z] target for right arm.
+            duration: Shared duration (auto-computed from longer arm if None,
+                      minimum BIMANUAL_MIN_DURATION seconds).
+        """
+        import numpy as np
+        from lerobot_cap.compensation import AdaptiveCompensator
+
+        la, ra = self.left_arm, self.right_arm
+        min_dur = self.BIMANUAL_MIN_DURATION
+
+        # ── 1. Plan trajectories (each arm in own frame) ──
+        def _plan(arm, position, dur):
+            pos = np.array(position)
+            dur = dur or max(arm.movement_duration, min_dur)
+            _, current_joints, _ = arm._get_current_state()
+            target_bl = arm._transform_pos_world2robot(pos)
+
+            ik_target = target_bl.copy()
+            if arm.gravity_sag is not None:
+                offset = arm.gravity_sag.compute_offset(target_bl)
+                if offset > 0.001:
+                    ik_target[2] += offset
+
+            planner = arm.planner
+            traj, ik_info = planner.plan_to_position_multi(
+                ik_target, current_joints, dur,
+                num_random_samples=10, verbose=False,
+                fixed_joints=[4],  # maintain wrist_roll
+            )
+            if not traj.ik_converged:
+                raise RuntimeError(f"IK failed for position {position}")
+
+            # Update compensator for this target z
+            comp = None
+            if arm.compensator:
+                comp = AdaptiveCompensator.from_config(
+                    config_path=arm.config.get("compensation_file"),
+                    target_z=target_bl[2],
+                )
+                if arm.gravity_sag is not None:
+                    comp.gravity_sag = arm.gravity_sag
+
+            return traj, target_bl, comp
+
+        left_traj, left_target, left_comp = _plan(la, left_arm, duration)
+        right_traj, right_target, right_comp = _plan(ra, right_arm, duration)
+
+        # ── 2. Synchronize duration (use longer; enforce minimum only when auto) ──
+        if duration is not None:
+            sync_dur = max(left_traj.duration, right_traj.duration)
+        else:
+            sync_dur = max(left_traj.duration, right_traj.duration, min_dur)
+        self._log(f"[bimanual_move] duration={sync_dur:.2f}s "
+                  f"(left={left_traj.duration:.2f}s, right={right_traj.duration:.2f}s)")
+
+        # ── 3. Gripper interpolation setup ──
+        if open_gripper_during_move:
+            GRIPPER_MAX_RATIO = 0.30
+            left_gripper_start = la.current_gripper_pos
+            left_gripper_end = la.gripper_close_pos + (la.gripper_open_pos - la.gripper_close_pos) * GRIPPER_MAX_RATIO
+            right_gripper_start = ra.current_gripper_pos
+            right_gripper_end = ra.gripper_close_pos + (ra.gripper_open_pos - ra.gripper_close_pos) * GRIPPER_MAX_RATIO
+            self._log(f"  [bimanual_move] Gripper will open during move")
+        else:
+            left_gripper_start = left_gripper_end = la.current_gripper_pos
+            right_gripper_start = right_gripper_end = ra.current_gripper_pos
+
+        # ── 4. Skill recording ──
+        left_label = left_skill_description or "bimanual move (left)"
+        right_label = right_skill_description or "bimanual move (right)"
+        la._set_skill_recording(
+            label=left_label, skill_type="bimanual_move",
+            goal_joint_5=left_traj.joint_positions[-1],
+            goal_gripper=left_gripper_end,
+            position=list(left_arm),
+            verification_question=left_verification_question,
+        )
+        ra._set_skill_recording(
+            label=right_label, skill_type="bimanual_move",
+            goal_joint_5=right_traj.joint_positions[-1],
+            goal_gripper=right_gripper_end,
+            position=list(right_arm),
+            verification_question=right_verification_question,
+        )
+
+        # ── 4. Single control loop ──
+        # Serial read is done ONCE per arm per loop iteration to avoid jitter.
+        POSITION_TOLERANCE = 0.007
+        MAX_TOTAL_TIME = sync_dur + 2.0
+        SETTLE_TIME = 0.2
+
+        start_time = time.time()
+        left_reached_t = None
+        right_reached_t = None
+        left_err = right_err = float('inf')
+
+        try:
+            while True:
+                elapsed = time.time() - start_time
+
+                # ── Read state ONCE per arm ──
+                left_actual_norm = la.robot.read_positions(normalize=True)
+                right_actual_norm = ra.robot.read_positions(normalize=True)
+
+                # Trajectory query (shared t_normalized → identical progress)
+                if elapsed < sync_dur:
+                    t_norm = elapsed / sync_dur
+                    if la.use_deceleration:
+                        warped = la._apply_end_deceleration(t_norm) * sync_dur
+                    else:
+                        warped = elapsed
+                    left_q = left_traj.get_state_at_time(min(warped, left_traj.duration))
+                    right_q = right_traj.get_state_at_time(min(warped, right_traj.duration))
+                    phase = "Traj"
+                else:
+                    left_q = left_traj.joint_positions[-1]
+                    right_q = right_traj.joint_positions[-1]
+                    phase = "Hold"
+
+                # Normalize
+                left_norm = la._radians_to_normalized(left_q)
+                right_norm = ra._radians_to_normalized(right_q)
+
+                # Compensation (reuse already-read state)
+                if la.use_compensation and left_comp:
+                    left_norm = left_comp.compensate(left_actual_norm[:5], left_norm)
+                if ra.use_compensation and right_comp:
+                    right_norm = right_comp.compensate(right_actual_norm[:5], right_norm)
+
+                # Gripper interpolation (smooth open during move)
+                if elapsed < sync_dur:
+                    grip_alpha = elapsed / sync_dur
+                else:
+                    grip_alpha = 1.0
+                left_grip = left_gripper_start + grip_alpha * (left_gripper_end - left_gripper_start)
+                right_grip = right_gripper_start + grip_alpha * (right_gripper_end - right_gripper_start)
+                la.current_gripper_pos = left_grip
+                ra.current_gripper_pos = right_grip
+
+                # Clip and send
+                left_norm = np.clip(left_norm, -99.0, 99.0)
+                right_norm = np.clip(right_norm, -99.0, 99.0)
+                left_full = np.concatenate([left_norm, [left_grip]])
+                right_full = np.concatenate([right_norm, [right_grip]])
+
+                la.robot.write_positions(left_full, normalize=True)
+                ra.robot.write_positions(right_full, normalize=True)
+
+                # Recording callbacks (reuse already-read state)
+                if la.recording_callback and phase == "Traj":
+                    try:
+                        la.recording_callback(left_actual_norm.copy(), left_full.copy())
+                    except Exception:
+                        pass
+                if ra.recording_callback and phase == "Traj":
+                    try:
+                        ra.recording_callback(right_actual_norm.copy(), right_full.copy())
+                    except Exception:
+                        pass
+
+                # Error check via FK (reuse already-read state)
+                if la.kinematics and la.calibration_limits:
+                    left_rad = la.calibration_limits.normalized_to_radians(left_actual_norm[:5])
+                    left_ee = la.kinematics.get_ee_position(left_rad)
+                    left_err = np.linalg.norm(left_target - left_ee)
+                if ra.kinematics and ra.calibration_limits:
+                    right_rad = ra.calibration_limits.normalized_to_radians(right_actual_norm[:5])
+                    right_ee = ra.kinematics.get_ee_position(right_rad)
+                    right_err = np.linalg.norm(right_target - right_ee)
+
+                # Progress bar
+                if self.verbose:
+                    prog = min(elapsed / sync_dur, 1.0)
+                    filled = int(30 * prog)
+                    bar = "=" * filled + "-" * (30 - filled)
+                    print(f"\r  [{bar}] {phase} L:{left_err*1000:5.1f}mm R:{right_err*1000:5.1f}mm", end="", flush=True)
+
+                # Settle check (both arms must settle)
+                now = time.time()
+                if left_err < POSITION_TOLERANCE:
+                    left_reached_t = left_reached_t or now
+                else:
+                    left_reached_t = None
+                if right_err < POSITION_TOLERANCE:
+                    right_reached_t = right_reached_t or now
+                else:
+                    right_reached_t = None
+
+                if (left_reached_t and right_reached_t and
+                        now - left_reached_t > SETTLE_TIME and
+                        now - right_reached_t > SETTLE_TIME):
+                    break
+
+                if elapsed > MAX_TOTAL_TIME:
+                    if self.verbose:
+                        print(f"\n  Timeout after {MAX_TOTAL_TIME:.1f}s")
+                    break
+
+                time.sleep(0.02)  # 50Hz
+
+        finally:
+            la._clear_skill_recording()
+            ra._clear_skill_recording()
+
+        if self.verbose:
+            print(f"\r  [{'=' * 30}] Done (L:{left_err*1000:.1f}mm R:{right_err*1000:.1f}mm)    ")
+
+        left_ok = left_err < POSITION_TOLERANCE * 4
+        right_ok = right_err < POSITION_TOLERANCE * 4
+        return {"left": left_ok, "right": right_ok}
+
+    # Release height offset: arc ends this far above end_z so place_object
+    # can gently descend and release without the folded fabric bunching up.
+    FOLD_RELEASE_HEIGHT = 0.05  # 5cm above target
+
+    # Duration per waypoint in bimanual_fold (shorter than BIMANUAL_MIN_DURATION
+    # because each waypoint segment is a very short distance)
+    FOLD_WAYPOINT_DURATION = 2.0
+
+    def bimanual_fold(
+        self,
+        left_start,
+        right_start,
+        left_end,
+        right_end,
+        arc_height: float = 0.20,
+        num_points: int = 8,
+        left_skill_description: Optional[str] = None,
+        right_skill_description: Optional[str] = None,
+        left_verification_question: Optional[str] = None,
+        right_verification_question: Optional[str] = None,
+    ) -> Dict[str, bool]:
+        """
+        Fold motion: move both arms along an arc trajectory from start to end.
+
+        Generates waypoints on a semicircular arc and executes them as a
+        sequence of bimanual_move calls. The arc ends slightly above the
+        target (FOLD_RELEASE_HEIGHT) to avoid fabric compression — call
+        place_object afterwards for the final descent and release.
+
+        Args:
+            left_start: [x,y,z] grasp position for left arm.
+            right_start: [x,y,z] grasp position for right arm.
+            left_end: [x,y,z] fold target position for left arm.
+            right_end: [x,y,z] fold target position for right arm.
+            arc_height: Peak height of the arc above start z (meters, default 0.20).
+            num_points: Number of waypoints along the arc (default 8).
+        """
+        import numpy as np
+
+        left_start = np.array(left_start, dtype=np.float64)
+        right_start = np.array(right_start, dtype=np.float64)
+        left_end = np.array(left_end, dtype=np.float64)
+        right_end = np.array(right_end, dtype=np.float64)
+
+        base_z = max(left_start[2], right_start[2])
+        release_z = max(left_end[2], right_end[2]) + self.FOLD_RELEASE_HEIGHT
+
+        self._log(f"[bimanual_fold] arc_height={arc_height:.2f}m, release_z={release_z:.3f}m, {num_points} waypoints")
+
+        left_desc = left_skill_description or "fold (left)"
+        right_desc = right_skill_description or "fold (right)"
+
+        # Each arm interpolates independently in its own coordinate frame.
+        # Same t ratio guarantees synchronized progress.
+        # (Cannot mix coordinates — each arm has its own base_link frame.)
+
+        last_result = {"left": True, "right": True}
+        for i in range(num_points):
+            t = (i + 1) / num_points  # 0 → 1
+            theta = np.pi * t         # 0 → π
+
+            # x, y: linear interpolation per arm (each in own frame)
+            left_xy = left_start[:2] + (left_end[:2] - left_start[:2]) * t
+            right_xy = right_start[:2] + (right_end[:2] - right_start[:2]) * t
+
+            # z: sin arc, but floor at release_z (never descend below release height)
+            z_arc = base_z + arc_height * np.sin(theta)
+            z = max(z_arc, release_z)
+
+            left_wp = [float(left_xy[0]), float(left_xy[1]), float(z)]
+            right_wp = [float(right_xy[0]), float(right_xy[1]), float(z)]
+
+            step_desc = f"({i+1}/{num_points})"
+            last_result = self.bimanual_move(
+                left_arm=left_wp,
+                right_arm=right_wp,
+                duration=self.FOLD_WAYPOINT_DURATION,
+                left_skill_description=f"{left_desc} {step_desc}",
+                right_skill_description=f"{right_desc} {step_desc}",
+                left_verification_question=left_verification_question,
+                right_verification_question=right_verification_question,
+            )
+
+        return last_result
+
+    def bimanual_pick_object(
+        self,
+        left_arm,
+        right_arm,
+        object_name: Optional[str] = None,
+        left_skill_description: Optional[str] = None,
+        right_skill_description: Optional[str] = None,
+        left_verification_question: Optional[str] = None,
+        right_verification_question: Optional[str] = None,
+    ) -> Dict[str, bool]:
+        """
+        Bimanual pick: synchronized descend + grip. (Called from approach position.)
+
+        Same role as execute_pick_object but for two arms holding the same object.
+        Caller must open grippers and move to approach height BEFORE calling this.
+
+        Args:
+            left_arm: [x,y,z] grasp position for left arm.
+            right_arm: [x,y,z] grasp position for right arm.
+            object_name: Name of the object being picked.
+        """
+        import numpy as np
+        left_pos = np.array(left_arm)
+        right_pos = np.array(right_arm)
+        name = object_name or "object"
+
+        self._log(f"[bimanual_pick_object] {name}")
+
+        # 1. Descend to grasp points (synchronized)
+        pick_z_left = max(left_pos[2] - self.left_arm.pick_offset, 0.0)
+        pick_z_right = max(right_pos[2] - self.right_arm.pick_offset, 0.0)
+        self.bimanual_move(
+            left_arm=[left_pos[0], left_pos[1], pick_z_left],
+            right_arm=[right_pos[0], right_pos[1], pick_z_right],
+            left_skill_description=left_skill_description or f"Descend to grasp {name} (left)",
+            left_verification_question=left_verification_question or f"Is left arm at grasp position?",
+            right_skill_description=right_skill_description or f"Descend to grasp {name} (right)",
+            right_verification_question=right_verification_question or f"Is right arm at grasp position?",
+        )
+
+        # 2. Close grippers
+        self.gripper_control(
+            left_arm="close", right_arm="close",
+            left_skill_description=f"Grasp {name} (left)",
+            left_verification_question=f"Is {name} grasped by left arm?",
+            right_skill_description=f"Grasp {name} (right)",
+            right_verification_question=f"Is {name} grasped by right arm?",
+        )
+
+        # 3. Save pitch for place
+        self.left_arm._saved_pitch = self.left_arm.kinematics.get_gripper_pitch(
+            self.left_arm._get_current_state()[1])
+        self.right_arm._saved_pitch = self.right_arm.kinematics.get_gripper_pitch(
+            self.right_arm._get_current_state()[1])
+
+        self._log(f"[bimanual_pick_object] Complete")
+        return {"left": True, "right": True}
+
+    def bimanual_place_object(
+        self,
+        left_arm,
+        right_arm,
+        object_name: Optional[str] = None,
+        left_skill_description: Optional[str] = None,
+        right_skill_description: Optional[str] = None,
+        left_verification_question: Optional[str] = None,
+        right_verification_question: Optional[str] = None,
+    ) -> Dict[str, bool]:
+        """
+        Bimanual place: synchronized descend + release. (Called from approach position.)
+
+        Same role as execute_place_object but for two arms holding the same object.
+        Caller must move to retract height AFTER calling this.
+
+        Args:
+            left_arm: [x,y,z] place position for left arm.
+            right_arm: [x,y,z] place position for right arm.
+            object_name: Name of the object being placed.
+        """
+        import numpy as np
+        left_pos = np.array(left_arm)
+        right_pos = np.array(right_arm)
+        name = object_name or "object"
+
+        self._log(f"[bimanual_place_object] {name}")
+
+        # 1. Descend to place points (synchronized)
+        place_z_left = max(left_pos[2] - self.left_arm.pick_offset, 0.005)
+        place_z_right = max(right_pos[2] - self.right_arm.pick_offset, 0.005)
+        self.bimanual_move(
+            left_arm=[left_pos[0], left_pos[1], place_z_left],
+            right_arm=[right_pos[0], right_pos[1], place_z_right],
+            left_skill_description=left_skill_description or f"Lower {name} to place position (left)",
+            left_verification_question=left_verification_question or f"Is left side at place position?",
+            right_skill_description=right_skill_description or f"Lower {name} to place position (right)",
+            right_verification_question=right_verification_question or f"Is right side at place position?",
+        )
+
+        # 2. Lift while opening gripper (prevents pushing deformable objects)
+        RELEASE_LIFT = 0.03  # 3cm lift during gripper open
+        self.bimanual_move(
+            left_arm=[left_pos[0], left_pos[1], place_z_left + RELEASE_LIFT],
+            right_arm=[right_pos[0], right_pos[1], place_z_right + RELEASE_LIFT],
+            open_gripper_during_move=True,
+            left_skill_description=f"Release {name} while lifting (left)",
+            left_verification_question=f"Is {name} released by left arm?",
+            right_skill_description=f"Release {name} while lifting (right)",
+            right_verification_question=f"Is {name} released by right arm?",
+        )
+
+        # 3. Clear saved state
+        self.left_arm._pick_z = None
+        self.left_arm._saved_pitch = None
+        self.right_arm._pick_z = None
+        self.right_arm._saved_pitch = None
+
+        self._log(f"[bimanual_place_object] Complete")
+        return {"left": True, "right": True}
+
+    # ─────────────────────────────────────────────
     # Convenience: both arms to known poses
     # ─────────────────────────────────────────────
 

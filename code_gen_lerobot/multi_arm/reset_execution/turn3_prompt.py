@@ -266,11 +266,13 @@ if __name__ == "__main__":
 2. Use `skills.move_to_position()` / `skills.pick_object()` / `skills.place_object()` / `skills.gripper_control()` for ALL operations. Pass `left_arm="wait"` or `right_arm="wait"` for the arm that should hold position.
 3. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
 4. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arms from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection.
+   - **CRITICAL**: After `pos_left.update()` / `pos_right.update()`, you MUST **re-assign ALL local variables** extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 5. Always start with `skills.move_to_initial_state()`, end with `skills.move_to_initial_state()` then `skills.move_to_free_state()`.
 6. Use `approach_height = 0.20` for approach/retreat movements.
 7. ALWAYS pass `left_skill_description`/`right_skill_description` and `left_verification_question`/`right_verification_question` for every arm that is NOT `"wait"`.
 8. Always include try/finally with `skills.disconnect()` for cleanup.
 9. **Unstacking**: If objects are stacked, always unstack from top to bottom (highest z first).
+10. **Bimanual move**: When both arms hold the **same object** and must move together (e.g., unfolding, stretching), use `skills.bimanual_move()` instead of `skills.move_to_position()`. This guarantees synchronized progress.
 
 ### Output Format
 - Provide complete executable Python code

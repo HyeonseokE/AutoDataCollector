@@ -72,8 +72,8 @@ cd "$SCRIPT_DIR"
 ROBOT_IDS=(2 3)
 
 ## Task_instruction 
-INSTRUCTION="stack red block at center, then place yellow block on top of red block"
-
+# INSTRUCTION="stack red block at center, then place yellow block on top of red block"
+INSTRUCTION="Fold the green towel in half from top to bottom."
 ## Reset_instruction(Empty is default: "move objects to certain position")
 RESET_INSTRUCTION=""
 

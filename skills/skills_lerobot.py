@@ -1192,6 +1192,14 @@ class LeRobotSkills:
                         else:
                             no_point_labels.append(name)
 
+                        # All critical points (cyan dots + label)
+                        pixel_points = info.get("_pixel_points", {})
+                        for pt_label, (px, py) in pixel_points.items():
+                            cv2.circle(vis_img, (px, py), 3, (255, 255, 0), -1)
+                            cv2.circle(vis_img, (px, py), 3, (0, 0, 0), 1)
+                            cv2.putText(vis_img, pt_label, (px + 5, py - 3),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 0), 1)
+
                     # 상단에 point 미검출 객체 표시
                     if no_point_labels:
                         warn_text = f"No grasp point: {', '.join(no_point_labels)} (bbox center fallback)"
@@ -1838,7 +1846,7 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.01  # Minimum pick height (1cm) — gripper ground margin
+        MIN_PICK_Z = 0.00  # Minimum pick height — no ground margin
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 

@@ -90,6 +90,60 @@ MULTI_ARM_API_DOC = '''**Available Robot API** (the `skills` object is already c
             right_arm: "open", "close", or "wait".
         """
 
+    def bimanual_move(self, left_arm, right_arm, duration=None,
+                      left_skill_description=None, right_skill_description=None,
+                      left_verification_question=None, right_verification_question=None) -> dict:
+        """Move both arms in a single synchronized control loop.
+        Both arms progress at the same rate regardless of distance.
+        Use when both arms hold the same object (e.g., towel folding).
+
+        Args:
+            left_arm: [x,y,z] target for left arm (required, no "wait").
+            right_arm: [x,y,z] target for right arm (required, no "wait").
+            duration: Shared duration in seconds (auto-computed if None).
+        """
+
+    def bimanual_fold(self, left_start, right_start, left_end, right_end,
+                      arc_height=0.20, num_points=8,
+                      left_skill_description=None, right_skill_description=None,
+                      left_verification_question=None, right_verification_question=None) -> dict:
+        """Fold motion: move both arms along an arc (semicircle) from start to end.
+        Use for folding towels, cloth, paper — any task requiring an arc trajectory.
+        The arms trace a smooth arc path, not a straight line.
+
+        Args:
+            left_start: [x,y,z] grasp position for left arm.
+            right_start: [x,y,z] grasp position for right arm.
+            left_end: [x,y,z] fold target position for left arm.
+            right_end: [x,y,z] fold target position for right arm.
+            arc_height: Peak height of arc above start (meters, default 0.20).
+            num_points: Number of arc waypoints (default 8, higher = smoother).
+        """
+
+    def bimanual_pick_object(self, left_arm, right_arm, object_name=None,
+                             left_skill_description=None, right_skill_description=None,
+                             left_verification_question=None, right_verification_question=None) -> dict:
+        """Bimanual pick: synchronized descend + grip. (Called from approach position.)
+        Caller must open grippers and move to approach height BEFORE calling.
+
+        Args:
+            left_arm: [x,y,z] grasp position for left arm.
+            right_arm: [x,y,z] grasp position for right arm.
+            object_name: Name of the object being picked.
+        """
+
+    def bimanual_place_object(self, left_arm, right_arm, object_name=None,
+                              left_skill_description=None, right_skill_description=None,
+                              left_verification_question=None, right_verification_question=None) -> dict:
+        """Bimanual place: synchronized descend + release. (Called from approach position.)
+        Caller must move to retract height AFTER calling.
+
+        Args:
+            left_arm: [x,y,z] place position for left arm.
+            right_arm: [x,y,z] place position for right arm.
+            object_name: Name of the object being placed.
+        """
+
     def move_to_initial_state(self) -> dict:
         """Move both arms to their home positions simultaneously."""
 

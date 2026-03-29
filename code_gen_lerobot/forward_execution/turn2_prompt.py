@@ -92,6 +92,7 @@ Return a JSON block:
 - Look carefully at the cropped image and provide accurate coordinates.
 - Coordinates are normalized 0–1000 relative to this cropped image.
 - **Grasp stability**: Choose the grasp point that maximizes gripper contact and grip stability. Prefer the geometric center of the widest graspable surface. Avoid edges, corners, or thin protrusions where the gripper may slip.
+- **Deformable objects** (towel, cloth, paper): NEVER place grasp points at exact corners or extreme edges — the gripper will slip off. Instead, place grasp points **at least 75 pixels inward from the edge** (in the 0–1000 normalized coordinate space of the cropped image) so the gripper can firmly pinch the material with sufficient contact area.
 - **Task awareness**: Consider what the robot needs to do with this object. If the object will be stacked, placed precisely, or inserted, choose a grasp point that allows stable holding during the entire manipulation sequence.
 """.strip()
 

@@ -226,17 +226,104 @@ if "left_arm" in updated:
     pos_left.update(updated["left_arm"])
 if "right_arm" in updated:
     pos_right.update(updated["right_arm"])
+# IMPORTANT: Re-assign ALL local variables from the updated dicts
+# (pos_left.update() replaces dict entries, but previously extracted variables still reference OLD values)
+b_grasp = pos_right["B"]["points"]["grasp center"]  # must re-extract after update
 
 # Subtask 2
 skills.set_subtask("pick B with right arm and place on top of A")
-# ... pick and place B ...
+# ... pick and place B using updated b_grasp ...
+skills.clear_subtask()
+
+# ═══════════════════════════════════════════════════════════
+# BIMANUAL PATTERNS (both arms hold the SAME object)
+# Use bimanual_* skills instead of pick_object/place_object/move_to_position.
+# bimanual_* skills run a single synchronized control loop.
+# ═══════════════════════════════════════════════════════════
+
+# FOLD pattern (arc trajectory — for folding towel, cloth, paper)
+# bimanual_pick/place only do descend+grip / descend+release (like execute_pick/place_object).
+# open, approach, lift, retract are YOUR responsibility (same as independent pick/place pattern).
+skills.set_subtask("fold towel — pick top edge, fold to bottom edge")
+
+# 1. Open + approach (before contact — independent is fine)
+skills.gripper_control(left_arm="open", right_arm="open",
+    left_skill_description="Open left gripper", left_verification_question="Is left open?",
+    right_skill_description="Open right gripper", right_verification_question="Is right open?")
+skills.move_to_position(
+    left_arm=[top_left[0], top_left[1], approach_height],
+    right_arm=[top_right[0], top_right[1], approach_height],
+    left_skill_description="Approach left grasp", left_verification_question="Is left above grasp?",
+    right_skill_description="Approach right grasp", right_verification_question="Is right above grasp?")
+
+# 2. Pick (descend + grip — contact starts, synchronized)
+skills.bimanual_pick_object(left_arm=top_left, right_arm=top_right, object_name="towel")
+
+# 3. Fold arc (contact, synchronized — arc automatically lifts and descends)
+# Do NOT add a separate bimanual_move(lift) before fold — the arc handles it.
+skills.bimanual_fold(
+    left_start=top_left, right_start=top_right,
+    left_end=bottom_left, right_end=bottom_right, arc_height=0.20,
+    left_skill_description="Fold left to bottom", left_verification_question="Is left folded?",
+    right_skill_description="Fold right to bottom", right_verification_question="Is right folded?")
+
+# 5. Place (descend + release — contact ends, synchronized)
+skills.bimanual_place_object(left_arm=bottom_left, right_arm=bottom_right, object_name="towel")
+
+# 6. Retract (after contact — independent is fine)
+skills.move_to_position(
+    left_arm=[bottom_left[0], bottom_left[1], approach_height],
+    right_arm=[bottom_right[0], bottom_right[1], approach_height],
+    left_skill_description="Retract left", left_verification_question="Is left clear?",
+    right_skill_description="Retract right", right_verification_question="Is right clear?")
+
+skills.clear_subtask()
+
+# CARRY pattern (straight-line — for carrying large/heavy objects)
+skills.set_subtask("carry large box to the right side")
+
+# Open + approach (before contact)
+skills.gripper_control(left_arm="open", right_arm="open",
+    left_skill_description="Open left", left_verification_question="Is left open?",
+    right_skill_description="Open right", right_verification_question="Is right open?")
+skills.move_to_position(
+    left_arm=[box_left[0], box_left[1], approach_height],
+    right_arm=[box_right[0], box_right[1], approach_height],
+    left_skill_description="Approach box left", left_verification_question="Is left above box?",
+    right_skill_description="Approach box right", right_verification_question="Is right above box?")
+
+# Pick (contact starts)
+skills.bimanual_pick_object(left_arm=box_left, right_arm=box_right, object_name="box")
+
+# Lift + carry (contact, synchronized)
+skills.bimanual_move(
+    left_arm=[box_left[0], box_left[1], approach_height],
+    right_arm=[box_right[0], box_right[1], approach_height],
+    left_skill_description="Lift box", left_verification_question="Is box lifted?",
+    right_skill_description="Lift box", right_verification_question="Is box lifted?")
+skills.bimanual_move(
+    left_arm=[target_left[0], target_left[1], approach_height],
+    right_arm=[target_right[0], target_right[1], approach_height],
+    left_skill_description="Carry box to target", left_verification_question="Is box above target?",
+    right_skill_description="Carry box to target", right_verification_question="Is box above target?")
+
+# Place (contact ends)
+skills.bimanual_place_object(left_arm=target_left, right_arm=target_right, object_name="box")
+
+# Retract (after contact)
+skills.move_to_position(
+    left_arm=[target_left[0], target_left[1], approach_height],
+    right_arm=[target_right[0], target_right[1], approach_height],
+    left_skill_description="Retract left", left_verification_question="Is left clear?",
+    right_skill_description="Retract right", right_verification_question="Is right clear?")
+
 skills.clear_subtask()
 ```
 
 **Code Skeleton**:
 
 ```python
-def execute_task():
+def execute_task():    # NO ARGUMENTS — positions/skills are pre-injected globals
     '''Execute the bi-arm robot task.'''
     skills.connect()
 
@@ -267,10 +354,17 @@ if __name__ == "__main__":
    - For locations NOT in the `positions` dict (e.g., empty spot on table), use `skills.move_to_pixel()` / `skills.place_at_pixel()` with [y, x] in normalized 0–1000 coordinates.
 3. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
 4. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arms from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask.
+   - **CRITICAL**: After `pos_left.update()` / `pos_right.update()`, you MUST **re-assign ALL local variables** that were extracted from the positions dict (e.g., `grasp_pt = pos_left["obj"]["points"]["grasp center"]`). The `update()` call replaces dict entries, but previously extracted variables still reference the OLD values.
 5. Always start with `skills.move_to_initial_state()`, end with `skills.move_to_free_state()`.
 6. Use `approach_height = 0.20` for approach/retreat movements.
 7. ALWAYS pass `left_skill_description`/`right_skill_description` and `left_verification_question`/`right_verification_question` for every arm that is NOT `"wait"`.
 8. Always include try/finally with `skills.disconnect()` for cleanup.
+   - **CRITICAL**: `def execute_task()` must have **NO arguments**. `skills` and `positions` are pre-injected global variables. Do NOT pass them as function parameters.
+9. **Bimanual skills** (both arms interact with the **same object**):
+   - Use `bimanual_pick_object` / `bimanual_place_object` / `bimanual_move` / `bimanual_fold` instead of `pick_object` / `place_object` / `move_to_position`.
+   - **Folding** (towel, cloth, paper): `bimanual_pick_object` → `bimanual_fold` → `bimanual_place_object` (NO separate lift step — the arc handles it)
+   - **Carrying** (large/heavy object): `bimanual_pick_object` → `bimanual_move` → `bimanual_place_object`
+   - Do NOT use independent `pick_object` / `place_object` / `move_to_position` for shared-object manipulation (no synchronization).
 
 **Generate the complete executable Python code:**
 """

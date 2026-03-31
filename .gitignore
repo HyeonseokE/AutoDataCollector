@@ -41,6 +41,7 @@ logs/
 
 # Results
 results/
+!docs/static/images/results/
 outputs/
 # Local config
 .env

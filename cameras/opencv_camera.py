@@ -71,19 +71,31 @@ class OpenCVCamera:
     def is_connected(self) -> bool:
         return self._is_connected and self.cap is not None and self.cap.isOpened()
 
+    MAX_CONNECT_RETRIES = 3
+    CONNECT_RETRY_DELAY = 2.0  # seconds
+
     def connect(self, warmup: bool = True) -> None:
-        """카메라 연결"""
+        """카메라 연결 (USB 불안정 시 자동 재시도)"""
         if self._is_connected:
             print(f"[OpenCV:{self.name}] Already connected")
             return
 
         # 장치 열기 (V4L2 백엔드 사용 - Qt 스레드 문제 방지)
-        # Linux에서는 CAP_V4L2가 더 안정적이고 Qt 의존성 없음
-        self.cap = cv2.VideoCapture(self.config.index_or_path, cv2.CAP_V4L2)
+        # USB 버스 불안정(RealSense reset 등)으로 간헐적 실패 → 재시도
+        import time
+        for attempt in range(self.MAX_CONNECT_RETRIES):
+            self.cap = cv2.VideoCapture(self.config.index_or_path, cv2.CAP_V4L2)
+            if self.cap.isOpened():
+                break
+            if attempt < self.MAX_CONNECT_RETRIES - 1:
+                print(f"[OpenCV:{self.name}] Open failed, retrying ({attempt+1}/{self.MAX_CONNECT_RETRIES})...")
+                self.cap.release()
+                time.sleep(self.CONNECT_RETRY_DELAY)
 
         if not self.cap.isOpened():
             raise ConnectionError(
-                f"[OpenCV:{self.name}] Failed to open {self.config.index_or_path}"
+                f"[OpenCV:{self.name}] Failed to open {self.config.index_or_path} "
+                f"after {self.MAX_CONNECT_RETRIES} attempts"
             )
 
         # 설정 적용
@@ -122,7 +134,7 @@ class OpenCVCamera:
         self.cap.set(cv2.CAP_PROP_FPS, self.config.fps)
 
         # 버퍼 크기 최소화 (지연 줄이기)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
 
     def disconnect(self) -> None:
         """카메라 연결 해제"""
@@ -187,6 +199,7 @@ class OpenCVCamera:
                 break
             except Exception as e:
                 print(f"[OpenCV:{self.name}] Background read error: {e}")
+                _time.sleep(0.05)
 
     def _start_read_thread(self) -> None:
         """백그라운드 읽기 스레드 시작"""

@@ -33,6 +33,22 @@ def _format_per_arm_positions(positions: Dict, label: str) -> str:
             return list(info[:3])
         return None
 
+    def _format_obj(info):
+        """Format single object entry with position + points."""
+        pos = _get_pos(info)
+        if pos is None:
+            return None
+        pts = info.get("points", {}) if isinstance(info, dict) else {}
+        if pts:
+            pt_strs = []
+            for pt_label, pt_pos in pts.items():
+                if isinstance(pt_pos, (list, tuple)) and len(pt_pos) >= 3:
+                    pt_strs.append(f'"{pt_label}": [{pt_pos[0]:.4f}, {pt_pos[1]:.4f}, {pt_pos[2]:.4f}]')
+            pts_str = ", ".join(pt_strs)
+            return f'{{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}], "points": {{{pts_str}}}}}'
+        else:
+            return f'{{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}}'
+
     # per-arm 구조 감지
     if "left_arm" in positions or "right_arm" in positions:
         lines = [f"{label} = {{"]
@@ -40,11 +56,9 @@ def _format_per_arm_positions(positions: Dict, label: str) -> str:
             arm_data = positions.get(arm_key, {})
             lines.append(f'    "{arm_key}": {{')
             for name, info in arm_data.items():
-                pos = _get_pos(info)
-                if pos is not None:
-                    lines.append(
-                        f'        "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
-                    )
+                obj_str = _format_obj(info)
+                if obj_str is not None:
+                    lines.append(f'        "{name}": {obj_str},')
             lines.append("    },")
         lines.append("}")
         return "\n".join(lines)
@@ -52,11 +66,9 @@ def _format_per_arm_positions(positions: Dict, label: str) -> str:
         # flat dict fallback
         lines = [f"{label} = {{"]
         for name, info in positions.items():
-            pos = _get_pos(info)
-            if pos is not None:
-                lines.append(
-                    f'    "{name}": {{"position": [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]}},'
-                )
+            obj_str = _format_obj(info)
+            if obj_str is not None:
+                lines.append(f'    "{name}": {obj_str},')
         lines.append("}")
         return "\n".join(lines)
 
@@ -67,6 +79,7 @@ def multi_arm_turn3_reset_codegen_prompt(
     robot_ids: List[int] = None,
     instruction: str = "move objects to their original positions",
     context_summary: str = "",
+    all_points: list = None,
 ) -> str:
     """Multi-arm reset 코드 생성 프롬프트 (bi-arm API).
 
@@ -87,6 +100,33 @@ def multi_arm_turn3_reset_codegen_prompt(
 
     current_str = _format_per_arm_positions(current_positions, "current_positions")
     target_str = _format_per_arm_positions(target_positions, "target_positions")
+
+    # Build points section (same as forward Turn 3)
+    points_desc = ""
+    if all_points:
+        from collections import defaultdict
+        by_object = defaultdict(list)
+        for pt in all_points:
+            by_object[pt["object_label"]].append(pt)
+
+        lines = []
+        for obj, pts in by_object.items():
+            lines.append(f"  {obj}:")
+            for pt in pts:
+                label = pt.get("label", "unknown")
+                role = pt.get("role", "unknown")
+                reasoning = pt.get("reasoning", "")
+                lines.append(f'    - "{label}" [{role}]: {reasoning}')
+        points_desc = "\n".join(lines)
+
+    points_section = ""
+    if points_desc:
+        points_section = f"""
+**Detected Critical Points** (from scene analysis):
+Choose the most appropriate point for the task.
+Access via `cur_left["object"]["points"]["label"]` or `cur_right["object"]["points"]["label"]`.
+{points_desc}
+"""
 
     context_section = ""
     if context_summary:
@@ -112,10 +152,31 @@ Move each object from its current position to its target position so the next ta
 - Assign each object to the arm whose workspace covers that object (bright area).
 - If an object is reachable by both arms, prefer the arm closer to it.
 
+{points_section}
 ### Environment States
 Object position z-coordinate = object height (table surface is z=0).
 
-The `current_positions` and `target_positions` dictionaries are provided at runtime as global variables:
+The `current_positions` and `target_positions` dictionaries are provided at runtime as global variables with this structure:
+```python
+positions = {{
+    "left_arm": {{
+        "object_name": {{
+            "position": [x, y, z],   # in left arm's coordinate frame
+            "points": {{"<label>": [x, y, z], ...}}  # detected critical points
+        }},
+        ...
+    }},
+    "right_arm": {{
+        "object_name": {{
+            "position": [x, y, z],   # in right arm's coordinate frame
+            "points": {{"<label>": [x, y, z], ...}}  # detected critical points
+        }},
+        ...
+    }},
+}}
+```
+
+Actual detected values:
 ```python
 {current_str}
 
@@ -131,13 +192,18 @@ tgt_left = target_positions["left_arm"]
 tgt_right = target_positions["right_arm"]
 
 # Access object positions for each arm
-left_cur = cur_left["object_name"]["position"]    # use with left_arm=
-left_tgt = tgt_left["object_name"]["position"]    # use with left_arm=
-right_cur = cur_right["object_name"]["position"]  # use with right_arm=
-right_tgt = tgt_right["object_name"]["position"]  # use with right_arm=
+left_cur = cur_left["object_name"]["position"]    # default grasp point
+left_pts = cur_left["object_name"]["points"]      # all detected critical points
+left_grasp = cur_left["object_name"]["points"]["grasp center"]  # specific point
+
+right_cur = cur_right["object_name"]["position"]
+right_pts = cur_right["object_name"]["points"]
 ```
+- `position`: default grasp point for this object.
+- `points`: all detected critical points. Choose the best point for the task.
+- **CRITICAL**: Use ONLY the exact key names from the `positions`/`current_positions`/`target_positions` dictionaries. Do NOT invent new key names.
 - **CRITICAL**: Do NOT redefine or hardcode the dictionaries. They are global variables.
-- **CRITICAL**: Do NOT hardcode any coordinate values.
+- **CRITICAL**: Do NOT hardcode any coordinate values or compute offsets manually — always use values from the dict.
 
 {MULTI_ARM_API_DOC}
 
@@ -230,6 +296,56 @@ When objects are stacked, you MUST unstack from **top to bottom**.
 - The object with the highest z is topmost — always pick it first.
 - After picking each stacked object, re-detect to get updated z-heights.
 
+### Unfolding (Restoring a folded towel/cloth to flat state)
+
+When a towel or cloth is folded and needs to be unfolded back to its original flat state,
+use the bimanual UNFOLD pattern — the reverse of FOLD.
+
+```python
+# UNFOLD pattern: grasp the folded edge → arc trajectory to unfold → place flat
+skills.set_subtask("unfold towel — grasp folded edge, pull back to flat")
+
+# Get grasp points from detected critical points (the folded/free edge)
+left_grasp = cur_left["towel"]["points"]["left grasp point"]
+right_grasp = cur_right["towel"]["points"]["right grasp point"]
+
+# Target: where the edge should end up when unfolded (from target_positions)
+left_target = tgt_left["towel"]["points"]["left grasp point"]
+right_target = tgt_right["towel"]["points"]["right grasp point"]
+
+# 1. Open + approach
+skills.gripper_control(left_arm="open", right_arm="open",
+    left_skill_description="Open left gripper", left_verification_question="Is left open?",
+    right_skill_description="Open right gripper", right_verification_question="Is right open?")
+skills.move_to_position(
+    left_arm=[left_grasp[0], left_grasp[1], approach_height],
+    right_arm=[right_grasp[0], right_grasp[1], approach_height],
+    left_skill_description="Approach left grasp", left_verification_question="Is left above grasp?",
+    right_skill_description="Approach right grasp", right_verification_question="Is right above grasp?")
+
+# 2. Pick (descend + grip — synchronized)
+skills.bimanual_pick_object(left_arm=left_grasp, right_arm=right_grasp, object_name="towel")
+
+# 3. Unfold arc (reverse fold — arc lifts and descends to target, synchronized)
+skills.bimanual_fold(
+    left_start=left_grasp, right_start=right_grasp,
+    left_end=left_target, right_end=right_target, arc_height=0.20,
+    left_skill_description="Unfold left to target", left_verification_question="Is left unfolded?",
+    right_skill_description="Unfold right to target", right_verification_question="Is right unfolded?")
+
+# 4. Place (descend + release — synchronized)
+skills.bimanual_place_object(left_arm=left_target, right_arm=right_target, object_name="towel")
+
+# 5. Retract
+skills.move_to_position(
+    left_arm=[left_target[0], left_target[1], approach_height],
+    right_arm=[right_target[0], right_target[1], approach_height],
+    left_skill_description="Retract left", left_verification_question="Is left clear?",
+    right_skill_description="Retract right", right_verification_question="Is right clear?")
+
+skills.clear_subtask()
+```
+
 ### Code Skeleton
 
 ```python
@@ -273,6 +389,7 @@ if __name__ == "__main__":
 8. Always include try/finally with `skills.disconnect()` for cleanup.
 9. **Unstacking**: If objects are stacked, always unstack from top to bottom (highest z first).
 10. **Bimanual move**: When both arms hold the **same object** and must move together (e.g., unfolding, stretching), use `skills.bimanual_move()` instead of `skills.move_to_position()`. This guarantees synchronized progress.
+11. **Unfolding** (towel, cloth): Use the UNFOLD pattern above — `bimanual_pick_object` → `bimanual_fold` (reverse direction) → `bimanual_place_object`. Grasp the folded/free edge and arc it back to the original flat position. Use detected `"points"` for grasp locations — do NOT compute offsets manually.
 
 ### Output Format
 - Provide complete executable Python code

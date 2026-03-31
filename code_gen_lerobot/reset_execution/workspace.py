@@ -235,6 +235,10 @@ class ResetWorkspace(BaseWorkspace):
 # Helper Functions
 # ============================================================
 
+# bbox가 커도 가장자리를 잡을 수 있는 deformable 물체 키워드
+DEFORMABLE_KEYWORDS = ("towel", "cloth", "fabric", "napkin", "sheet")
+
+
 def is_grippable(
     bbox_px: Tuple[int, int],
     gripper_max_px: int = GRIPPER_MAX_OPEN_PX,
@@ -261,6 +265,8 @@ def classify_objects(
     """
     객체를 grippable / non-grippable(obstacle)로 분류 (픽셀 bbox 기반).
 
+    Deformable 물체 (이름에 towel, cloth 등 포함)는 bbox가 커도 grippable로 분류.
+
     Args:
         detections: {name: {"position": [...], "bbox_px": (w,h), ...}}
         gripper_max_px: 그리퍼 최대 열림 폭 (pixels)
@@ -273,6 +279,10 @@ def classify_objects(
 
     for name, info in detections.items():
         if info is None:
+            continue
+        # Deformable 물체는 bbox 크기와 무관하게 grippable
+        if any(kw in name.lower() for kw in DEFORMABLE_KEYWORDS):
+            grippable[name] = info
             continue
         bbox_px = info.get("bbox_px")
         if is_grippable(bbox_px, gripper_max_px):

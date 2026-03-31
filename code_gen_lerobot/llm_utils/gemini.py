@@ -2,91 +2,99 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, NotFound, TooManyRequests
+from google import genai
+from google.genai import types
 
-# Vertex AI 설정 (환경변수로 override 가능)
-PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
-LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
+# Google AI Studio API Key (환경변수로 override 가능)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyB3TOzSB55WDAvhGqYjXQn_rLxLsCUFbaE")
 
 MAX_RETRIES = 10
 RETRY_DELAY = 60  # seconds (fixed interval)
 GEMINI3_DEFAULT_THINKING_BUDGET = 10000  # Gemini 3 thinking 토큰 제한 (기본 10K)
 
-_initialized = False
-_initialized_location = None
+# Singleton client
+_client: Optional[genai.Client] = None
 
 
-def _make_gen_config(model: str, temperature: float = 0.0, **kwargs) -> GenerationConfig:
-    """GenerationConfig 생성. Gemini 3 모델은 thinking budget 자동 적용."""
-    gen_config = GenerationConfig(temperature=temperature, **kwargs)
+def _get_client() -> genai.Client:
+    """Google AI Studio client 싱글톤."""
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=GOOGLE_API_KEY)
+    return _client
+
+
+def _make_gen_config(model: str, temperature: float = 0.0, **kwargs) -> types.GenerateContentConfig:
+    """GenerateContentConfig 생성. Gemini 3 모델은 thinking budget 자동 적용."""
+    config_kwargs = {"temperature": temperature}
+
     if "gemini-3" in model.lower():
-        budget = GEMINI3_DEFAULT_THINKING_BUDGET
-        gen_config._raw_generation_config.thinking_config.thinking_budget = budget
-    return gen_config
+        config_kwargs["thinking_config"] = types.ThinkingConfig(
+            thinking_budget=GEMINI3_DEFAULT_THINKING_BUDGET
+        )
+
+    # stop_sequences 처리
+    if "stop_sequences" in kwargs and kwargs["stop_sequences"]:
+        config_kwargs["stop_sequences"] = kwargs["stop_sequences"]
+
+    return types.GenerateContentConfig(**config_kwargs)
 
 
-def _get_location_for_model(model: str) -> str:
-    """모델에 따라 적절한 Vertex AI location 반환.
+def _load_image(image_path: str):
+    """이미지 파일을 로드하여 Part로 변환."""
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
 
-    Gemini 3.0 preview 모델은 global endpoint만 지원.
-    """
-    if "gemini-3" in model.lower():
-        return "global"
-    return os.getenv("VERTEX_LOCATION", "us-central1")
+    # 확장자로 MIME 타입 결정
+    ext = image_path.lower().rsplit(".", 1)[-1] if "." in image_path else "jpg"
+    mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}
+    mime_type = mime_map.get(ext, "image/jpeg")
 
-
-def _ensure_init(location: str = None):
-    """Vertex AI 초기화. location이 바뀌면 재초기화."""
-    global _initialized, _initialized_location
-    target_location = location or LOCATION
-    if not _initialized or _initialized_location != target_location:
-        vertexai.init(project=PROJECT_ID, location=target_location)
-        _initialized = True
-        _initialized_location = target_location
+    return types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
 
 def _build_contents(turn: Dict) -> list:
-    """턴 dict에서 Gemini API contents 리스트 구성.
+    """턴 dict에서 API contents 리스트 구성.
 
     지원하는 키:
         text: 프롬프트 텍스트 (필수)
         image_path: 단일 이미지 경로 (옵션)
-        image_paths: 복수 이미지 경로 리스트 (옵션, CAD 등)
+        image_paths: 복수 이미지 경로 리스트 (옵션)
     """
     contents = [turn["text"]]
     if turn.get("image_path"):
-        contents.append(Part.from_image(Image.load_from_file(turn["image_path"])))
+        contents.append(_load_image(turn["image_path"]))
     for img_path in turn.get("image_paths", []):
-        contents.append(Part.from_image(Image.load_from_file(img_path)))
+        contents.append(_load_image(img_path))
     return contents
 
 
-def _send_with_retry(chat, contents, generation_config,
-                     max_retries=MAX_RETRIES):
-    """Rate limit (429) / Service Unavailable (503) / NotFound (404, preview 모델 간헐적) 시 exponential backoff 재시도."""
+def _send_with_retry(chat, contents, config, max_retries=MAX_RETRIES):
+    """Rate limit / Service Unavailable 시 재시도."""
+    from google.genai.errors import ClientError, ServerError
+
     for attempt in range(max_retries + 1):
         try:
-            return chat.send_message(contents,
-                                     generation_config=generation_config)
-        except (ResourceExhausted, TooManyRequests, ServiceUnavailable, NotFound) as e:
+            return chat.send_message(contents, config=config)
+        except (ClientError, ServerError) as e:
+            err_str = str(e)
             if attempt == max_retries:
                 raise
-            delay = RETRY_DELAY
-            if isinstance(e, (ResourceExhausted, TooManyRequests)):
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                 err_type = "Rate limit (429)"
-            elif isinstance(e, NotFound):
-                err_type = "404 NotFound (preview model intermittent)"
-            else:
+            elif "503" in err_str or "UNAVAILABLE" in err_str:
                 err_type = "503 Unavailable"
-            print(f"  [{err_type}] Waiting {delay}s before retry "
+            elif "404" in err_str:
+                err_type = "404 NotFound"
+            else:
+                raise  # 재시도 불가능한 에러
+            print(f"  [{err_type}] Waiting {RETRY_DELAY}s before retry "
                   f"({attempt + 1}/{max_retries})...")
-            time.sleep(delay)
+            time.sleep(RETRY_DELAY)
 
 
 # ============================================================
-# Dynamic chat session API (신규)
+# Dynamic chat session API
 # ============================================================
 
 def gemini_chat_start(
@@ -97,38 +105,37 @@ def gemini_chat_start(
 ) -> Tuple:
     """Chat 세션 시작. (chat, gen_config) 튜플 반환.
 
-    이후 gemini_chat_send()로 턴을 하나씩 전송할 수 있음.
-
     Args:
         model: Gemini 모델 이름
         system_prompt: 시스템 프롬프트
         temperature: 샘플링 온도
         thinking_budget: thinking 토큰 제한 (Gemini 3 전용).
-            None이면 Gemini 3 모델은 기본 15000 적용, 그 외 모델은 미적용.
 
     Returns:
         (chat_session, generation_config) 튜플
     """
-    location = _get_location_for_model(model)
-    _ensure_init(location)
+    client = _get_client()
 
-    gemini_model = GenerativeModel(
-        model,
-        system_instruction=system_prompt if system_prompt else None,
-    )
-    chat = gemini_model.start_chat()
+    config = _make_gen_config(model, temperature=temperature)
 
-    # Gemini 3: thinking_budget 파라미터 우선, 없으면 기본값 자동 적용
+    # thinking_budget 파라미터 우선
     if "gemini-3" in model.lower() and thinking_budget is not None:
-        gen_config = _make_gen_config(model, temperature=temperature)
-        gen_config._raw_generation_config.thinking_config.thinking_budget = thinking_budget
-    else:
-        gen_config = _make_gen_config(model, temperature=temperature)
+        config.thinking_config = types.ThinkingConfig(thinking_budget=thinking_budget)
 
     if "gemini-3" in model.lower():
-        print(f"[GEMINI] Thinking budget: {gen_config._raw_generation_config.thinking_config.thinking_budget} tokens")
+        budget = config.thinking_config.thinking_budget if config.thinking_config else "N/A"
+        print(f"[GEMINI] Thinking budget: {budget} tokens")
 
-    return chat, gen_config
+    chat = client.chats.create(
+        model=model,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt if system_prompt else None,
+            temperature=temperature,
+            thinking_config=config.thinking_config if hasattr(config, 'thinking_config') and config.thinking_config else None,
+        ),
+    )
+
+    return chat, config
 
 
 def gemini_chat_send(
@@ -142,18 +149,18 @@ def gemini_chat_send(
 
     Args:
         chat: gemini_chat_start()에서 반환된 chat 객체
-        gen_config: gemini_chat_start()에서 반환된 GenerationConfig
+        gen_config: gemini_chat_start()에서 반환된 config (unused, 호환용)
         turn: {"text": str, "image_path": str|None, "image_paths": list|None}
         check_time: 시간 출력 여부
-        turn_label: 로그에 표시할 턴 라벨 (예: "Turn 0", "Crop: male hinge")
+        turn_label: 로그에 표시할 턴 라벨
 
     Returns:
-        LLM 응답 텍스트. usage_metadata는 resp._last_usage에 저장.
+        LLM 응답 텍스트
     """
     start_time = time.time()
 
     contents = _build_contents(turn)
-    resp = _send_with_retry(chat, contents, gen_config)
+    resp = _send_with_retry(chat, contents, None)
 
     elapsed = time.time() - start_time
 
@@ -161,16 +168,11 @@ def gemini_chat_send(
     usage_dict = {"inference_time": elapsed, "in": 0, "out": 0, "think": 0, "total": 0}
     try:
         usage = resp.usage_metadata
-        if hasattr(usage, 'prompt_token_count') and usage.prompt_token_count:
-            usage_dict["in"] = usage.prompt_token_count
-        if hasattr(usage, 'candidates_token_count') and usage.candidates_token_count:
-            usage_dict["out"] = usage.candidates_token_count
-        if hasattr(usage, 'thoughts_token_count') and usage.thoughts_token_count:
-            usage_dict["think"] = usage.thoughts_token_count
-        elif hasattr(usage, 'thinking_token_count') and usage.thinking_token_count:
-            usage_dict["think"] = usage.thinking_token_count
-        if hasattr(usage, 'total_token_count') and usage.total_token_count:
-            usage_dict["total"] = usage.total_token_count
+        if usage:
+            usage_dict["in"] = getattr(usage, 'prompt_token_count', 0) or 0
+            usage_dict["out"] = getattr(usage, 'candidates_token_count', 0) or 0
+            usage_dict["think"] = getattr(usage, 'thoughts_token_count', 0) or getattr(usage, 'thinking_token_count', 0) or 0
+            usage_dict["total"] = getattr(usage, 'total_token_count', 0) or 0
     except Exception:
         pass
 
@@ -182,9 +184,7 @@ def gemini_chat_send(
         token_str = f" ({', '.join(parts)})" if parts else ""
         print(f"[GEMINI/Chat]{label}{img_str}: {elapsed:.2f}s{token_str}")
 
-    # 마지막 usage를 접근 가능하게 저장
     gemini_chat_send._last_usage = usage_dict
-
     return resp.text
 
 # 초기화
@@ -192,12 +192,12 @@ gemini_chat_send._last_usage = None
 
 
 # ============================================================
-# 기존 API (하위호환)
+# 단일 호출 API (하위호환)
 # ============================================================
 
 def gemini_response(
     prompt: str,
-    model: str = "gemini-2.0-flash",
+    model: str = "gemini-2.5-flash",
     temperature: float = 0.0,
     stop_sequences: list = None,
     check_time: bool = True,
@@ -206,56 +206,67 @@ def gemini_response(
     timeout: float = 120.0,
     return_usage: bool = False,
 ):
-    _ensure_init(_get_location_for_model(model))
+    client = _get_client()
 
     start_time = time.time()
 
-    gemini_model = GenerativeModel(
-        model,
-        system_instruction=system_prompt if system_prompt else None,
-    )
-
-    # 멀티모달 입력 구성: 텍스트 + (옵션) 이미지
+    # contents 구성
     contents = [prompt]
     if image_path:
-        contents.append(Part.from_image(Image.load_from_file(image_path)))
+        contents.append(_load_image(image_path))
 
-    stop = [s for s in stop_sequences if s] or None if stop_sequences else None
-    gen_config = _make_gen_config(model, temperature=temperature, stop_sequences=stop)
+    # config 구성
+    config_kwargs = {"temperature": temperature}
+    if system_prompt:
+        config_kwargs["system_instruction"] = system_prompt
+    if stop_sequences:
+        filtered = [s for s in stop_sequences if s]
+        if filtered:
+            config_kwargs["stop_sequences"] = filtered
+    if "gemini-3" in model.lower():
+        config_kwargs["thinking_config"] = types.ThinkingConfig(
+            thinking_budget=GEMINI3_DEFAULT_THINKING_BUDGET
+        )
 
-    # Retry with backoff for 429 (quota exhausted) errors
-    MAX_RETRIES = 5
+    config = types.GenerateContentConfig(**config_kwargs)
+
+    # Retry with backoff
+    from google.genai.errors import ClientError, ServerError
     import concurrent.futures
-    for attempt in range(MAX_RETRIES):
+
+    MAX_RETRIES_LOCAL = 5
+    for attempt in range(MAX_RETRIES_LOCAL):
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
-                gemini_model.generate_content,
-                contents,
-                generation_config=gen_config,
+                client.models.generate_content,
+                model=model,
+                contents=contents,
+                config=config,
             )
             try:
                 response = future.result(timeout=timeout)
-                break  # 성공 시 루프 탈출
+                break
             except concurrent.futures.TimeoutError:
                 elapsed = time.time() - start_time
                 raise TimeoutError(
                     f"[GEMINI] {model} did not respond within {timeout}s (elapsed: {elapsed:.1f}s)"
                 )
-            except Exception as e:
-                if "429" in str(e) or "Resource has been exhausted" in str(e):
-                    wait_time = 2 ** attempt * 5  # 5s, 10s, 20s, 40s, 80s
-                    print(f"[GEMINI] Rate limit (429). Retrying in {wait_time}s... (attempt {attempt+1}/{MAX_RETRIES})")
+            except (ClientError, ServerError) as e:
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    wait_time = 2 ** attempt * 5
+                    print(f"[GEMINI] Rate limit (429). Retrying in {wait_time}s... (attempt {attempt+1}/{MAX_RETRIES_LOCAL})")
                     time.sleep(wait_time)
-                    if attempt == MAX_RETRIES - 1:
-                        raise  # 마지막 시도도 실패하면 예외 전파
+                    if attempt == MAX_RETRIES_LOCAL - 1:
+                        raise
                 else:
-                    raise  # 429 외 에러는 즉시 전파
+                    raise
 
     elapsed = time.time() - start_time
     if check_time:
         has_image = " + image" if image_path else ""
         has_system = " + system_prompt" if system_prompt else ""
-        print(f"[GEMINI/VertexAI] Model: {model}{has_system}{has_image}, Response time: {elapsed:.2f}s")
+        print(f"[GEMINI/AI Studio] Model: {model}{has_system}{has_image}, Response time: {elapsed:.2f}s")
 
     if return_usage:
         usage = {}
@@ -279,48 +290,19 @@ def gemini_chat(
     temperature: float = 0.0,
     check_time: bool = True,
 ) -> List[str]:
-    """
-    멀티턴 Gemini chat session
-
-    Args:
-        model: Gemini 모델 이름 (예: "gemini-2.0-flash")
-        system_prompt: 시스템 프롬프트 (전체 session에 고정)
-        turns: 턴 리스트, 각 턴은 {"text": str, "image_path": str|None}
-        temperature: 샘플링 온도
-        check_time: 시간 출력 여부
-
-    Returns:
-        각 턴별 LLM 응답 문자열 리스트
-    """
-    location = _get_location_for_model(model)
-    _ensure_init(location)
-
+    """멀티턴 Gemini chat session (하위호환)"""
     start_time = time.time()
 
-    gemini_model = GenerativeModel(
-        model,
-        system_instruction=system_prompt if system_prompt else None,
-    )
-    chat = gemini_model.start_chat()
+    chat, config = gemini_chat_start(model, system_prompt=system_prompt, temperature=temperature)
 
-    generation_config = _make_gen_config(model, temperature=temperature)
     responses = []
-
     for i, turn in enumerate(turns):
-        turn_start = time.time()
-
-        contents = _build_contents(turn)
-        resp = _send_with_retry(chat, contents, generation_config)
-        responses.append(resp.text)
-
-        if check_time:
-            turn_elapsed = time.time() - turn_start
-            n_images = (1 if turn.get("image_path") else 0) + len(turn.get("image_paths", []))
-            img_str = f" + {n_images} image(s)" if n_images > 0 else ""
-            print(f"[GEMINI/Chat] Turn {i+1}/{len(turns)}{img_str}: {turn_elapsed:.2f}s")
+        resp_text = gemini_chat_send(chat, config, turn, check_time=check_time,
+                                      turn_label=f"Turn {i+1}/{len(turns)}")
+        responses.append(resp_text)
 
     if check_time:
-        total_inference_time = time.time() - start_time
-        print(f"[GEMINI/Chat] Total ({len(turns)} turns): {total_inference_time:.2f}s")
+        total = time.time() - start_time
+        print(f"[GEMINI/Chat] Total ({len(turns)} turns): {total:.2f}s")
 
     return responses

@@ -920,7 +920,13 @@ class LeRobotSkills:
                 from record_dataset.context import RecordingContext
                 if RecordingContext.is_active() and RecordingContext._camera_manager is not None:
                     cm = RecordingContext._camera_manager
-                    camera_to_use = cm.get_camera("realsense")
+                    # Try common names: "top" (grouped YAML) or "realsense" (flat YAML)
+                    for cam_name in ["top", "realsense"]:
+                        try:
+                            camera_to_use = cm.get_camera(cam_name)
+                            break
+                        except KeyError:
+                            continue
             except Exception:
                 pass
         if camera_to_use is None:

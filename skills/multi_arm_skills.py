@@ -731,6 +731,10 @@ class MultiArmSkills:
     # because each waypoint segment is a very short distance)
     FOLD_WAYPOINT_DURATION = 2.0
 
+    # Torque limit for fold compliance (0-1000, lower = more compliant)
+    FOLD_TORQUE_LIMIT = 400
+    DEFAULT_TORQUE_LIMIT = 1000
+
     def bimanual_fold(
         self,
         left_start,
@@ -739,6 +743,7 @@ class MultiArmSkills:
         right_end,
         arc_height: float = 0.20,
         num_points: int = 8,
+        compliant: bool = True,
         left_skill_description: Optional[str] = None,
         right_skill_description: Optional[str] = None,
         left_verification_question: Optional[str] = None,
@@ -752,6 +757,9 @@ class MultiArmSkills:
         target (FOLD_RELEASE_HEIGHT) to avoid fabric compression — call
         place_object afterwards for the final descent and release.
 
+        When compliant=True, torque limits are lowered during fold so
+        the arms yield when fabric becomes taut instead of fighting it.
+
         Args:
             left_start: [x,y,z] grasp position for left arm.
             right_start: [x,y,z] grasp position for right arm.
@@ -759,6 +767,7 @@ class MultiArmSkills:
             right_end: [x,y,z] fold target position for right arm.
             arc_height: Peak height of the arc above start z (meters, default 0.20).
             num_points: Number of waypoints along the arc (default 8).
+            compliant: Lower torque limit during fold for compliance (default True).
         """
         import numpy as np
 
@@ -770,7 +779,16 @@ class MultiArmSkills:
         base_z = max(left_start[2], right_start[2])
         release_z = max(left_end[2], right_end[2]) + self.FOLD_RELEASE_HEIGHT
 
-        self._log(f"[bimanual_fold] arc_height={arc_height:.2f}m, release_z={release_z:.3f}m, {num_points} waypoints")
+        self._log(f"[bimanual_fold] arc_height={arc_height:.2f}m, release_z={release_z:.3f}m, "
+                  f"{num_points} waypoints, compliant={compliant}")
+
+        # Lower torque for compliance during fold
+        if compliant and self.left_arm.robot and self.right_arm.robot:
+            # Arm joints (1-5) get lower torque; gripper (6) keeps full torque to hold object
+            arm_motor_ids = list(range(1, 6))  # motors 1-5 (arm only)
+            self.left_arm.robot.set_torque_limit(self.FOLD_TORQUE_LIMIT, motor_ids=arm_motor_ids)
+            self.right_arm.robot.set_torque_limit(self.FOLD_TORQUE_LIMIT, motor_ids=arm_motor_ids)
+            self._log(f"  Compliance ON: arm torque={self.FOLD_TORQUE_LIMIT}/1000, gripper=full")
 
         left_desc = left_skill_description or "fold (left)"
         right_desc = right_skill_description or "fold (right)"
@@ -780,31 +798,39 @@ class MultiArmSkills:
         # (Cannot mix coordinates — each arm has its own base_link frame.)
 
         last_result = {"left": True, "right": True}
-        for i in range(num_points):
-            t = (i + 1) / num_points  # 0 → 1
-            theta = np.pi * t         # 0 → π
+        try:
+            for i in range(num_points):
+                t = (i + 1) / num_points  # 0 → 1
+                theta = np.pi * t         # 0 → π
 
-            # x, y: linear interpolation per arm (each in own frame)
-            left_xy = left_start[:2] + (left_end[:2] - left_start[:2]) * t
-            right_xy = right_start[:2] + (right_end[:2] - right_start[:2]) * t
+                # x, y: linear interpolation per arm (each in own frame)
+                left_xy = left_start[:2] + (left_end[:2] - left_start[:2]) * t
+                right_xy = right_start[:2] + (right_end[:2] - right_start[:2]) * t
 
-            # z: sin arc, but floor at release_z (never descend below release height)
-            z_arc = base_z + arc_height * np.sin(theta)
-            z = max(z_arc, release_z)
+                # z: sin arc, but floor at release_z (never descend below release height)
+                z_arc = base_z + arc_height * np.sin(theta)
+                z = max(z_arc, release_z)
 
-            left_wp = [float(left_xy[0]), float(left_xy[1]), float(z)]
-            right_wp = [float(right_xy[0]), float(right_xy[1]), float(z)]
+                left_wp = [float(left_xy[0]), float(left_xy[1]), float(z)]
+                right_wp = [float(right_xy[0]), float(right_xy[1]), float(z)]
 
-            step_desc = f"({i+1}/{num_points})"
-            last_result = self.bimanual_move(
-                left_arm=left_wp,
-                right_arm=right_wp,
-                duration=self.FOLD_WAYPOINT_DURATION,
-                left_skill_description=f"{left_desc} {step_desc}",
-                right_skill_description=f"{right_desc} {step_desc}",
+                step_desc = f"({i+1}/{num_points})"
+                last_result = self.bimanual_move(
+                    left_arm=left_wp,
+                    right_arm=right_wp,
+                    duration=self.FOLD_WAYPOINT_DURATION,
+                    left_skill_description=f"{left_desc} {step_desc}",
+                    right_skill_description=f"{right_desc} {step_desc}",
                 left_verification_question=left_verification_question,
-                right_verification_question=right_verification_question,
-            )
+                    right_verification_question=right_verification_question,
+                )
+        finally:
+            # Restore full torque after fold (always, even on error)
+            if compliant and self.left_arm.robot and self.right_arm.robot:
+                arm_motor_ids = list(range(1, 6))
+                self.left_arm.robot.set_torque_limit(self.DEFAULT_TORQUE_LIMIT, motor_ids=arm_motor_ids)
+                self.right_arm.robot.set_torque_limit(self.DEFAULT_TORQUE_LIMIT, motor_ids=arm_motor_ids)
+                self._log(f"  Compliance OFF: torque restored to {self.DEFAULT_TORQUE_LIMIT}/1000")
 
         return last_result
 

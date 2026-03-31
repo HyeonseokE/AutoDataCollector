@@ -61,7 +61,7 @@ class ResetJudge:
                 if use_server:
                     print("[ResetJudge] Using SSH server for VLM inference")
                 else:
-                    print(f"[ResetJudge] Using Vertex AI Gemini ({model})")
+                    print(f"[ResetJudge] Using Google AI Studio Gemini ({model})")
         else:
             try:
                 from openai import OpenAI

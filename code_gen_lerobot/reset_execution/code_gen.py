@@ -683,7 +683,12 @@ def lerobot_reset_code_gen_multi_turn(
 
     # ── Step 2: Gemini chat 시작 ──
     print(f"\n{YELLOW}" + _log("Starting Gemini chat", step="Chat") + f"{RESET_COLOR}")
-    chat, gen_config = gemini_chat_start(llm_model, system_prompt=PERCEPTION_SYSTEM_PROMPT)
+    if robot_ids and len(robot_ids) >= 2:
+        from ..multi_arm.forward_execution.system_prompt import MULTI_ARM_PERCEPTION_SYSTEM_PROMPT
+        perception_sp = MULTI_ARM_PERCEPTION_SYSTEM_PROMPT
+    else:
+        perception_sp = PERCEPTION_SYSTEM_PROMPT
+    chat, gen_config = gemini_chat_start(llm_model, system_prompt=perception_sp)
 
     # ── Turn 0: Scene Understanding ──
     print(f"\n{YELLOW}" + _log("Turn 0 — Scene Understanding", step="Turn0") + f"{RESET_COLOR}")
@@ -953,10 +958,12 @@ def lerobot_reset_code_gen_multi_turn(
             codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=MULTI_ARM_CODEGEN_RESET_SYSTEM_PROMPT)
 
             # Build dual-arm current positions (pixel → per-arm robot frame)
-            current_dual = {
-                "left_arm": _points_to_positions(all_points, robot_id=robot_ids[0], camera=camera, valid_objects=valid_objects),
-                "right_arm": _points_to_positions(all_points, robot_id=robot_ids[1], camera=camera, valid_objects=valid_objects),
-            }
+            # Only include grippable objects (exclude obstacles like large containers)
+            grippable_names = set(grippable_objects.keys())
+            current_dual = {}
+            for arm_key, rid in [("left_arm", robot_ids[0]), ("right_arm", robot_ids[1])]:
+                arm_pos = _points_to_positions(all_points, robot_id=rid, camera=camera, valid_objects=valid_objects)
+                current_dual[arm_key] = {k: v for k, v in arm_pos.items() if k in grippable_names}
 
             # Build dual-arm target positions from original per-arm data.
             # target_positions is flat {obj: info}, but codegen needs per-arm coordinates.
@@ -981,6 +988,7 @@ def lerobot_reset_code_gen_multi_turn(
                 robot_ids=robot_ids,
                 instruction=original_instruction,
                 context_summary=summary_resp,
+                all_points=all_points,
             )
 
             # Generate per-arm workspace images

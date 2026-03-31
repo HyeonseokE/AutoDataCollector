@@ -65,6 +65,11 @@ You are given **two images**:
 1. **Image 1 (Current state)** — the workspace AFTER the forward task "{original_instruction}" was executed.
 2. **Image 2 (Initial state)** — the workspace BEFORE the forward task was executed.
 
+This is a **bi-arm** robot setup:
+- **Left arm** is visible at the middle-left edge of the image.
+- **Right arm** is visible at the middle-right edge of the image.
+- The center of the table is reachable by both arms (overlap zone).
+
 {workspace_desc}
 
 {mode_desc}
@@ -72,10 +77,14 @@ You are given **two images**:
 
 Analyze the scene and describe:
 1. **Object identification**: What objects are visible in both images? Describe each object's color, shape, and approximate size.
-2. **Change analysis**: Compare Image 1 vs Image 2. Which objects changed position? Where were they before, and where are they now?
-3. **Reset plan**: Which objects need to be moved for the reset? In what order should they be moved?
+2. **Change analysis**: Compare Image 1 vs Image 2. Which objects changed position/state? Where were they before, and where are they now?
+3. **Arm assignment**: For each object that needs to be moved, which arm(s) should handle it?
+   - Objects on the left half → left arm
+   - Objects on the right half → right arm
+   - Objects in the center or large deformable objects (towel, cloth) → **both arms**
+4. **Reset plan**: Which objects need to be moved for the reset? In what order should they be moved? For deformable objects like towels, consider whether both arms are needed to unfold/restore the shape.
 
 **Important**:
 - This is a scene understanding step ONLY.
 - Do NOT generate any code, numeric coordinates, or step-by-step execution plans.
-- Focus purely on visual observation and spatial analysis."""
+- Focus purely on visual observation, spatial analysis, and arm assignment."""

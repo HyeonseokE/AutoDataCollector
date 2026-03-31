@@ -8,7 +8,7 @@ codegen_llm_model: "gemini-3-flash-preview"
 
 # Code Generation Session 2 모델 (context handoff 후 코드 생성 전용)
 # Session 1의 누적 컨텍스트 없이 요약 + API doc만으로 코드 생성
-codegen_session2_model: "gemini-2.5-flash"
+codegen_session2_model: "gemini-3-flash-preview"
 
 # Judge VLM 모델
 # 예: gpt-4o, gpt-4o-mini

@@ -285,9 +285,12 @@ class UnifiedMultiArmPipeline:
             )
             print(f"[Recording] Recorder initialized (12-axis ALOHA format)")
 
-            # 3. MultiArmRecorder will be created after skills.connect()
+            # 5. MultiArmRecorder will be created after skills.connect()
             # (needs multi_arm instance which is created later)
             self._multi_arm_recorder: Optional['MultiArmRecorder'] = None
+
+            # 6. Signal handler: Ctrl+C 시 finalize() 호출하여 meta/episodes/ 보존
+            self._install_recording_signal_handler()
 
         except AssertionError:
             raise
@@ -297,6 +300,32 @@ class UnifiedMultiArmPipeline:
             traceback.print_exc()
             self.record_dataset = False
             self.dataset_recorder = None
+
+    def _install_recording_signal_handler(self) -> None:
+        """Ctrl+C 시 데이터셋 finalize() 호출을 보장하는 signal handler 등록."""
+        import signal
+
+        original_handler = signal.getsignal(signal.SIGINT)
+
+        def _handle_sigint(signum, frame):
+            print(f"\n[Recording] SIGINT received — finalizing dataset...")
+            self._finalize_recording()
+            signal.signal(signal.SIGINT, original_handler)
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGINT, _handle_sigint)
+        print(f"[Recording] Signal handler installed (Ctrl+C will finalize dataset)")
+
+    def _finalize_recording(self) -> None:
+        """데이터셋 finalize (signal handler, _finalize_session 양쪽에서 호출)."""
+        if self.dataset_recorder:
+            try:
+                self.dataset_recorder.finalize()
+                print(f"[Recording] Dataset finalized: {self.dataset_recorder.repo_id}")
+            except Exception as e:
+                print(f"[Recording] Finalize error: {e}")
+                import traceback
+                traceback.print_exc()
 
     def _start_episode_recording(self, task: str) -> None:
         """에피소드 레코딩 시작 (single-arm과 동일)."""
@@ -327,15 +356,19 @@ class UnifiedMultiArmPipeline:
         self,
         instruction: str,
         image_path: str,
+        skip_codegen: bool = False,
+        canonical_labels: list = None,
+        canonical_point_labels: dict = None,
     ) -> str:
-        """Generate forward code via multi-turn VLM (single-arm 패턴 차용).
+        """Generate forward code via multi-turn VLM.
 
-        lerobot_code_gen_multi_turn()를 직접 호출.
-        Detection은 VLM Turn 1~2에서 내부적으로 처리됨.
+        Args:
+            skip_codegen: True면 T0~T2(검출)만 수행, T3(코드생성) 스킵 (코드 재활용 시).
+            canonical_labels: 이전 에피소드에서 검출된 물체 라벨 (강제 사용).
+            canonical_point_labels: 이전 에피소드에서 사용된 포인트 라벨.
         """
         from code_gen_lerobot.code_gen_with_skill import lerobot_code_gen_multi_turn
 
-        # depth 기반 3D 좌표 변환을 위해 카메라 전달
         active_camera = None
         if self.camera_manager and self.camera_manager.is_connected:
             try:
@@ -349,7 +382,7 @@ class UnifiedMultiArmPipeline:
             instruction=instruction,
             image_path=image_path,
             llm_model=self.llm_model,
-            robot_id=self.robot_ids[0],  # primary robot for coordinate transform
+            robot_id=self.robot_ids[0],
             current_episode=self.current_episode,
             total_episodes=self.total_episodes,
             fallback_positions={},
@@ -360,6 +393,9 @@ class UnifiedMultiArmPipeline:
             task_type=self.task_type,
             skip_turn_test=self.skip_turn_test,
             robot_ids=self.robot_ids,
+            skip_codegen=skip_codegen,
+            canonical_labels=canonical_labels,
+            canonical_point_labels=canonical_point_labels,
         )
 
         # multi-turn 정보 저장
@@ -754,6 +790,73 @@ class UnifiedMultiArmPipeline:
         # 5. Turn text logs
         self._save_turn_logs(forward_dir, mt_info)
 
+    def _save_reset_multi_turn_artifacts(self, reset_dir: str, reset_image=None) -> None:
+        """Save reset multi-turn VLM artifacts (same as forward but from reset_multi_turn_info)."""
+        reset_mt = getattr(self, 'reset_multi_turn_info', None)
+        if not reset_mt:
+            return
+
+        rst = Path(reset_dir)
+        import json as _json
+
+        # 1. multi_turn_info.json
+        mt_save = {k: v for k, v in reset_mt.items() if k != "crop_dir"}
+        with open(rst / "multi_turn_info.json", 'w', encoding='utf-8') as f:
+            _json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
+        print(f"  Reset multi-turn info saved: {rst / 'multi_turn_info.json'}")
+
+        # 2. LLM cost
+        llm_cost = reset_mt.get("llm_cost")
+        if llm_cost:
+            with open(rst / "llm_cost.json", 'w') as f:
+                _json.dump({"phase": "reset", **llm_cost}, f, indent=2)
+            print(f"  Reset LLM cost saved: {rst / 'llm_cost.json'}")
+
+        # 3. Turn visualization images
+        if reset_image is not None:
+            t1_parsed = reset_mt.get("turn1_parsed")
+            all_pts = reset_mt.get("all_points", [])
+
+            try:
+                from execution_forward_and_reset import ForwardAndResetPipeline
+                dummy = object.__new__(ForwardAndResetPipeline)
+
+                if t1_parsed:
+                    dummy._visualize_turn1(
+                        reset_image.copy(), t1_parsed,
+                        str(rst / "turn1_detection.jpg"),
+                    )
+
+                if t1_parsed and all_pts:
+                    r_img_h, r_img_w = reset_image.shape[:2]
+                    t2_compat = {"grasp_points": [
+                        {"object_name": p["object_label"], "label": p["label"],
+                         "role": p["role"],
+                         "point_pixel": [
+                             int(p["py"] * 1000 / r_img_h),
+                             int(p["px"] * 1000 / r_img_w),
+                         ]}
+                        for p in all_pts
+                    ]}
+                    dummy._visualize_turn2(
+                        reset_image.copy(), t1_parsed, t2_compat,
+                        str(rst / "turn2_grasp_points.jpg"),
+                    )
+            except Exception as e:
+                print(f"  [Warning] Reset turn visualization failed: {e}")
+
+        # 4. Crop images
+        crop_dir = reset_mt.get("crop_dir")
+        if crop_dir and os.path.isdir(crop_dir):
+            import shutil
+            for fname in sorted(os.listdir(crop_dir)):
+                if fname.endswith(('.jpg', '.png')):
+                    shutil.copy2(os.path.join(crop_dir, fname), os.path.join(reset_dir, fname))
+            print(f"  Reset crop images saved to: {reset_dir}")
+
+        # 5. Turn text logs
+        self._save_turn_logs(reset_dir, reset_mt)
+
     def _save_turn_logs(self, forward_dir: str, mt_info: Dict) -> None:
         """Save per-turn text logs."""
         fwd = Path(forward_dir)
@@ -927,10 +1030,36 @@ class UnifiedMultiArmPipeline:
                 cv2.imwrite(str(Path(forward_dir) / "initial_state.jpg"), initial_image)
                 print(f"  Image captured ({initial_image.shape[1]}x{initial_image.shape[0]})")
 
-            # Step 2: Code generation (detection is handled by VLM Turn 1~2 internally)
-            print(f"\n{YELLOW}" + self._log(f"Generating forward code via multi-turn VLM...", step="Step 2/4") + f"{RESET_COLOR}")
+            # Step 2: Code generation (with reuse if cached code exists)
             image_path = str(Path(forward_dir) / "initial_state.jpg")
-            code = self._generate_forward_code(instruction, image_path)
+
+            if self.cached_forward_code is not None:
+                # Reuse: T0~T2 only (detection), skip T3 (codegen)
+                print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code)...", step="Step 2/4") + f"{RESET_COLOR}")
+                self._generate_forward_code(
+                    instruction, image_path,
+                    skip_codegen=True,
+                    canonical_labels=self.cached_forward_keys,
+                    canonical_point_labels=getattr(self, '_cached_point_labels', None),
+                )
+                # Verify keys match
+                detected_keys = set()
+                for arm_data in self.detected_positions.values():
+                    if isinstance(arm_data, dict):
+                        detected_keys.update(arm_data.keys())
+                if set(self.cached_forward_keys) <= detected_keys:
+                    code = self.cached_forward_code
+                    print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET_COLOR}")
+                else:
+                    missing = set(self.cached_forward_keys) - detected_keys
+                    print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET_COLOR}")
+                    self.cached_forward_code = None
+                    self.cached_forward_keys = []
+                    code = self._generate_forward_code(instruction, image_path)
+            else:
+                print(f"\n{YELLOW}" + self._log(f"Generating forward code via multi-turn VLM...", step="Step 2/4") + f"{RESET_COLOR}")
+                code = self._generate_forward_code(instruction, image_path)
+
             result['forward']['code'] = code
             result['forward']['positions'] = self.detected_positions
 
@@ -1011,6 +1140,17 @@ class UnifiedMultiArmPipeline:
             if final_image is not None:
                 cv2.imwrite(str(Path(forward_dir) / "final_state.jpg"), final_image)
 
+            # Save batch_info early (before judge) so resume can detect this episode
+            # Judge result will be updated after judge completes
+            episode_root = str(Path(forward_dir).parent)
+            batch_info = {
+                "batch_seed_index": getattr(self, '_current_batch_index', 0) + 1,
+                "slot": getattr(self, '_current_slot', 0),
+                "judge": "PENDING",
+            }
+            with open(Path(episode_root) / "batch_info.json", 'w') as f:
+                json.dump(batch_info, f, indent=2)
+
             # Step 4: Judge evaluation
             print(f"\n{YELLOW}" + self._log("Running judge evaluation...", step="Step 4/4") + f"{RESET_COLOR}")
             if initial_image is not None and final_image is not None:
@@ -1028,10 +1168,28 @@ class UnifiedMultiArmPipeline:
             if post_judge_callback:
                 post_judge_callback(result)
 
-            # Cache successful code
-            if execution_success and result['judge'].get('prediction') == 'TRUE':
+            # Cache successful code + object keys + point labels
+            judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+            should_cache = execution_success and judge_pred != 'FALSE'
+            if should_cache and self.cached_forward_code is None:
                 self.cached_forward_code = code
-                self.cached_forward_keys = self._extract_position_keys(code)
+                obj_keys = set()
+                point_labels = {}
+                if self.detected_positions:
+                    for arm_key in ["left_arm", "right_arm"]:
+                        arm_pos = self.detected_positions.get(arm_key, {})
+                        for obj_name, obj_info in arm_pos.items():
+                            obj_keys.add(obj_name)
+                            if obj_info and "points" in obj_info and obj_name not in point_labels:
+                                point_labels[obj_name] = list(obj_info["points"].keys())
+                self.cached_forward_keys = sorted(obj_keys)
+                self._cached_point_labels = point_labels if point_labels else None
+                print(f"  {GREEN}[CodeReuse] Forward code cached (keys: {self.cached_forward_keys}){RESET_COLOR}")
+            elif not execution_success:
+                if self.cached_forward_code is not None:
+                    print(f"  {YELLOW}[CodeReuse] Cache invalidated (execution failed){RESET_COLOR}")
+                self.cached_forward_code = None
+                self.cached_forward_keys = []
 
             # Save forward result + judge
             with open(Path(forward_dir) / "result.json", 'w') as f:
@@ -1063,6 +1221,17 @@ class UnifiedMultiArmPipeline:
             ]
             (Path(forward_dir) / "forward_log.txt").write_text("\n".join(fwd_log_lines), encoding="utf-8")
 
+            # Update batch_info.json with judge result (early save was PENDING)
+            judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+            episode_root = str(Path(forward_dir).parent)
+            batch_info = {
+                "batch_seed_index": getattr(self, '_current_batch_index', 0) + 1,
+                "slot": getattr(self, '_current_slot', 0),
+                "judge": judge_pred,
+            }
+            with open(Path(episode_root) / "batch_info.json", 'w') as f:
+                json.dump(batch_info, f, indent=2)
+
             # ══════════════════════════════════════
             # PHASE 2: RESET EXECUTION
             # ══════════════════════════════════════
@@ -1087,8 +1256,12 @@ class UnifiedMultiArmPipeline:
                 reset_image = self._capture_frame()
                 if reset_image is not None:
                     cv2.imwrite(str(Path(reset_dir) / "current_state.jpg"), reset_image)
-                    cv2.imwrite(str(Path(reset_dir) / "initial_state.jpg"), reset_image)
                     print(f"  Reset scene captured")
+                # initial_state = forward 시작 전 이미지 (되돌려야 할 상태)
+                import shutil
+                forward_initial = Path(forward_dir) / "initial_state.jpg"
+                if forward_initial.exists():
+                    shutil.copy2(str(forward_initial), str(Path(reset_dir) / "initial_state.jpg"))
                 reset_image_path = str(Path(reset_dir) / "current_state.jpg")
 
                 # Save reset positions
@@ -1112,6 +1285,9 @@ class UnifiedMultiArmPipeline:
 
                 with open(Path(reset_dir) / "generated_code.py", 'w') as f:
                     f.write(reset_code)
+
+                # Save reset multi-turn artifacts (turn logs, visualizations, crop images)
+                self._save_reset_multi_turn_artifacts(reset_dir, reset_image)
 
                 # Execute reset
                 print(f"\n{YELLOW}" + self._log("Executing reset code...") + f"{RESET_COLOR}")
@@ -1242,7 +1418,10 @@ class UnifiedMultiArmPipeline:
         for episode_idx in range(num_episodes):
             episode_num = episode_idx + 1
             batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
+            slot = episode_idx % episodes_per_seed
             self.current_episode = episode_num
+            self._current_batch_index = batch_index
+            self._current_slot = slot
 
             print(f"\n{CYAN}{'='*70}{RESET_COLOR}")
             print(f"{CYAN}{BOLD}  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1})  {RESET_COLOR}")
@@ -1250,6 +1429,8 @@ class UnifiedMultiArmPipeline:
 
             episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
             reset_target = seed_positions[batch_index]
+
+            slot = episode_idx % episodes_per_seed
 
             try:
                 result = self.run(
@@ -1262,6 +1443,10 @@ class UnifiedMultiArmPipeline:
                     skip_reset=skip_reset,
                     reset_target_positions=reset_target,
                 )
+
+                # Save batch_info.json
+                judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+                self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
 
                 # Store first episode positions for seed[0]
                 if seed_positions[0] is None and self.first_episode_positions is not None:
@@ -1303,6 +1488,82 @@ class UnifiedMultiArmPipeline:
         self._finalize_session(all_results, session_dir)
         return all_results
 
+    def _save_batch_info(self, episode_dir: str, batch_index: int, slot: int, judge_pred: str) -> None:
+        """batch_info.json 저장."""
+        bi = {"batch_seed_index": batch_index + 1, "slot": slot, "judge": judge_pred}
+        bi_path = Path(episode_dir) / "batch_info.json"
+        bi_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(bi_path, 'w') as f:
+            json.dump(bi, f, indent=2)
+
+    def _load_resume_state(self, session_dir: str):
+        """이전 세션에서 상태 복원 (batch_info.json 기반).
+
+        Returns:
+            (batch_slots, seed_positions): slot 성공 여부 + seed positions
+        """
+        episodes_per_seed = max(1, self.total_episodes // max(1, self.num_random_seeds))
+        batch_slots = [[False] * episodes_per_seed for _ in range(self.num_random_seeds)]
+        seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
+
+        # 1. first_episode_positions 복원
+        ctx_path = Path(session_dir) / "episode_01" / "forward" / "execution_context.json"
+        if ctx_path.exists():
+            with open(ctx_path) as f:
+                ctx = json.load(f)
+            self.first_episode_positions = ctx.get("object_positions", {})
+            seed_positions[0] = copy.deepcopy(self.first_episode_positions)
+            print(f"  [Resume] first_episode_positions restored")
+
+        # 2. batch_info.json 기반으로 slot별 성공 여부 파악
+        for ep_dir in sorted(Path(session_dir).glob("episode_*")):
+            bi_path = ep_dir / "batch_info.json"
+            if not bi_path.exists():
+                continue
+            with open(bi_path) as f:
+                bi = json.load(f)
+            batch_idx = bi.get("batch_seed_index", 1) - 1
+            slot = bi.get("slot", -1)
+            judge = bi.get("judge", "")
+            if 0 <= batch_idx < self.num_random_seeds and 0 <= slot < episodes_per_seed:
+                if judge == "TRUE":
+                    batch_slots[batch_idx][slot] = True
+
+        # 3. cached_forward_code 복원
+        for ep_dir in sorted(Path(session_dir).glob("episode_*"), reverse=True):
+            fwd_code = ep_dir / "forward" / "generated_code.py"
+            judge_json = ep_dir / "forward" / "judge_result.json"
+            if fwd_code.exists() and judge_json.exists():
+                with open(judge_json) as f:
+                    jr = json.load(f)
+                pred = jr.get("prediction", jr.get("judge_result", {}).get("prediction", ""))
+                if pred == "TRUE":
+                    self.cached_forward_code = fwd_code.read_text().strip()
+                    # Extract object keys from execution_context
+                    ec_path = ep_dir / "forward" / "execution_context.json"
+                    if ec_path.exists():
+                        with open(ec_path) as f:
+                            ec = json.load(f)
+                        obj_keys = set()
+                        point_labels = {}
+                        for arm_key in ["left_arm", "right_arm"]:
+                            arm_pos = ec.get("object_positions", {}).get(arm_key, {})
+                            for obj_name, obj_info in arm_pos.items():
+                                obj_keys.add(obj_name)
+                                if isinstance(obj_info, dict) and "points" in obj_info:
+                                    point_labels[obj_name] = list(obj_info["points"].keys())
+                        self.cached_forward_keys = sorted(obj_keys)
+                        self._cached_point_labels = point_labels if point_labels else None
+                    print(f"  [Resume] cached_forward_code restored")
+                    break
+
+        # 요약 출력
+        for i in range(self.num_random_seeds):
+            done = sum(batch_slots[i])
+            print(f"    Batch {i+1}: {done}/{episodes_per_seed}")
+
+        return batch_slots, seed_positions
+
     def resume_multiple_episodes(
         self,
         num_episodes: int,
@@ -1314,21 +1575,122 @@ class UnifiedMultiArmPipeline:
         save_dir: Optional[str] = None,
         skip_reset: bool = False,
     ) -> Dict:
-        """
-        Resume a previous session. Same interface as ForwardAndResetPipeline.
-        For now, delegates to run_multiple_episodes (full re-run).
-        TODO: Implement proper batch-level resume logic.
-        """
-        print(f"{YELLOW}[MultiArm] Resume not yet fully implemented, running fresh session{RESET_COLOR}")
-        return self.run_multiple_episodes(
-            num_episodes=num_episodes,
-            instruction=instruction,
-            objects=objects,
-            detection_timeout=detection_timeout,
-            visualize_detection=visualize_detection,
-            save_dir=save_dir or str(Path(resume_session_dir).parent),
-            skip_reset=skip_reset,
-        )
+        """Resume: 이전 세션의 미완료 에피소드만 재시도."""
+        self.total_episodes = num_episodes
+        self.instruction = instruction
+
+        session_dir = str(resume_session_dir)
+        episodes_per_seed = max(1, num_episodes // max(1, self.num_random_seeds))
+
+        # Load previous state
+        print(f"\n{YELLOW}[Resume] Loading previous session: {session_dir}{RESET_COLOR}")
+        batch_slots, seed_positions = self._load_resume_state(session_dir)
+
+        # Check if all done
+        all_done = all(all(slots) for slots in batch_slots)
+        if all_done:
+            print(f"\n{GREEN}  All episodes complete, nothing to resume{RESET_COLOR}")
+            return {'session_dir': session_dir, 'episodes': [], 'summary': {}}
+
+        # Cleanup failed episodes from dataset, then initialize recording (resume/append)
+        if self.record_dataset:
+            if self.dataset_repo_id:
+                try:
+                    from record_dataset.cleanup import cleanup_dataset_for_resume
+                    cleanup_stats = cleanup_dataset_for_resume(
+                        session_dir=session_dir,
+                        repo_id=self.dataset_repo_id,
+                    )
+                    print(f"\n[Cleanup] Result: {cleanup_stats['dataset_episodes_before']} → {cleanup_stats['dataset_episodes_after']} episodes")
+                    if cleanup_stats['deleted_indices']:
+                        print(f"[Cleanup] Deleted dataset indices: {cleanup_stats['deleted_indices']}")
+                except Exception as e:
+                    print(f"\n{YELLOW}[Cleanup] Warning: Dataset cleanup failed: {e}{RESET_COLOR}")
+                    import traceback; traceback.print_exc()
+
+            if self.dataset_recorder is None:
+                self.resume_recording = True
+                self._init_recording()
+
+        # Results
+        all_results = {
+            'session_dir': session_dir,
+            'num_episodes': num_episodes,
+            'instruction': instruction,
+            'robot_ids': self.robot_ids,
+            'episodes': [],
+            'summary': {'forward_success': 0, 'forward_judge_true': 0,
+                        'reset_success': 0, 'reset_judge_true': 0},
+        }
+
+        print(f"\n{MAGENTA}{'='*70}{RESET_COLOR}")
+        print(f"{MAGENTA}{BOLD}  RESUME MULTI-ARM SESSION: {num_episodes} Episodes  {RESET_COLOR}")
+        print(f"{MAGENTA}{'='*70}{RESET_COLOR}")
+
+        for episode_idx in range(num_episodes):
+            episode_num = episode_idx + 1
+            batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
+            slot = episode_idx % episodes_per_seed
+            self.current_episode = episode_num
+            self._current_batch_index = batch_index
+            self._current_slot = slot
+
+            # Skip completed slots
+            if batch_slots[batch_index][slot]:
+                print(f"  [{episode_num:02d}/{num_episodes:02d}] Batch {batch_index+1} Slot {slot} — already TRUE, skipping")
+                continue
+
+            print(f"\n{CYAN}{'='*70}{RESET_COLOR}")
+            print(f"{CYAN}{BOLD}  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1}, Slot {slot})  {RESET_COLOR}")
+            print(f"{CYAN}{'='*70}{RESET_COLOR}")
+
+            episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
+            reset_target = seed_positions[batch_index]
+
+            try:
+                result = self.run(
+                    instruction=instruction,
+                    objects=objects,
+                    detection_timeout=detection_timeout,
+                    visualize_detection=visualize_detection,
+                    save_dir=episode_dir,
+                    use_timestamp_subdir=False,
+                    skip_reset=skip_reset,
+                    reset_target_positions=reset_target,
+                )
+
+                judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+                self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
+
+                if seed_positions[0] is None and self.first_episode_positions is not None:
+                    seed_positions[0] = copy.deepcopy(self.first_episode_positions)
+
+                s = all_results['summary']
+                if result['forward']['execution_success']:
+                    s['forward_success'] += 1
+                if judge_pred == 'TRUE':
+                    s['forward_judge_true'] += 1
+                if result['reset']['execution_success']:
+                    s['reset_success'] += 1
+                if result.get('reset_judge', {}).get('prediction') == 'TRUE':
+                    s['reset_judge_true'] += 1
+
+                all_results['episodes'].append({
+                    'episode': episode_num, 'result': result, 'success': result['forward']['execution_success'],
+                })
+
+            except AssertionError:
+                raise
+            except Exception as e:
+                print(f"\n{RED}[{episode_num:02d}] Error: {e}{RESET_COLOR}")
+                import traceback
+                traceback.print_exc()
+                all_results['episodes'].append({'episode': episode_num, 'success': False, 'error': str(e)})
+
+            time.sleep(2)
+
+        self._finalize_session(all_results, session_dir)
+        return all_results
 
     # ─────────────────────────────────────────────
     # Utilities
@@ -1366,12 +1728,7 @@ class UnifiedMultiArmPipeline:
         print(f"  Results saved: {summary_path}")
 
         # Finalize recording
-        if self.dataset_recorder:
-            try:
-                self.dataset_recorder.finalize()
-                print(f"  Dataset finalized: {self.dataset_recorder.repo_id}")
-            except Exception as e:
-                print(f"  Dataset finalization error: {e}")
+        self._finalize_recording()
 
         # Camera cleanup: camera_manager가 소유한 카메라는 stop하지 않음
         if self.camera_manager:

@@ -588,10 +588,11 @@ skills.execute_place_object(target_pos, is_table=True, gripper_open_ratio=0.7, t
 skills.clear_subtask()
 
 # Re-detection (MANDATORY between subtasks)
+# detect_objects may return None for an object if detection fails — always check before using.
 skills.move_to_initial_state()  # clear arm from camera view
 updated = skills.detect_objects(["A", "B", "C"])
-if updated["A"]: a_pos = updated["A"]["position"]  # A's z may have changed
-if updated["B"]: b_pos = updated["B"]["position"]
+if updated.get("A") and updated["A"].get("position"): a_pos = updated["A"]["position"]
+if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
 
 # Subtask 2: 2nd object — pick → place
 skills.set_subtask("pick B and place on A")
@@ -602,8 +603,8 @@ skills.clear_subtask()
 # Re-detection (MANDATORY between subtasks)
 skills.move_to_initial_state()  # clear arm from camera view
 updated = skills.detect_objects(["A", "B", "C"])
-if updated["B"]: b_pos = updated["B"]["position"]  # B is now on A, z updated
-if updated["C"]: c_pos = updated["C"]["position"]
+if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
+if updated.get("C") and updated["C"].get("position"): c_pos = updated["C"]["position"]
 
 # Subtask 3: 3rd object — pick → place
 skills.set_subtask("pick C and place on B")

@@ -58,11 +58,19 @@ def cleanup_dataset_for_resume(
         return stats
 
     # 불완전 데이터셋 감지: meta/episodes/ parquet이 없으면 finalize() 미호출 상태
+    # 전체 삭제 대신 finalize를 시도하여 기존 데이터 보존
     episodes_meta_dir = dataset_path / "meta" / "episodes"
     if dataset_path.exists() and not episodes_meta_dir.exists():
-        print(f"[Cleanup] Incomplete dataset detected (no meta/episodes/) — removing")
-        shutil.rmtree(dataset_path)
-        return stats
+        print(f"[Cleanup] Incomplete dataset detected (no meta/episodes/) — attempting recovery...")
+        try:
+            dataset = LeRobotDataset(repo_id=repo_id, root=dataset_path)
+            dataset.meta._close_writer()  # flush metadata buffer → create meta/episodes/
+            dataset._close_writer()
+            print(f"[Cleanup] Recovery successful: {dataset.meta.total_episodes} episodes recovered")
+        except Exception as e:
+            print(f"[Cleanup] Recovery failed ({e}) — removing dataset")
+            shutil.rmtree(dataset_path)
+            return stats
 
     try:
         dataset = LeRobotDataset(repo_id=repo_id, root=dataset_path)

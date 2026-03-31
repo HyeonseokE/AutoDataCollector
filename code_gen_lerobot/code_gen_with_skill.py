@@ -527,7 +527,11 @@ def lerobot_code_gen_multi_turn(
         print(f"  CAD images: {len(cad_paths)} files from {len(cad_image_dirs)} dirs")
 
     # Chat session 시작 (Session 1: Perception)
-    perception_prompt = PERCEPTION_SYSTEM_PROMPT
+    if robot_ids and len(robot_ids) >= 2:
+        from .multi_arm.forward_execution.system_prompt import MULTI_ARM_PERCEPTION_SYSTEM_PROMPT
+        perception_prompt = MULTI_ARM_PERCEPTION_SYSTEM_PROMPT
+    else:
+        perception_prompt = PERCEPTION_SYSTEM_PROMPT
     chat, gen_config = gemini_chat_start(llm_model, system_prompt=perception_prompt)
 
     has_cad = bool(cad_paths)

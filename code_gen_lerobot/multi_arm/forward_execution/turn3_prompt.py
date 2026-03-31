@@ -219,9 +219,10 @@ skills.place_object(left_arm=target_pos, right_arm="wait", ...)
 skills.clear_subtask()
 
 # Re-detection (MANDATORY between subtasks)
+# detect_objects may return None for an object if detection fails — always check before using.
 skills.move_to_initial_state()  # clear arms from camera view
 updated = skills.detect_objects(["A", "B"])
-# Update both arm position dicts
+# Update both arm position dicts (skip if detection failed)
 if "left_arm" in updated:
     pos_left.update(updated["left_arm"])
 if "right_arm" in updated:

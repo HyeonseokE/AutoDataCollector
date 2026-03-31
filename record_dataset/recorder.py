@@ -89,7 +89,7 @@ class DatasetRecorder:
         # 카메라 설정 로드 (YAML에서 동적으로)
         self.camera_configs: List[CameraConfigRecord] = load_cameras_from_yaml(config_yaml)
         self.enabled_cameras = [cam for cam in self.camera_configs if cam.enabled]
-        self.camera_names = [cam.name for cam in self.enabled_cameras]
+        self.camera_names = [cam.feature_name for cam in self.enabled_cameras]
 
         # Features: 수동 지정 또는 YAML에서 동적 생성
         if features is not None:
@@ -362,8 +362,8 @@ class DatasetRecorder:
 
         # 각 카메라 이미지 추가
         for cam in self.enabled_cameras:
-            cam_name = cam.name
-            feature_key = cam.to_feature_key()  # "observation.images.{name}"
+            cam_name = cam.feature_name  # "top", "left_wrist", etc. (matches camera_manager key)
+            feature_key = cam.to_feature_key()  # "observation.images.{feature_name}"
 
             if cam_name in images:
                 img = images[cam_name]

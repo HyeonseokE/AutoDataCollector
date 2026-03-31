@@ -176,13 +176,13 @@ def _is_gemini_model(model: str) -> bool:
 def _call_gemini_vlm(
     prompt: str,
     images_b64: List[str],
-    model: str = "gemini-2.0-flash",
+    model: str = "gemini-2.5-flash",
     max_tokens: int = 1000,
     temperature: float = 0.0,
     check_time: bool = True,
 ) -> Optional[str]:
     """
-    Vertex AI Gemini VLM 호출 (base64 이미지 지원)
+    Google AI Studio Gemini VLM 호출 (base64 이미지 지원)
 
     Args:
         prompt: 텍스트 프롬프트
@@ -198,52 +198,51 @@ def _call_gemini_vlm(
     import base64 as b64_mod
 
     try:
-        import vertexai
-        from vertexai.generative_models import GenerativeModel, GenerationConfig, Part, Image
-        from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, TooManyRequests
+        from google import genai
+        from google.genai import types
+        from google.genai.errors import ClientError, ServerError
     except ImportError as e:
-        print(f"[Gemini VLM] Failed to import Vertex AI SDK: {e}")
+        print(f"[Gemini VLM] Failed to import google-genai SDK: {e}")
         return None
 
-    # Vertex AI 초기화 — gemini.py의 _ensure_init 사용하여 location 상태 동기화
     try:
-        from code_gen_lerobot.llm_utils.gemini import _ensure_init, _get_location_for_model
-        _ensure_init(_get_location_for_model(model))
+        from code_gen_lerobot.llm_utils.gemini import _get_client
+        client = _get_client()
     except ImportError:
-        project_id = os.getenv("VERTEX_PROJECT_ID", "prism-485101")
-        location = "global" if "gemini-3" in model.lower() else os.getenv("VERTEX_LOCATION", "us-central1")
-        vertexai.init(project=project_id, location=location)
-
-    gemini_model = GenerativeModel(model)
-    gen_config = GenerationConfig(
-        temperature=temperature,
-        max_output_tokens=max_tokens,
-    )
+        api_key = os.getenv("GOOGLE_API_KEY", "")
+        client = genai.Client(api_key=api_key)
 
     # 컨텐츠 구성: 텍스트 + base64 이미지들
     contents = [prompt]
     for img_b64 in images_b64:
         img_bytes = b64_mod.b64decode(img_b64)
-        contents.append(Part.from_data(data=img_bytes, mime_type="image/jpeg"))
+        contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+
+    config = types.GenerateContentConfig(
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+    )
 
     start_time = time.time()
 
     try:
-        # 재시도 로직 (rate limit / 503)
         max_retries = 3
         for attempt in range(max_retries + 1):
             try:
-                response = gemini_model.generate_content(
-                    contents,
-                    generation_config=gen_config,
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
                 )
                 break
-            except (ResourceExhausted, TooManyRequests, ServiceUnavailable) as e:
-                if attempt == max_retries:
+            except (ClientError, ServerError) as e:
+                err_str = str(e)
+                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str) and attempt < max_retries:
+                    delay = 30 * (2 ** attempt)
+                    print(f"  [Gemini VLM] Rate limit, retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
                     raise
-                delay = 30 * (2 ** attempt)
-                print(f"  [Gemini VLM] Rate limit, retrying in {delay}s...")
-                time.sleep(delay)
 
         elapsed = time.time() - start_time
 
@@ -251,12 +250,10 @@ def _call_gemini_vlm(
         usage_dict = {"model": model, "inference_time_s": round(elapsed, 2), "in": 0, "out": 0, "total": 0}
         try:
             usage = response.usage_metadata
-            if hasattr(usage, 'prompt_token_count') and usage.prompt_token_count:
-                usage_dict["in"] = usage.prompt_token_count
-            if hasattr(usage, 'candidates_token_count') and usage.candidates_token_count:
-                usage_dict["out"] = usage.candidates_token_count
-            if hasattr(usage, 'total_token_count') and usage.total_token_count:
-                usage_dict["total"] = usage.total_token_count
+            if usage:
+                usage_dict["in"] = getattr(usage, 'prompt_token_count', 0) or 0
+                usage_dict["out"] = getattr(usage, 'candidates_token_count', 0) or 0
+                usage_dict["total"] = getattr(usage, 'total_token_count', 0) or 0
         except Exception:
             pass
         _call_gemini_vlm._last_usage = usage_dict

@@ -58,7 +58,7 @@ class TaskJudge:
         self.verbose = verbose
         self.use_server = use_server
 
-        # Gemini 모델은 Vertex AI 사용 (OpenAI 클라이언트 불필요)
+        # Gemini 모델은 Google AI Studio 사용 (OpenAI 클라이언트 불필요)
         self.is_gemini = "gemini" in model.lower()
 
         if use_server or self.is_gemini:
@@ -67,7 +67,7 @@ class TaskJudge:
                 if use_server:
                     print("[TaskJudge] Using SSH server for VLM inference")
                 else:
-                    print(f"[TaskJudge] Using Vertex AI Gemini ({model})")
+                    print(f"[TaskJudge] Using Google AI Studio Gemini ({model})")
         else:
             # OpenAI 클라이언트 초기화
             try:

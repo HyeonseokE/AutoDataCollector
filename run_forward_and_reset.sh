@@ -23,6 +23,7 @@ cd "$SCRIPT_DIR"
 # (1, 완료) place the red block between chocolate pies             
 # (2, 완료) arrange yellow, red, and purple blocks in a line from left to right
 # (3, 완료) stack the blocks in the order of red and yellow
+# (3, 완료) stack the blocks in the order of red and yellow, purple
 
 # # Non-grasping:
 # (1, 성공) turn on the microphone by pressing the power button
@@ -73,13 +74,34 @@ ROBOT_IDS=(2 3)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
-INSTRUCTION="Fold the green towel in half from top to bottom."
+
+### [single arm task]
+## pick and place
+# INSTRUCTION="pick up the red block and place it on the blue dish"
+# RESET_INSTRUCTION=""
+
+## stack red and yellow
+# INSTRUCTION="stack the blocks in the order of red and yellow"
+# RESET_INSTRUCTION=""
+
+## stack RYP blocks
+# INSTRUCTION="stack the blocks in the order of red and yellow, purple."
+# RESET_INSTRUCTION=""
+
+## distribute chocolate pies to each plate
+# INSTRUCTION="distribute chocolate pies to each plate."
+# RESET_INSTRUCTION=""
+
+### [dual arm task]
+## towel folding
+INSTRUCTION="Fold the towel in half from top to bottom."
+RESET_INSTRUCTION="unfold the towel back to its original flat state."
+
 ## Reset_instruction(Empty is default: "move objects to certain position")
-RESET_INSTRUCTION=""
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=1
-NUM_RANDOM_SEEDS=1 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=30
+NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 태스크 유형 (pick_place, arrange, stack)
 # arrange: seed 위치를 테이블 뒤쪽(x<0.15m)으로 제한하여 정렬 영역과 분리
@@ -102,7 +124,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
+RESUME_SESSION="./results/session_20260331_154837"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

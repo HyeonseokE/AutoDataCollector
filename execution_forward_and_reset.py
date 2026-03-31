@@ -293,6 +293,17 @@ class ForwardAndResetPipeline:
             return True
         return set(cached_keys) <= set(new_positions.keys())
 
+    def _get_realsense_from_manager(self):
+        """camera_manager에서 RealSense 카메라를 가져오기 (이름 호환)"""
+        if not self.camera_manager:
+            return None
+        for cam_name in ["realsense", "top"]:
+            try:
+                return self.camera_manager.get_camera(cam_name)
+            except KeyError:
+                continue
+        return None
+
     def initialize_camera(self) -> bool:
         """카메라 초기화 (camera_manager가 있으면 그것을 사용)"""
         # camera_manager가 이미 RealSense를 가지고 있으면 재사용
@@ -303,13 +314,12 @@ class ForwardAndResetPipeline:
                 except Exception as e:
                     print(f"[Pipeline] Camera manager reconnect failed: {e}")
             if self.camera_manager.is_connected:
-                try:
-                    self.camera = self.camera_manager.get_camera("realsense")
+                cam = self._get_realsense_from_manager()
+                if cam is not None:
+                    self.camera = cam
                     if self.verbose:
-                        print("[Pipeline] Camera initialized (from camera_manager)")
+                        print(f"[Pipeline] Camera initialized (from camera_manager)")
                     return True
-                except KeyError:
-                    pass
 
         # Fallback: 직접 RealSense 연결
         try:
@@ -332,7 +342,7 @@ class ForwardAndResetPipeline:
             # camera_manager가 소유한 카메라면 stop하지 않음 (manager가 관리)
             if self.camera_manager:
                 try:
-                    cm_cam = self.camera_manager.get_camera("realsense")
+                    cm_cam = self._get_realsense_from_manager()
                     if self.camera is cm_cam:
                         self.camera = None
                         if self.verbose:
@@ -535,12 +545,13 @@ class ForwardAndResetPipeline:
         try:
             # 1순위: camera_manager의 realsense 카메라 사용
             if self.camera_manager and self.camera_manager.is_connected:
-                try:
-                    realsense = self.camera_manager.get_camera("realsense")
-                    color, _ = realsense.get_frames()
-                    return color
-                except (KeyError, Exception):
-                    pass  # fallback to self.camera
+                cam = self._get_realsense_from_manager()
+                if cam is not None:
+                    try:
+                        color, _ = cam.get_frames()
+                        return color
+                    except Exception:
+                        pass
 
             # 2순위: self.camera 사용
             if self.camera is not None:
@@ -574,7 +585,7 @@ class ForwardAndResetPipeline:
             print("  [Detection] Using pipeline camera")
         elif self.camera_manager and self.camera_manager.is_connected:
             try:
-                external_camera = self.camera_manager.get_camera("realsense")
+                external_camera = self._get_realsense_from_manager()
                 print("  [Detection] Using shared camera from recording")
             except KeyError:
                 print("  [Detection] No realsense camera in manager, using internal camera")
@@ -684,7 +695,7 @@ class ForwardAndResetPipeline:
         active_camera = None
         if self.camera_manager and self.camera_manager.is_connected:
             try:
-                active_camera = self.camera_manager.get_camera("realsense")
+                active_camera = self._get_realsense_from_manager()
             except KeyError:
                 pass
         if active_camera is None:
@@ -1163,7 +1174,7 @@ class ForwardAndResetPipeline:
         external_camera = None
         if current_positions is None and self.camera_manager and self.camera_manager.is_connected:
             try:
-                external_camera = self.camera_manager.get_camera("realsense")
+                external_camera = self._get_realsense_from_manager()
                 print("  [Reset Detection] Using shared camera from recording")
             except KeyError:
                 pass
@@ -1212,7 +1223,7 @@ class ForwardAndResetPipeline:
         active_camera = None
         if self.camera_manager and self.camera_manager.is_connected:
             try:
-                active_camera = self.camera_manager.get_camera("realsense")
+                active_camera = self._get_realsense_from_manager()
             except KeyError:
                 pass
         if active_camera is None:
@@ -1363,8 +1374,28 @@ class ForwardAndResetPipeline:
                 # 캡처 실패 시 카메라 재초기화 후 재시도
                 if self.initial_image is None:
                     print(f"  {YELLOW}[Warning] Capture failed, reinitializing camera...{RESET}")
-                    self.shutdown_camera()
-                    time.sleep(1.0)
+                    # Force-stop camera (including camera_manager owned)
+                    if self.camera:
+                        try:
+                            self.camera.stop()
+                        except Exception:
+                            pass
+                        self.camera = None
+                    if self.camera_manager:
+                        try:
+                            self.camera_manager.disconnect_all()
+                        except Exception:
+                            pass
+                        # Reconnect existing camera_manager (don't recreate dataset)
+                        time.sleep(2.0)
+                        try:
+                            self.camera_manager.connect_all()
+                            print(f"  [Recovery] Camera manager reconnected")
+                        except Exception as e:
+                            print(f"  [Recovery] Camera manager reconnect failed: {e}")
+                            self.camera_manager = None
+                    else:
+                        time.sleep(2.0)
                     if self.initialize_camera():
                         time.sleep(0.5)
                         self.initial_image = self.capture_frame()
@@ -1758,6 +1789,20 @@ class ForwardAndResetPipeline:
                 cv2.imwrite(str(final_path), self.final_image)
                 print(f"  Final image saved: {final_path}")
 
+            # Save batch_info early (before judge) so resume can detect this episode
+            batch_idx = getattr(self, '_current_batch_index', 0)
+            slot = getattr(self, '_current_slot', 0)
+            episode_root = str(Path(forward_dir).parent)
+            batch_info = {
+                "batch_seed_index": batch_idx + 1,
+                "slot": slot,
+                "judge": "PENDING",
+            }
+            bi_path = Path(episode_root) / "batch_info.json"
+            bi_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(bi_path, 'w') as f:
+                json.dump(batch_info, f, indent=2)
+
             # Step 2: Judge 실행
             judge_prediction = "UNCERTAIN"
             print(f"\n{YELLOW}" + self._log(f"Running VLM Judge ({self.judge_model})...", step="Step 2/3", tag="Judge") + f"{RESET}")
@@ -2080,9 +2125,13 @@ class ForwardAndResetPipeline:
                     # multi-turn 모드에서는 이미 current_state로 캡처됨
                     if self.reset_initial_image is not None and self.multi_turn:
                         print(f"\n{YELLOW}" + self._log("Reset initial image already captured (multi-turn)", step="Step 2/4") + f"{RESET}")
-                        # [즉시 저장] Reset initial 이미지 (이미 current_state.jpg로 저장됨, initial_state.jpg로도 복사)
+                        # [즉시 저장] Reset initial 이미지 = forward 시작 전 이미지 (되돌려야 할 상태)
                         reset_initial_path = Path(reset_dir) / "initial_state.jpg"
-                        cv2.imwrite(str(reset_initial_path), self.reset_initial_image)
+                        if self.forward_initial_image_path and Path(self.forward_initial_image_path).exists():
+                            import shutil
+                            shutil.copy2(self.forward_initial_image_path, str(reset_initial_path))
+                        else:
+                            cv2.imwrite(str(reset_initial_path), self.reset_initial_image)
                         print(f"  Reset initial image saved: {reset_initial_path}")
                     else:
                         print(f"\n{YELLOW}" + self._log("Capturing reset initial state...", step="Step 2/4") + f"{RESET}")
@@ -3397,6 +3446,8 @@ class ForwardAndResetPipeline:
             next_batch_index = batch_index + 1
 
             self.current_episode = episode_num
+            self._current_batch_index = batch_index
+            self._current_slot = episode_idx % episodes_per_seed
 
             print("\n" + CYAN + "=" * 70 + RESET)
             print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1})  ".center(70) + RESET)
@@ -3593,6 +3644,8 @@ class ForwardAndResetPipeline:
                     continue
 
                 self.current_episode = episode_num
+                self._current_batch_index = batch_index
+                self._current_slot = slot
 
                 print("\n" + CYAN + "=" * 70 + RESET)
                 print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1}, Slot {slot})  ".center(70) + RESET)

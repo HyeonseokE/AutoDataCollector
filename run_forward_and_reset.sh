@@ -94,8 +94,8 @@ ROBOT_IDS=(2 3)
 
 ### [dual arm task]
 ## towel folding
-INSTRUCTION="Fold the towel in half from top to bottom."
-RESET_INSTRUCTION="unfold the towel back to its original flat state."
+INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
+RESET_INSTRUCTION=""
 
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
@@ -124,7 +124,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/session_20260331_154837"
+RESUME_SESSION=""
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

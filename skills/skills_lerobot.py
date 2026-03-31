@@ -104,9 +104,11 @@ class LeRobotSkills:
         pick_offset: float = 0.015,  # Pick/place offset from object top (meters, 1.5cm)
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
+        detect_model: str = "gemini-3.1-flash-lite-preview",  # VLM model for detect_objects
     ):
         self.robot_config_path = Path(robot_config)
         self.frame = frame
+        self.detect_model = detect_model
         self.gripper_open_pos = gripper_open_pos
         self.gripper_close_pos = gripper_close_pos
         self.movement_duration = movement_duration
@@ -647,11 +649,10 @@ class LeRobotSkills:
             full_normalized = np.concatenate([arm_normalized, [gripper_pos]])
             self.robot.write_positions(full_normalized, normalize=True)
 
-            # LeRobot dataset recording callback
+            # LeRobot dataset recording callback (reuse interpolated state, no extra serial read)
             if self.recording_callback is not None:
                 try:
-                    state_full = self.robot.read_positions(normalize=True)  # 6축 실제 값
-                    self.recording_callback(state_full.copy(), full_normalized.copy())
+                    self.recording_callback(full_normalized.astype(np.float32), full_normalized.copy())
                 except Exception as _rec_e:
                     if not getattr(self, '_rec_err_logged', False):
                         print(f"\n[Recording] Callback error: {_rec_e}")
@@ -679,16 +680,8 @@ class LeRobotSkills:
 
     def _execute_move_gripper_pose(self, position: float, duration: float = 1.5):
         """
-        Gripper 단독 제어 (1-DoF). 
-        IK 기반 Arm 움직임(5-DoF)과 독립적. Arm은 현재 위치 유지.
-
-        목적: Gripper만 목표 위치로 이동 (Arm 5축은 고정)
-        사용처: gripper_open(), gripper_close(), execute_pick_object(), execute_place_object()
-        특징: Arm 고정, linear interpolation, recording callback 지원
-
-        Note:
-            - IK 기반 Arm 제어(_execute_trajectory)와 완전히 독립적
-            - Arm 5축은 현재 상태 그대로 유지하고 Gripper만 움직임
+        Gripper 단독 제어 (1-DoF).
+        30Hz 단일 루프: 제어 + 레코딩을 매 iteration에서 수행.
 
         Args:
             position: 목표 gripper 위치 (normalized, -100 ~ +100)
@@ -696,12 +689,11 @@ class LeRobotSkills:
         """
         current_arm_norm, _, _ = self._get_current_state()
         start_gripper = self.current_gripper_pos
-
-        # Control loop with recording (50Hz)
-        num_steps = int(duration * 50)
+        loop_period = 1.0 / self.RECORDING_FPS
         start_time = time.time()
 
-        for i in range(num_steps):
+        while True:
+            loop_start = time.perf_counter()
             elapsed = time.time() - start_time
             if elapsed >= duration:
                 break
@@ -716,19 +708,14 @@ class LeRobotSkills:
             # Send command
             self.robot.write_positions(full_normalized, normalize=True)
 
-            # LeRobot dataset recording callback
+            # Inline recording (reuse current_arm_norm, no extra serial read)
             if self.recording_callback is not None:
-                try:
-                    state_full = self.robot.read_positions(normalize=True)  # 6축 실제 값
-                    self.recording_callback(state_full.copy(), full_normalized.copy())
-                except Exception as _rec_e:
-                    if not getattr(self, '_rec_err_logged', False):
-                        print(f"\n[Recording] Callback error: {_rec_e}")
-                        self._rec_err_logged = True
+                state_full = np.concatenate([current_arm_norm, [current_gripper]])
+                self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
 
-            # Wait for next control step
-            next_time = start_time + (i + 1) * (duration / num_steps)
-            sleep_time = next_time - time.time()
+            # precise_sleep to maintain RECORDING_FPS
+            dt = time.perf_counter() - loop_start
+            sleep_time = loop_period - dt
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
@@ -737,6 +724,9 @@ class LeRobotSkills:
         self.robot.write_positions(full_normalized, normalize=True)
         self.current_gripper_pos = position
 
+
+    # Recording FPS — controls the single-loop rate (same as LeRobot official)
+    RECORDING_FPS = 30
 
     def _execute_trajectory(
         self,
@@ -747,9 +737,8 @@ class LeRobotSkills:
     ) -> bool:
         """Cartesian-space trajectory 실행 (IK 계산된 경로 추종).
 
-        목적: XYZ 목표 위치로 이동 (IK로 계산된 trajectory 사용)
-        사용처: move_to_position() → execute_pick_object(), execute_place_object()
-        특징: Compensation 적용, Hold phase 있음 (목표 도달 확인), deceleration 적용
+        30Hz 단일 루프: 매 iteration에서 제어 + 레코딩을 수행.
+        FPS는 precise_sleep으로 보장 (LeRobot 공식과 동일 패턴).
 
         Args:
             trajectory: Planner가 계산한 trajectory
@@ -761,24 +750,33 @@ class LeRobotSkills:
 
         duration = trajectory.duration
         start_time = time.time()
+        loop_period = 1.0 / self.RECORDING_FPS
 
-        POSITION_TOLERANCE = 0.007  # 7mm (fail threshold = 7mm * 3 = 21mm)
+        POSITION_TOLERANCE = 0.015  # 15mm
         MAX_TOTAL_TIME = duration + 2.0
         SETTLE_TIME = 0.2
 
         target_reached = False
         reach_time = None
 
+        # Timing profiling (accumulated over all iterations, printed at end)
+        _prof_read = []    # _get_current_state (serial read + FK)
+        _prof_write = []   # robot.write_positions (serial write)
+        _prof_rec = []     # recording callback (serial read + camera + frame build + dataset write)
+        _prof_total = []   # total loop body (excl sleep)
+
         while True:
+            loop_start = time.perf_counter()
             elapsed = time.time() - start_time
 
-            # Read current state (use specified kinematics for TCP mode)
+            # Read current state
+            _t0 = time.perf_counter()
             actual_norm, actual_rad, current_ee = self._get_current_state(kinematics)
+            _prof_read.append((time.perf_counter() - _t0) * 1000)
             position_error = np.linalg.norm(target_position - current_ee)
 
             # Determine command
             if elapsed < duration:
-                # Trajectory phase
                 if self.use_deceleration:
                     t_normalized = elapsed / duration
                     progress = self._apply_end_deceleration(t_normalized)
@@ -790,7 +788,6 @@ class LeRobotSkills:
                 arm_normalized = self._radians_to_normalized(arm_positions_rad)
                 phase = "Traj"
             else:
-                # Hold phase
                 arm_normalized = self._radians_to_normalized(trajectory.joint_positions[-1])
                 phase = "Hold"
 
@@ -799,19 +796,19 @@ class LeRobotSkills:
                 arm_normalized = self.compensator.compensate(actual_norm, arm_normalized)
 
             # Send command
+            _t0 = time.perf_counter()
             arm_normalized = np.clip(arm_normalized, -99.0, 99.0)
             full_normalized = np.concatenate([arm_normalized, [self.current_gripper_pos]])
             self.robot.write_positions(full_normalized, normalize=True)
+            _prof_write.append((time.perf_counter() - _t0) * 1000)
 
-            # LeRobot dataset recording callback (Traj phase only, skip Hold phase)
+            # Inline recording (every iteration = 1 frame at RECORDING_FPS)
+            # Reuse actual_norm from _get_current_state() to avoid redundant serial read
             if self.recording_callback is not None and phase == "Traj":
-                try:
-                    state_full = self.robot.read_positions(normalize=True)  # 6축 실제 값
-                    self.recording_callback(state_full.copy(), full_normalized.copy())
-                except Exception as _rec_e:
-                    if not getattr(self, '_rec_err_logged', False):
-                        print(f"\n[Recording] Callback error: {_rec_e}")
-                        self._rec_err_logged = True
+                _t0 = time.perf_counter()
+                state_full = np.concatenate([actual_norm, [self.current_gripper_pos]])
+                self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
+                _prof_rec.append((time.perf_counter() - _t0) * 1000)
 
             # Progress display
             if self.verbose:
@@ -837,13 +834,35 @@ class LeRobotSkills:
                     print(f"\n  Timeout after {MAX_TOTAL_TIME:.1f}s")
                 break
 
-            time.sleep(0.02)  # 50Hz
+            _prof_total.append((time.perf_counter() - loop_start) * 1000)
+
+            # precise_sleep to maintain RECORDING_FPS (30Hz)
+            dt = time.perf_counter() - loop_start
+            sleep_time = loop_period - dt
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
         if self.verbose:
             if target_reached:
                 print(f"\r  [{'=' * 30}] Done (err: {position_error*1000:.1f}mm)    ")
             else:
                 print(f"\r  [{'=' * 30}] Timeout (err: {position_error*1000:.1f}mm)")
+
+        # Loop timing profile (per-move summary)
+        if _prof_total:
+            import numpy as _np
+            _rd = _np.array(_prof_read)
+            _wr = _np.array(_prof_write)
+            _rc = _np.array(_prof_rec) if _prof_rec else _np.array([0])
+            _tt = _np.array(_prof_total)
+            _over = int((_tt > 33.3).sum())
+            self._log(
+                f"  [Profile] loops={len(_tt)}, overruns={_over}/{len(_tt)}\n"
+                f"    read:  mean={_rd.mean():.1f}ms p95={_np.percentile(_rd,95):.1f}ms max={_rd.max():.1f}ms\n"
+                f"    write: mean={_wr.mean():.1f}ms p95={_np.percentile(_wr,95):.1f}ms max={_wr.max():.1f}ms\n"
+                f"    rec:   mean={_rc.mean():.1f}ms p95={_np.percentile(_rc,95):.1f}ms max={_rc.max():.1f}ms\n"
+                f"    total: mean={_tt.mean():.1f}ms p95={_np.percentile(_tt,95):.1f}ms max={_tt.max():.1f}ms"
+            )
 
         # Calculate and store final error (use specified kinematics for TCP mode)
         _, final_rad, final_ee = self._get_current_state(kinematics)
@@ -981,7 +1000,7 @@ class LeRobotSkills:
                     self._log(f"  [2/4] Turn 1: bbox detection (attempt {retry+1}/{MAX_DETECT_RETRIES})...")
                     t1_response, t1_usage = gemini_response(
                         prompt=t1_prompt,
-                        model="gemini-3-flash-preview",
+                        model=self.detect_model,
                         image_path=tmp_path,
                         check_time=True,
                         timeout=DETECT_TIMEOUT,
@@ -1041,7 +1060,7 @@ class LeRobotSkills:
                                     time.sleep(3)  # rate limit 회피
                                 t2_response, t2_usage = gemini_response(
                                     prompt=t2_prompt,
-                                    model="gemini-3-flash-preview",
+                                    model=self.detect_model,
                                     image_path=crop_path,
                                     check_time=True,
                                     timeout=DETECT_TIMEOUT,

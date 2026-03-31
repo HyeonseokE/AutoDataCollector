@@ -411,12 +411,11 @@ skills.move_to_position([press_pos[0], press_pos[1], approach_height], target_na
 skills.move_to_free_state()
 ```
 
-**Code Skeleton**:
+**Code Skeleton** (MUST follow exactly — do NOT add imports or parameters):
 ```python
-from skills.skills_lerobot import LeRobotSkills
-
 def execute_task():
-    skills = LeRobotSkills(robot_config="{robot_config}", frame="{frame}")
+    # `skills` and `positions` are pre-injected global variables.
+    # Do NOT import anything. Do NOT instantiate LeRobotSkills yourself.
     skills.connect()
     try:
         # START → PICK → PLACE → END
@@ -429,7 +428,7 @@ if __name__ == "__main__":
 ```
 
 **Guidelines**:
-1. Always START with `move_to_initial_state()` and END with `move_to_free_state()` (no `move_to_initial_state` at the end).
+1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
 4. `is_table=True` on table, `is_table=False` on another object.
@@ -613,15 +612,15 @@ skills.execute_place_object(b_pos, is_table=False, gripper_open_ratio=0.7, targe
 skills.clear_subtask()
 
 # END — always last
+skills.move_to_initial_state()
 skills.move_to_free_state(skill_description="Move to safe position", verification_question="Is the robot at safe position?")
 ```
 
-**Code Skeleton**:
+**Code Skeleton** (MUST follow exactly — do NOT add imports or parameters):
 ```python
-from skills.skills_lerobot import LeRobotSkills
-
 def execute_task():
-    skills = LeRobotSkills(robot_config="{robot_config}", frame="{frame}")
+    # `skills` and `positions` are pre-injected global variables.
+    # Do NOT import anything. Do NOT instantiate LeRobotSkills yourself.
     skills.connect()
     try:
         # START → PICK → PLACE → END
@@ -634,7 +633,7 @@ if __name__ == "__main__":
 ```
 
 **Guidelines**:
-1. Always START with `move_to_initial_state()` and END with `move_to_free_state()` (no `move_to_initial_state` at the end).
+1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
 4. `is_table=True` on table, `is_table=False` on another object.

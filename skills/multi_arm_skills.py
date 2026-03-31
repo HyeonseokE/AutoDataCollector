@@ -59,6 +59,7 @@ class MultiArmSkills:
         pick_offset: float = 0.015,
         recording_callback=None,
         camera=None,
+        detect_model: str = None,
     ):
         """
         Args:
@@ -67,8 +68,11 @@ class MultiArmSkills:
             recording_callback: Set to None to disable internal per-arm recording.
                 Multi-arm recording is handled externally by MultiArmRecorder.
             camera: Shared RealSense camera instance (both arms share one camera).
+            detect_model: VLM model for detect_objects skill.
         """
         self.verbose = verbose
+
+        detect_kwargs = {"detect_model": detect_model} if detect_model else {}
 
         # Create LeRobotSkills instances with recording disabled
         # (MultiArmRecorder handles unified 12-axis recording externally)
@@ -82,6 +86,7 @@ class MultiArmSkills:
             pick_offset=pick_offset,
             recording_callback=recording_callback,
             camera=camera,
+            **detect_kwargs,
         )
 
         self.right_arm = LeRobotSkills(
@@ -94,6 +99,7 @@ class MultiArmSkills:
             pick_offset=pick_offset,
             recording_callback=recording_callback,
             camera=camera,
+            **detect_kwargs,
         )
 
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="multi_arm")

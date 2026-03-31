@@ -46,7 +46,10 @@ RESET_COLOR = "\033[0m"
 BOLD = "\033[1m"
 
 
-class UnifiedMultiArmPipeline:
+from pipeline.base_pipeline import BasePipeline
+
+
+class UnifiedMultiArmPipeline(BasePipeline):
     """
     Unified bi-arm pipeline with the same interface as ForwardAndResetPipeline.
 
@@ -76,6 +79,7 @@ class UnifiedMultiArmPipeline:
         task_type: str = "pick_place",
         reset_instruction: str = None,
         skip_turn_test: bool = False,
+        detect_model: str = None,
     ):
         assert len(robot_ids) >= 2, f"Multi-arm requires >= 2 robots, got {robot_ids}"
         self.robot_ids = robot_ids
@@ -95,6 +99,7 @@ class UnifiedMultiArmPipeline:
         self.task_type = task_type
         self.reset_instruction = reset_instruction or "move objects to their original positions"
         self.skip_turn_test = skip_turn_test
+        self.detect_model = detect_model
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
 
@@ -131,12 +136,6 @@ class UnifiedMultiArmPipeline:
         if self.record_dataset and not self.resume_recording:
             self._init_recording()
 
-    def _log(self, message: str, step: str = None) -> str:
-        ep_str = f"{self.current_episode:02d}/{self.total_episodes:02d}"
-        prefix = f"[{self.current_phase}][{ep_str}]"
-        if step:
-            prefix += f"[{step}]"
-        return f"{prefix} {message}"
 
     # ─────────────────────────────────────────────
     # Initialization
@@ -152,47 +151,28 @@ class UnifiedMultiArmPipeline:
         left_config = f"robot_configs/robot/so101_robot{self.left_id}.yaml"
         right_config = f"robot_configs/robot/so101_robot{self.right_id}.yaml"
 
+        detect_kwargs = {}
+        if self.detect_model:
+            detect_kwargs["detect_model"] = self.detect_model
+
         self.multi_arm = MultiArmSkills(
             left_config=left_config,
             right_config=right_config,
             frame="base_link",
             verbose=self.verbose,
+            **detect_kwargs,
         )
         return True  # connect()는 LLM 코드에서 호출
 
     def _init_camera(self) -> bool:
-        """Initialize camera for image capture.
-
-        camera_manager가 있으면 거기서 realsense를 가져옴 (리소스 충돌 방지).
-        없으면 직접 RealSense를 열음.
-        """
-        # camera_manager가 이미 있으면 그것의 realsense 사용
-        if self.camera_manager and self.camera_manager.is_connected:
-            try:
-                # feature_name 기준: shared realsense는 "top"으로 등록됨
-                # "top" 우선, fallback으로 "realsense" (레거시 호환)
-                for cam_name in ["top", "realsense"]:
-                    try:
-                        self.camera = self.camera_manager.get_camera(cam_name)
-                        print(f"[MultiArm] Camera initialized: '{cam_name}' (from camera_manager)")
-                        return True
-                    except KeyError:
-                        continue
-            except Exception:
-                pass
-
-        # 직접 열기
-        try:
-            from object_detection.camera import RealSenseD435
-            self.camera = RealSenseD435(width=640, height=480, fps=30)
-            self.camera.start()
-            for _ in range(30):
-                self.camera.get_frames()
-            print(f"[MultiArm] Camera initialized (direct)")
-            return True
-        except Exception as e:
-            print(f"{RED}[MultiArm] Camera init failed: {e}{RESET_COLOR}")
-            return False
+        """Initialize camera via PipelineCamera."""
+        if not hasattr(self, '_pipeline_camera') or self._pipeline_camera is None:
+            from pipeline.camera_session import PipelineCamera
+            self._pipeline_camera = PipelineCamera(
+                camera_manager=self.camera_manager, verbose=self.verbose)
+        result = self._pipeline_camera.initialize()
+        self.camera = self._pipeline_camera.camera
+        return result
 
     def _init_recording(self):
         """Initialize recording with MultiArmRecorder (12-axis ALOHA format)."""
@@ -301,20 +281,6 @@ class UnifiedMultiArmPipeline:
             self.record_dataset = False
             self.dataset_recorder = None
 
-    def _install_recording_signal_handler(self) -> None:
-        """Ctrl+C 시 데이터셋 finalize() 호출을 보장하는 signal handler 등록."""
-        import signal
-
-        original_handler = signal.getsignal(signal.SIGINT)
-
-        def _handle_sigint(signum, frame):
-            print(f"\n[Recording] SIGINT received — finalizing dataset...")
-            self._finalize_recording()
-            signal.signal(signal.SIGINT, original_handler)
-            raise KeyboardInterrupt
-
-        signal.signal(signal.SIGINT, _handle_sigint)
-        print(f"[Recording] Signal handler installed (Ctrl+C will finalize dataset)")
 
     def _finalize_recording(self) -> None:
         """데이터셋 finalize (signal handler, _finalize_session 양쪽에서 호출)."""
@@ -327,26 +293,6 @@ class UnifiedMultiArmPipeline:
                 import traceback
                 traceback.print_exc()
 
-    def _start_episode_recording(self, task: str) -> None:
-        """에피소드 레코딩 시작 (single-arm과 동일)."""
-        if self.dataset_recorder and self.record_dataset:
-            try:
-                self.dataset_recorder.start_episode(task=task)
-                print(f"[Recording] Episode started: {task}")
-            except Exception as e:
-                print(f"[Recording] Warning: Failed to start episode: {e}")
-
-    def _end_episode_recording(self, discard: bool = False) -> None:
-        """에피소드 레코딩 종료 (single-arm과 동일)."""
-        if self.dataset_recorder and self.record_dataset:
-            try:
-                info = self.dataset_recorder.end_episode(discard=discard)
-                if not discard:
-                    print(f"[Recording] Episode saved: {info.get('num_frames', 0)} frames")
-                else:
-                    print(f"[Recording] Episode discarded")
-            except Exception as e:
-                print(f"[Recording] Warning: Failed to end episode: {e}")
 
     # ─────────────────────────────────────────────
     # Code Generation
@@ -469,455 +415,45 @@ class UnifiedMultiArmPipeline:
     # Code Execution
     # ─────────────────────────────────────────────
 
-    def _build_exec_globals(self, positions: Dict, extra_globals: Dict = None) -> Dict:
-        """Build the exec_globals dict for LLM-generated code.
-
-        Single-arm 패턴과 동일: positions만 주입 + skills 인스턴스 주입.
-        LLM 코드가 skills.connect() / skills.disconnect()를 직접 호출.
-        """
-        exec_globals = {
-            "__name__": "__generated__",
-            "skills": self.multi_arm,  # pre-created MultiArmSkills instance
-            "positions": positions,
-        }
-        if extra_globals:
-            exec_globals.update(extra_globals)
-        return exec_globals
+    def _get_task_runner(self):
+        """DualArmTaskRunner 인스턴스 반환 (lazy init)."""
+        if not hasattr(self, '_task_runner') or self._task_runner is None:
+            from pipeline.task_runner import DualArmTaskRunner
+            self._task_runner = DualArmTaskRunner(
+                skills=self.multi_arm,
+                recorder=self.dataset_recorder if self.record_dataset else None,
+                camera_manager=self.camera_manager,
+                recording_fps=self.recording_fps,
+            )
+        return self._task_runner
 
     def execute_code(self, code: str, positions: Dict, extra_globals: Dict = None) -> bool:
-        """Execute LLM-generated code (with recording support).
+        """Execute LLM-generated code (TaskRunner에 위임)."""
+        runner = self._get_task_runner()
+        success = runner.execute(code, positions, extra_globals)
+        # DualArmTaskRunner의 레코딩 통계를 파이프라인에 전달
+        self._last_mar_stats = getattr(runner, '_last_mar_stats', None)
+        return success
 
-        Single-arm ForwardAndResetPipeline.execute_code() 패턴과 동일:
-        - Recording 모드: RecordingContext 설정 → exec → 정리
-        - Non-recording 모드: exec만 수행
-        """
-        try:
-            exec_globals = self._build_exec_globals(positions, extra_globals)
-
-            if self.record_dataset and self.dataset_recorder:
-                return self._execute_code_with_recording(code, exec_globals)
-            else:
-                exec(code, exec_globals)
-                if "execute_task" in exec_globals:
-                    exec_globals["execute_task"]()
-                elif "execute_reset_task" in exec_globals:
-                    exec_globals["execute_reset_task"]()
-                return True
-
-        except AssertionError as e:
-            error_msg = str(e)
-            if "Failed to connect to robot hardware" in error_msg or "No motors found" in error_msg:
-                print(f"\n{RED}[MultiArm] FATAL: Robot connection failed - {e}{RESET_COLOR}")
-                raise
-            print(f"{RED}[MultiArm] Code execution failed: {e}{RESET_COLOR}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-        except Exception as e:
-            print(f"{RED}[MultiArm] Code execution failed: {e}{RESET_COLOR}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def _execute_code_with_recording(self, code: str, exec_globals: Dict) -> bool:
-        """MultiArmRecorder를 사용한 12축 레코딩 포함 코드 실행.
-
-        1. MultiArmRecorder 생성 + 각 arm에 action 콜백 주입
-        2. recorder.start() → 50Hz 백그라운드 루프 시작
-        3. exec(code) → 스킬 실행 시 action이 자동으로 MultiArmRecorder에 전달
-        4. recorder.stop() → 정리
-        """
-        from record_dataset.multi_arm_recorder import MultiArmRecorder
-
-        try:
-            # Create MultiArmRecorder
-            mar = MultiArmRecorder(
-                multi_arm=self.multi_arm,
-                recorder=self.dataset_recorder,
-                camera_manager=self.camera_manager,
-                target_fps=self.recording_fps,
-                control_hz=50,
-            )
-            self._multi_arm_recorder = mar
-
-            # Inject callbacks that update both state and action in MultiArmRecorder
-            # This avoids concurrent serial port access (Issue 5)
-            def make_callback(set_state_fn, set_action_fn):
-                def callback(state, action):
-                    set_state_fn(state)
-                    set_action_fn(action)
-                return callback
-
-            self.multi_arm.left_arm.recording_callback = make_callback(mar.set_left_state, mar.set_left_action)
-            self.multi_arm.right_arm.recording_callback = make_callback(mar.set_right_state, mar.set_right_action)
-
-            # Skill info callbacks (bypass RecordingContext for multi-arm)
-            self.multi_arm.left_arm.skill_info_callback = mar.set_left_skill_info
-            self.multi_arm.right_arm.skill_info_callback = mar.set_right_skill_info
-
-            # exec(code) defines execute_task() but doesn't call it yet
-            exec(code, exec_globals)
-
-            # Now skills.connect() will be called inside execute_task().
-            # We hook into connect() completion by starting recorder after connect.
-            # Override connect to start recorder after hardware init.
-            original_connect = self.multi_arm.connect
-
-            def connect_then_record():
-                result = original_connect()
-                # Initialize actions with current state (Issue 3: avoid None fallback)
-                if self.multi_arm.left_arm.robot:
-                    left_state = self.multi_arm.left_arm.robot.read_positions()
-                    if left_state is not None:
-                        mar.set_left_action(np.asarray(left_state, dtype=np.float32))
-                if self.multi_arm.right_arm.robot:
-                    right_state = self.multi_arm.right_arm.robot.read_positions()
-                    if right_state is not None:
-                        mar.set_right_action(np.asarray(right_state, dtype=np.float32))
-                # Start recording AFTER robots are connected
-                mar.start()
-                print(f"[Recording] MultiArmRecorder started (12-axis, 50Hz → {self.recording_fps}fps)")
-                return result
-
-            self.multi_arm.connect = connect_then_record
-
-            if "execute_task" in exec_globals:
-                exec_globals["execute_task"]()
-            elif "execute_reset_task" in exec_globals:
-                exec_globals["execute_reset_task"]()
-
-            # Restore original connect and clear callbacks
-            self.multi_arm.connect = original_connect
-            self.multi_arm.left_arm.skill_info_callback = None
-            self.multi_arm.right_arm.skill_info_callback = None
-
-            mar.stop()
-            stats = mar.get_stats()
-            print(f"[Recording] Recorded {stats['recorded_frames']} frames")
-
-            return True
-
-        except AssertionError as e:
-            error_msg = str(e)
-            if "Failed to connect to robot hardware" in error_msg or "No motors found" in error_msg:
-                raise
-            print(f"{RED}[MultiArm] Code execution failed: {e}{RESET_COLOR}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-        except Exception as e:
-            print(f"{RED}[MultiArm] Code execution failed: {e}{RESET_COLOR}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-        finally:
-            if self._multi_arm_recorder and self._multi_arm_recorder.is_running:
-                self._multi_arm_recorder.stop()
-            self._multi_arm_recorder = None
-
-    def _update_llm_cost_with_detect_usage(self, forward_dir: str) -> None:
-        """Merge detect_objects token usage into llm_cost.json."""
-        # Collect usage from both arms
-        detect_turns = []
-        if self.multi_arm:
-            for arm in [self.multi_arm.left_arm, self.multi_arm.right_arm]:
-                usage = getattr(arm, '_detect_token_usage', [])
-                if usage:
-                    detect_turns.extend(usage)
-                    arm._detect_token_usage = []  # reset after collecting
-
-        if not detect_turns:
-            return
-
-        cost_path = Path(forward_dir) / "llm_cost.json"
-        try:
-            # Load existing cost
-            if cost_path.exists():
-                with open(cost_path) as f:
-                    llm_cost = json.load(f)
-            else:
-                llm_cost = {}
-
-            # Build detect summary
-            detect_summary = {
-                "model": "gemini-3-flash-preview",
-                "inference_time_s": round(sum(t.get("inference_time_s", 0) for t in detect_turns), 2),
-                "input_tokens": sum(t.get("input_tokens", 0) for t in detect_turns),
-                "output_tokens": sum(t.get("output_tokens", 0) for t in detect_turns),
-                "total_tokens": sum(t.get("total_tokens", 0) for t in detect_turns),
-                "num_calls": len(detect_turns),
-                "turns": detect_turns,
-            }
-            llm_cost["detect_objects"] = detect_summary
-
-            # Update total and move it to the end
-            old_total = llm_cost.pop("total", {})
-            for key in ["input_tokens", "output_tokens", "total_tokens"]:
-                old_total[key] = old_total.get(key, 0) + detect_summary.get(key, 0)
-            old_total["inference_time_s"] = round(
-                old_total.get("inference_time_s", 0) + detect_summary["inference_time_s"], 2)
-            llm_cost["total"] = old_total
-
-            with open(cost_path, 'w') as f:
-                json.dump(llm_cost, f, indent=2)
-            print(f"  detect_objects cost merged into: {cost_path}")
-            print(f"    detect calls: {len(detect_turns)}, tokens: in={detect_summary['input_tokens']}, out={detect_summary['output_tokens']}")
-
-        except Exception as e:
-            print(f"  [Warning] Failed to update llm_cost with detect usage: {e}")
 
     # ─────────────────────────────────────────────
     # Judge
     # ─────────────────────────────────────────────
 
-    def _run_judge(
-        self,
-        instruction: str,
-        initial_image: np.ndarray,
-        final_image: np.ndarray,
-        object_positions: Dict = None,
-        executed_code: str = "",
-    ) -> Dict:
-        """Run judge evaluation (1 evaluation per episode, task-level)."""
-        try:
-            from judge import TaskJudge
-
-            use_server = os.getenv("USE_VLM_SERVER", "").lower() in ("1", "true", "yes")
-            judge = TaskJudge(
-                model=self.judge_model,
-                verbose=self.verbose,
-                use_server=use_server,
-            )
-            result = judge.judge(
-                instruction=instruction,
-                initial_image=initial_image,
-                final_image=final_image,
-                object_positions=object_positions or {},
-                executed_code=executed_code,
-            )
-            return result
-        except Exception as e:
-            print(f"[MultiArm] Judge error: {e}")
-            return {"prediction": "UNCERTAIN", "reasoning": str(e)}
 
     # ─────────────────────────────────────────────
     # Multi-turn artifact saving
     # ─────────────────────────────────────────────
 
-    def _save_multi_turn_artifacts(self, forward_dir: str, initial_image=None) -> None:
-        """Save multi-turn VLM artifacts (turn logs, LLM cost, crop images, visualizations).
-
-        Replicates the save logic from single-arm ForwardAndResetPipeline.
-        """
-        mt_info = getattr(self, 'multi_turn_info', None)
-        if not mt_info:
-            return
-
-        fwd = Path(forward_dir)
-        import json as _json
-
-        # 1. multi_turn_info.json
-        mt_save = {
-            "turn0_response": mt_info.get("turn0_response", ""),
-            "turn1_response": mt_info.get("turn1_response", ""),
-            "turn2_response": mt_info.get("turn2_response", ""),
-            "turn3_response": mt_info.get("turn3_response", ""),
-            "turn1_parsed": mt_info.get("turn1_parsed"),
-            "turn1_sideview_parsed": mt_info.get("turn1_sideview_parsed"),
-            "turn2_parsed": mt_info.get("turn2_parsed"),
-            "detected_objects": mt_info.get("detected_objects"),
-            "all_points": mt_info.get("all_points"),
-            "crop_responses": mt_info.get("crop_responses"),
-            "turn_test_response": mt_info.get("turn_test_response", ""),
-            "turn_test_overhead_waypoints": mt_info.get("turn_test_overhead_waypoints"),
-            "turn_test_sideview_waypoints": mt_info.get("turn_test_sideview_waypoints"),
-        }
-        with open(fwd / "multi_turn_info.json", 'w', encoding='utf-8') as f:
-            _json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
-        print(f"  Multi-turn info saved: {fwd / 'multi_turn_info.json'}")
-
-        # 2. LLM cost
-        llm_cost = mt_info.get("llm_cost")
-        if llm_cost:
-            with open(fwd / "llm_cost.json", 'w') as f:
-                _json.dump({"phase": "forward", **llm_cost}, f, indent=2)
-            print(f"  LLM cost saved: {fwd / 'llm_cost.json'}")
-
-        # 3. Turn visualization images
-        if initial_image is not None:
-            t1_parsed = mt_info.get("turn1_parsed")
-            t2_parsed = mt_info.get("turn2_parsed")
-
-            try:
-                from execution_forward_and_reset import ForwardAndResetPipeline
-                # Borrow visualization methods (they are stateless)
-                dummy = object.__new__(ForwardAndResetPipeline)
-
-                if t1_parsed:
-                    dummy._visualize_turn1(
-                        initial_image.copy(), t1_parsed,
-                        str(fwd / "turn1_detection.jpg"),
-                        turn1_raw=mt_info.get("turn0_response", ""),
-                    )
-
-                if t2_parsed:
-                    dummy._visualize_turn2(
-                        initial_image.copy(), t1_parsed, t2_parsed,
-                        str(fwd / "turn2_grasp_points.jpg"),
-                    )
-
-                oh_waypoints = mt_info.get("turn_test_overhead_waypoints")
-                if oh_waypoints:
-                    dummy._visualize_turn_test(
-                        initial_image.copy(), t2_parsed, oh_waypoints,
-                        str(fwd / "turn_test_overhead_waypoints.jpg"),
-                    )
-            except Exception as e:
-                print(f"  [Warning] Turn visualization failed: {e}")
-
-        # 4. Crop images
-        crop_dir = mt_info.get("crop_dir")
-        if crop_dir and os.path.isdir(crop_dir):
-            import shutil
-            for fname in sorted(os.listdir(crop_dir)):
-                if fname.endswith(('.jpg', '.png')):
-                    shutil.copy2(os.path.join(crop_dir, fname), os.path.join(forward_dir, fname))
-            print(f"  Crop images saved to: {forward_dir}")
-
-        # 5. Turn text logs
-        self._save_turn_logs(forward_dir, mt_info)
-
-    def _save_reset_multi_turn_artifacts(self, reset_dir: str, reset_image=None) -> None:
-        """Save reset multi-turn VLM artifacts (same as forward but from reset_multi_turn_info)."""
-        reset_mt = getattr(self, 'reset_multi_turn_info', None)
-        if not reset_mt:
-            return
-
-        rst = Path(reset_dir)
-        import json as _json
-
-        # 1. multi_turn_info.json
-        mt_save = {k: v for k, v in reset_mt.items() if k != "crop_dir"}
-        with open(rst / "multi_turn_info.json", 'w', encoding='utf-8') as f:
-            _json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
-        print(f"  Reset multi-turn info saved: {rst / 'multi_turn_info.json'}")
-
-        # 2. LLM cost
-        llm_cost = reset_mt.get("llm_cost")
-        if llm_cost:
-            with open(rst / "llm_cost.json", 'w') as f:
-                _json.dump({"phase": "reset", **llm_cost}, f, indent=2)
-            print(f"  Reset LLM cost saved: {rst / 'llm_cost.json'}")
-
-        # 3. Turn visualization images
-        if reset_image is not None:
-            t1_parsed = reset_mt.get("turn1_parsed")
-            all_pts = reset_mt.get("all_points", [])
-
-            try:
-                from execution_forward_and_reset import ForwardAndResetPipeline
-                dummy = object.__new__(ForwardAndResetPipeline)
-
-                if t1_parsed:
-                    dummy._visualize_turn1(
-                        reset_image.copy(), t1_parsed,
-                        str(rst / "turn1_detection.jpg"),
-                    )
-
-                if t1_parsed and all_pts:
-                    r_img_h, r_img_w = reset_image.shape[:2]
-                    t2_compat = {"grasp_points": [
-                        {"object_name": p["object_label"], "label": p["label"],
-                         "role": p["role"],
-                         "point_pixel": [
-                             int(p["py"] * 1000 / r_img_h),
-                             int(p["px"] * 1000 / r_img_w),
-                         ]}
-                        for p in all_pts
-                    ]}
-                    dummy._visualize_turn2(
-                        reset_image.copy(), t1_parsed, t2_compat,
-                        str(rst / "turn2_grasp_points.jpg"),
-                    )
-            except Exception as e:
-                print(f"  [Warning] Reset turn visualization failed: {e}")
-
-        # 4. Crop images
-        crop_dir = reset_mt.get("crop_dir")
-        if crop_dir and os.path.isdir(crop_dir):
-            import shutil
-            for fname in sorted(os.listdir(crop_dir)):
-                if fname.endswith(('.jpg', '.png')):
-                    shutil.copy2(os.path.join(crop_dir, fname), os.path.join(reset_dir, fname))
-            print(f"  Reset crop images saved to: {reset_dir}")
-
-        # 5. Turn text logs
-        self._save_turn_logs(reset_dir, reset_mt)
-
-    def _save_turn_logs(self, forward_dir: str, mt_info: Dict) -> None:
-        """Save per-turn text logs."""
-        fwd = Path(forward_dir)
-
-        # Turn 0
-        turn0_raw = mt_info.get("turn0_response", "")
-        if turn0_raw:
-            lines = ["=" * 60, "Turn 0: Scene Understanding", "=" * 60, "", turn0_raw]
-            (fwd / "turn0_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 0 log saved: {fwd / 'turn0_log.txt'}")
-
-        # Turn 1
-        turn1_raw = mt_info.get("turn1_response", "")
-        if turn1_raw:
-            lines = ["=" * 60, "Turn 1: Bounding Box Detection", "=" * 60, "", turn1_raw]
-            t1_parsed = mt_info.get("turn1_parsed")
-            if t1_parsed:
-                lines.append("\n[Parsed Summary]")
-                obj_list = t1_parsed if isinstance(t1_parsed, list) else t1_parsed.get("objects", []) if isinstance(t1_parsed, dict) else []
-                for obj in obj_list:
-                    name = obj.get("label") or obj.get("name", "?")
-                    box = obj.get("box_2d") or obj.get("bbox_pixel", "N/A")
-                    lines.append(f"  - {name}: bbox={box}")
-            (fwd / "turn1_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 1 log saved: {fwd / 'turn1_log.txt'}")
-
-        # Turn 2+
-        all_points = mt_info.get("all_points", [])
-        crop_responses = mt_info.get("crop_responses", [])
-        if all_points or crop_responses:
-            lines = ["=" * 60, "Turn 2+: Crop-then-Point", "=" * 60, ""]
-            for cr in crop_responses:
-                lines.append(f"--- Crop: {cr.get('label', '?')} ---")
-                lines.append(cr.get("response", ""))
-                lines.append("")
-            lines.append("[Parsed Points Summary]")
-            for pt in all_points:
-                obj = pt.get("object_label", "?")
-                label = pt.get("label", "?")
-                role = pt.get("role", "?")
-                px, py = pt.get("px", 0), pt.get("py", 0)
-                reasoning = pt.get("reasoning", "")
-                lines.append(f"  - {obj}: {label} ({role}) pixel=({px},{py})")
-                if reasoning:
-                    lines.append(f"    reasoning: {reasoning}")
-            (fwd / "turn2_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 2+ log saved: {fwd / 'turn2_log.txt'}")
-
-        # Turn 3
-        turn3_raw = mt_info.get("turn3_response", "")
-        if turn3_raw:
-            lines = ["=" * 60, "Turn 3: Code Generation", "=" * 60, "", turn3_raw]
-            (fwd / "turn3_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 3 log saved: {fwd / 'turn3_log.txt'}")
 
     # ─────────────────────────────────────────────
     # Capture helpers
     # ─────────────────────────────────────────────
 
     def _capture_frame(self) -> Optional[np.ndarray]:
-        """Capture a color frame from shared camera."""
+        """Capture a color frame via PipelineCamera."""
+        if hasattr(self, '_pipeline_camera') and self._pipeline_camera:
+            return self._pipeline_camera.capture_frame()
         if self.camera:
             try:
                 color, _ = self.camera.get_frames()
@@ -1072,7 +608,9 @@ class UnifiedMultiArmPipeline:
                 f.write(code)
 
             # Save multi-turn info (turn logs, LLM cost, crop images, visualizations)
-            self._save_multi_turn_artifacts(forward_dir, initial_image)
+            from pipeline.save_logs import save_multi_turn_info, save_turn_visualizations
+            save_multi_turn_info(forward_dir, self.multi_turn_info, phase="forward")
+            save_turn_visualizations(forward_dir, self.multi_turn_info, initial_image, phase="forward")
 
             # Step 3: Execute code
             print(f"\n{YELLOW}" + self._log("Executing forward code...", step="Step 3/4") + f"{RESET_COLOR}")
@@ -1120,19 +658,16 @@ class UnifiedMultiArmPipeline:
                 print(f"  [Warning] pixel move visualization failed: {e}")
 
             # Update llm_cost.json with detect_objects token usage
-            self._update_llm_cost_with_detect_usage(forward_dir)
+            from pipeline.save_logs import update_llm_cost_with_detect_usage
+            update_llm_cost_with_detect_usage(forward_dir, self.multi_arm)
 
             # Save execution_context.json
-            exec_ctx = {
-                "instruction": instruction,
-                "object_positions": self._make_serializable(self.detected_positions or {}),
-                "generated_code": code,
-                "execution_success": execution_success,
-                "robot_ids": self.robot_ids,
-            }
-            with open(Path(forward_dir) / "execution_context.json", 'w') as f:
-                json.dump(exec_ctx, f, indent=2, default=str)
-            print(f"  Execution context saved: {Path(forward_dir) / 'execution_context.json'}")
+            from pipeline.save_logs import save_execution_context
+            save_execution_context(
+                forward_dir, instruction,
+                self._make_serializable(self.detected_positions or {}),
+                code, execution_success, robot_ids=self.robot_ids,
+            )
 
             # Capture final image
             time.sleep(1.0)
@@ -1143,18 +678,14 @@ class UnifiedMultiArmPipeline:
             # Save batch_info early (before judge) so resume can detect this episode
             # Judge result will be updated after judge completes
             episode_root = str(Path(forward_dir).parent)
-            batch_info = {
-                "batch_seed_index": getattr(self, '_current_batch_index', 0) + 1,
-                "slot": getattr(self, '_current_slot', 0),
-                "judge": "PENDING",
-            }
-            with open(Path(episode_root) / "batch_info.json", 'w') as f:
-                json.dump(batch_info, f, indent=2)
+            from pipeline.save_logs import save_batch_info as _save_bi
+            _save_bi(episode_root, getattr(self, '_current_batch_index', 0),
+                     getattr(self, '_current_slot', 0), "PENDING")
 
             # Step 4: Judge evaluation
             print(f"\n{YELLOW}" + self._log("Running judge evaluation...", step="Step 4/4") + f"{RESET_COLOR}")
             if initial_image is not None and final_image is not None:
-                judge_result = self._run_judge(
+                judge_result = self._run_forward_judge(
                     instruction, initial_image, final_image,
                     object_positions=self.detected_positions or {},
                     executed_code=code,
@@ -1194,43 +725,38 @@ class UnifiedMultiArmPipeline:
             # Save forward result + judge
             with open(Path(forward_dir) / "result.json", 'w') as f:
                 json.dump(self._make_serializable(result['forward']), f, indent=2)
-            with open(Path(forward_dir) / "judge_result.json", 'w') as f:
-                json.dump(result['judge'], f, indent=2, default=str)
+            from pipeline.save_logs import save_judge_result
+            save_judge_result(forward_dir, result['judge'], initial_image, final_image, instruction)
 
-            # Save judge visualization image
-            try:
-                from judge.visualize import create_result_image
-                judge_vis = create_result_image(
-                    initial_image, final_image,
-                    result['judge'].get('prediction', 'UNCERTAIN'),
-                    result['judge'].get('reasoning', ''),
-                    instruction,
-                )
-                if judge_vis is not None:
-                    cv2.imwrite(str(Path(forward_dir) / "judge_result.jpg"), judge_vis)
-            except Exception:
-                pass
-
-            # Save forward_log.txt (콘솔 로그 요약)
+            # Save forward_log.txt (콘솔 로그 요약 + 레코딩 디버그)
+            mar_stats = getattr(self, '_last_mar_stats', {})
             fwd_log_lines = [
                 f"Instruction: {instruction}",
                 f"Robot IDs: {self.robot_ids}",
                 f"Execution success: {execution_success}",
                 f"Judge: {result['judge'].get('prediction', 'UNCERTAIN')}",
                 f"Judge reasoning: {result['judge'].get('reasoning', '')}",
+                f"",
+                f"=== Recording Debug ===",
+                f"# ratio: recorded/expected frames. 1.0=perfect, <1.0=frame drops (fast playback)",
+                f"# effective_hz: actual recording loop speed. Should be ~50. Lower=loop starved",
+                f"# overruns: loop iterations where work exceeded 20ms budget",
+                f"# loop_ms: per-iteration work time (excl sleep). >20ms means loop can't keep 50Hz",
+                f"# record_ms: per-frame _record_frame() time (camera capture + frame build + dataset write)",
+                f"record_dataset: {self.record_dataset}",
+                f"dataset_recorder: {'YES' if self.dataset_recorder else 'NO'}",
+                f"resume_recording: {self.resume_recording}",
+                f"episode_num: {self.current_episode}",
+                f"cached_forward_code: {'YES' if self.cached_forward_code else 'NO'}",
+                f"multi_arm_recorder_stats: {mar_stats}",
             ]
             (Path(forward_dir) / "forward_log.txt").write_text("\n".join(fwd_log_lines), encoding="utf-8")
 
             # Update batch_info.json with judge result (early save was PENDING)
             judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
             episode_root = str(Path(forward_dir).parent)
-            batch_info = {
-                "batch_seed_index": getattr(self, '_current_batch_index', 0) + 1,
-                "slot": getattr(self, '_current_slot', 0),
-                "judge": judge_pred,
-            }
-            with open(Path(episode_root) / "batch_info.json", 'w') as f:
-                json.dump(batch_info, f, indent=2)
+            _save_bi(episode_root, getattr(self, '_current_batch_index', 0),
+                     getattr(self, '_current_slot', 0), judge_pred)
 
             # ══════════════════════════════════════
             # PHASE 2: RESET EXECUTION
@@ -1287,7 +813,9 @@ class UnifiedMultiArmPipeline:
                     f.write(reset_code)
 
                 # Save reset multi-turn artifacts (turn logs, visualizations, crop images)
-                self._save_reset_multi_turn_artifacts(reset_dir, reset_image)
+                from pipeline.save_logs import save_multi_turn_info, save_turn_visualizations
+                save_multi_turn_info(reset_dir, self.reset_multi_turn_info, phase="reset")
+                save_turn_visualizations(reset_dir, self.reset_multi_turn_info, reset_image, phase="reset")
 
                 # Execute reset
                 print(f"\n{YELLOW}" + self._log("Executing reset code...") + f"{RESET_COLOR}")
@@ -1320,26 +848,20 @@ class UnifiedMultiArmPipeline:
                 with open(Path(reset_dir) / "result.json", 'w') as f:
                     json.dump(self._make_serializable(result['reset']), f, indent=2)
 
-                # Reset judge (if images available)
-                if reset_image is not None and reset_final_image is not None:
-                    try:
-                        from judge import ResetJudge
-                        use_server = os.getenv("USE_VLM_SERVER", "").lower() in ("1", "true", "yes")
-                        reset_judge = ResetJudge(model=self.judge_model, verbose=self.verbose, use_server=use_server)
-                        reset_judge_result = reset_judge.judge(
-                            reset_mode="original",
-                            current_positions=self._make_serializable(self.detected_positions or {}),
-                            target_positions=self._make_serializable(target_positions),
-                            initial_image=reset_image,
-                            final_image=reset_final_image,
-                            executed_code=reset_code,
-                            original_instruction=instruction,
-                        )
-                        result['reset_judge'] = reset_judge_result
-                        with open(Path(reset_dir) / "reset_judge_result.json", 'w') as f:
-                            json.dump(reset_judge_result, f, indent=2, default=str)
-                    except Exception as e:
-                        print(f"  [Warning] Reset judge failed: {e}")
+                # Reset judge
+                reset_judge_result = self._run_reset_judge(
+                    reset_mode="original",
+                    current_positions=self._make_serializable(self.detected_positions or {}),
+                    target_positions=self._make_serializable(target_positions),
+                    initial_image=reset_image,
+                    final_image=reset_final_image,
+                    executed_code=reset_code,
+                    original_instruction=instruction,
+                )
+                result['reset_judge'] = reset_judge_result
+                if reset_judge_result.get('prediction') != 'UNCERTAIN':
+                    with open(Path(reset_dir) / "reset_judge_result.json", 'w') as f:
+                        json.dump(reset_judge_result, f, indent=2, default=str)
 
                 # Save reset_log.txt
                 reset_log_lines = [
@@ -1446,7 +968,8 @@ class UnifiedMultiArmPipeline:
 
                 # Save batch_info.json
                 judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-                self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
+                from pipeline.save_logs import save_batch_info
+                save_batch_info(episode_dir, batch_index, slot, judge_pred)
 
                 # Store first episode positions for seed[0]
                 if seed_positions[0] is None and self.first_episode_positions is not None:
@@ -1488,13 +1011,6 @@ class UnifiedMultiArmPipeline:
         self._finalize_session(all_results, session_dir)
         return all_results
 
-    def _save_batch_info(self, episode_dir: str, batch_index: int, slot: int, judge_pred: str) -> None:
-        """batch_info.json 저장."""
-        bi = {"batch_seed_index": batch_index + 1, "slot": slot, "judge": judge_pred}
-        bi_path = Path(episode_dir) / "batch_info.json"
-        bi_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(bi_path, 'w') as f:
-            json.dump(bi, f, indent=2)
 
     def _load_resume_state(self, session_dir: str):
         """이전 세션에서 상태 복원 (batch_info.json 기반).
@@ -1660,7 +1176,8 @@ class UnifiedMultiArmPipeline:
                 )
 
                 judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-                self._save_batch_info(episode_dir, batch_index, slot, judge_pred)
+                from pipeline.save_logs import save_batch_info
+                save_batch_info(episode_dir, batch_index, slot, judge_pred)
 
                 if seed_positions[0] is None and self.first_episode_positions is not None:
                     seed_positions[0] = copy.deepcopy(self.first_episode_positions)

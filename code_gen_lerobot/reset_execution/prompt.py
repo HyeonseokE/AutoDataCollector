@@ -267,15 +267,10 @@ tgt = target_positions["next_object"]["position"]
 ### **Code Template**
 
 ```python
-from skills.skills_lerobot import LeRobotSkills
-
-def execute_task():
+def execute_reset_task():
     '''Move objects from current positions to target positions.'''
-
-    skills = LeRobotSkills(
-        robot_config="{robot_config}",
-        frame="{frame}",
-    )
+    # `skills`, `current_positions`, `target_positions` are pre-injected global variables.
+    # Do NOT import anything. Do NOT instantiate LeRobotSkills yourself.
     skills.connect()
 
     try:
@@ -472,15 +467,10 @@ tgt = target_positions["next_object"]["position"]
 **CRITICAL**: You MUST reference `current_positions` and `target_positions` dicts in skill calls. Do NOT hardcode coordinate values directly. The dicts are provided as global variables at runtime.
 
 ```python
-from skills.skills_lerobot import LeRobotSkills
-
-def execute_task():
+def execute_reset_task():
     '''Move objects from current positions to target positions.'''
-
-    skills = LeRobotSkills(
-        robot_config="{robot_config}",
-        frame="{frame}",
-    )
+    # `skills`, `current_positions`, `target_positions` are pre-injected global variables.
+    # Do NOT import anything. Do NOT instantiate LeRobotSkills yourself.
     skills.connect()
 
     try:

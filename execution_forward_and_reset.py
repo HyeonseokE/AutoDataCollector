@@ -118,7 +118,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "object_detection"))
 
 
-class ForwardAndResetPipeline:
+from pipeline.base_pipeline import BasePipeline
+
+
+class ForwardAndResetPipeline(BasePipeline):
     """Forward → Judge → Reset 통합 파이프라인"""
 
     def __init__(
@@ -142,6 +145,7 @@ class ForwardAndResetPipeline:
         task_type: str = "pick_place",
         reset_instruction: str = None,
         skip_turn_test: bool = False,
+        detect_model: str = None,
     ):
         """
         초기화
@@ -176,6 +180,7 @@ class ForwardAndResetPipeline:
         self.task_type = task_type
         self.reset_instruction = reset_instruction or "move objects to certain position"
         self.skip_turn_test = skip_turn_test
+        self.detect_model = detect_model
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
 
@@ -241,38 +246,6 @@ class ForwardAndResetPipeline:
         if self.record_dataset and not self.resume_recording:
             self._init_recording()
 
-    def _log(self, message: str, step: str = None, tag: str = None) -> str:
-        """
-        통일된 로그 포맷 생성
-
-        Args:
-            message: 출력할 메시지
-            step: 단계 정보 (예: "Step 1/5")
-            tag: 추가 태그 (예: "Validation", "Recording")
-
-        Returns:
-            포맷된 로그 문자열
-
-        Examples:
-            _log("Starting execution")
-            # -> [Forward][01/50] Starting execution
-
-            _log("Detecting objects", step="Step 1/5")
-            # -> [Forward][01/50][Step 1/5] Detecting objects
-
-            _log("Checking workspace", tag="Validation")
-            # -> [Forward][01/50][Validation] Checking workspace
-        """
-        ep_str = f"{self.current_episode:02d}/{self.total_episodes:02d}"
-        prefix = f"[{self.current_phase}][{ep_str}]"
-
-        if step:
-            prefix += f"[{step}]"
-        if tag:
-            prefix += f"[{tag}]"
-
-        return f"{prefix} {message}"
-
     @staticmethod
     def _extract_position_keys(code: str) -> List[str]:
         """캐싱된 코드에서 positions['xxx'] 패턴의 key 추출"""
@@ -293,67 +266,51 @@ class ForwardAndResetPipeline:
             return True
         return set(cached_keys) <= set(new_positions.keys())
 
-    def _get_realsense_from_manager(self):
-        """camera_manager에서 RealSense 카메라를 가져오기 (이름 호환)"""
-        if not self.camera_manager:
-            return None
-        for cam_name in ["realsense", "top"]:
-            try:
-                return self.camera_manager.get_camera(cam_name)
-            except KeyError:
-                continue
-        return None
+    def _create_skills(self):
+        """LeRobotSkills 인스턴스 생성 (exec_globals 주입용).
+
+        LLM 코드가 직접 import/생성하지 않고, 파이프라인이 미리 생성하여 주입.
+        """
+        from skills.skills_lerobot import LeRobotSkills
+
+        robot_config = f"robot_configs/robot/so101_robot{self.robot_id}.yaml"
+        kwargs = {
+            "robot_config": robot_config,
+            "frame": "base_link",
+        }
+        if self.detect_model:
+            kwargs["detect_model"] = self.detect_model
+
+        self._skills = LeRobotSkills(**kwargs)
+
+        # 공유 카메라 주입 (detect_objects에서 사용)
+        if self.camera:
+            self._skills.camera = self.camera
+
+        return self._skills
+
+    def _get_pipeline_camera(self):
+        """PipelineCamera lazy init."""
+        if not hasattr(self, '_pipeline_camera') or self._pipeline_camera is None:
+            from pipeline.camera_session import PipelineCamera
+            self._pipeline_camera = PipelineCamera(
+                camera_manager=self.camera_manager, verbose=self.verbose)
+        return self._pipeline_camera
 
     def initialize_camera(self) -> bool:
-        """카메라 초기화 (camera_manager가 있으면 그것을 사용)"""
-        # camera_manager가 이미 RealSense를 가지고 있으면 재사용
-        if self.camera_manager:
-            if not self.camera_manager.is_connected:
-                try:
-                    self.camera_manager.connect_all()
-                except Exception as e:
-                    print(f"[Pipeline] Camera manager reconnect failed: {e}")
-            if self.camera_manager.is_connected:
-                cam = self._get_realsense_from_manager()
-                if cam is not None:
-                    self.camera = cam
-                    if self.verbose:
-                        print(f"[Pipeline] Camera initialized (from camera_manager)")
-                    return True
-
-        # Fallback: 직접 RealSense 연결
-        try:
-            from object_detection.camera import RealSenseD435
-
-            self.camera = RealSenseD435(width=640, height=480, fps=30)
-            self.camera.start()
-            for _ in range(30):
-                self.camera.get_frames()
-            if self.verbose:
-                print("[Pipeline] Camera initialized (direct)")
-            return True
-        except Exception as e:
-            print(f"[Pipeline] Camera initialization failed: {e}")
-            return False
+        """카메라 초기화 (PipelineCamera에 위임)."""
+        pc = self._get_pipeline_camera()
+        pc.camera_manager = self.camera_manager  # 동기화
+        result = pc.initialize()
+        self.camera = pc.camera
+        return result
 
     def shutdown_camera(self) -> None:
-        """카메라 종료 (camera_manager 소유 카메라는 참조만 해제)"""
-        if self.camera:
-            # camera_manager가 소유한 카메라면 stop하지 않음 (manager가 관리)
-            if self.camera_manager:
-                try:
-                    cm_cam = self._get_realsense_from_manager()
-                    if self.camera is cm_cam:
-                        self.camera = None
-                        if self.verbose:
-                            print("[Pipeline] Camera reference cleared (managed by camera_manager)")
-                        return
-                except (KeyError, Exception):
-                    pass
-            self.camera.stop()
-            self.camera = None
-            if self.verbose:
-                print("[Pipeline] Camera shutdown")
+        """카메라 종료 (PipelineCamera에 위임)."""
+        pc = self._get_pipeline_camera()
+        pc.camera = self.camera  # 동기화
+        pc.shutdown()
+        self.camera = pc.camera  # None으로 반영
 
     def _init_recording(self) -> None:
         """LeRobot 데이터셋 레코딩 초기화 (멀티 카메라 지원)"""
@@ -375,7 +332,7 @@ class ForwardAndResetPipeline:
 
             # 1. 카메라 매니저 초기화 (YAML에서 동적 로드)
             print(f"[Recording] Loading camera configuration...")
-            self.camera_manager = create_camera_manager_from_config()
+            self.camera_manager = create_camera_manager_from_config(robot_id=self.robot_id)
 
             # 2. 카메라 연결
             print(f"[Recording] Connecting cameras...")
@@ -411,6 +368,7 @@ class ForwardAndResetPipeline:
                 repo_id=self.dataset_repo_id,
                 fps=self.recording_fps,
                 resume=self.resume_recording,
+                robot_id=self.robot_id,
             )
             print(f"[Recording] Recorder initialized successfully")
             print(f"[Recording] Features: {list(self.dataset_recorder.features.keys())}")
@@ -422,6 +380,7 @@ class ForwardAndResetPipeline:
                 repo_id=reset_repo_id,
                 fps=self.recording_fps,
                 resume=self.resume_recording,
+                robot_id=self.robot_id,
             )
             print(f"[Recording] Reset recorder initialized")
 
@@ -444,27 +403,6 @@ class ForwardAndResetPipeline:
             self.record_dataset = False
             self.dataset_recorder = None
             self.camera_manager = None
-
-    def _start_episode_recording(self, task: str) -> None:
-        """에피소드 레코딩 시작"""
-        if self.dataset_recorder and self.record_dataset:
-            try:
-                self.dataset_recorder.start_episode(task=task)
-                print(f"[Recording] Episode started: {task}")
-            except Exception as e:
-                print(f"[Recording] Warning: Failed to start episode: {e}")
-
-    def _end_episode_recording(self, discard: bool = False) -> None:
-        """에피소드 레코딩 종료"""
-        if self.dataset_recorder and self.record_dataset:
-            try:
-                info = self.dataset_recorder.end_episode(discard=discard)
-                if not discard:
-                    print(f"[Recording] Episode saved: {info.get('num_frames', 0)} frames")
-                else:
-                    print(f"[Recording] Episode discarded")
-            except Exception as e:
-                print(f"[Recording] Warning: Failed to end episode: {e}")
 
     def _start_reset_episode_recording(self, target_positions: Dict) -> None:
         """Reset 에피소드 레코딩 시작 (별도 dataset, recorder 교체)"""
@@ -524,44 +462,13 @@ class ForwardAndResetPipeline:
                 print(f"[Recording] Warning: Failed to disconnect cameras: {e}")
             self.camera_manager = None
 
-    def _install_recording_signal_handler(self) -> None:
-        """Ctrl+C 시 데이터셋 finalize() 호출을 보장하는 signal handler 등록"""
-        import signal
-
-        original_handler = signal.getsignal(signal.SIGINT)
-
-        def _handle_sigint(signum, frame):
-            print(f"\n[Recording] SIGINT received — finalizing dataset...")
-            self._finalize_recording()
-            # 원래 handler 복원 후 재전송 (정상 종료 흐름)
-            signal.signal(signal.SIGINT, original_handler)
-            raise KeyboardInterrupt
-
-        signal.signal(signal.SIGINT, _handle_sigint)
-        print(f"[Recording] Signal handler installed (Ctrl+C will finalize dataset)")
 
     def capture_frame(self) -> Optional[np.ndarray]:
-        """현재 프레임 캡처 (camera 또는 camera_manager 사용)"""
-        try:
-            # 1순위: camera_manager의 realsense 카메라 사용
-            if self.camera_manager and self.camera_manager.is_connected:
-                cam = self._get_realsense_from_manager()
-                if cam is not None:
-                    try:
-                        color, _ = cam.get_frames()
-                        return color
-                    except Exception:
-                        pass
-
-            # 2순위: self.camera 사용
-            if self.camera is not None:
-                color, _ = self.camera.get_frames()
-                return color
-
-            return None
-        except Exception as e:
-            print(f"[Pipeline] Frame capture failed: {e}")
-            return None
+        """현재 프레임 캡처 (PipelineCamera에 위임)."""
+        pc = self._get_pipeline_camera()
+        pc.camera_manager = self.camera_manager  # 동기화
+        pc.camera = self.camera
+        return pc.capture_frame()
 
     def run_detection(
         self,
@@ -585,7 +492,7 @@ class ForwardAndResetPipeline:
             print("  [Detection] Using pipeline camera")
         elif self.camera_manager and self.camera_manager.is_connected:
             try:
-                external_camera = self._get_realsense_from_manager()
+                external_camera = self._get_pipeline_camera().get_realsense()
                 print("  [Detection] Using shared camera from recording")
             except KeyError:
                 print("  [Detection] No realsense camera in manager, using internal camera")
@@ -695,7 +602,7 @@ class ForwardAndResetPipeline:
         active_camera = None
         if self.camera_manager and self.camera_manager.is_connected:
             try:
-                active_camera = self._get_realsense_from_manager()
+                active_camera = self._get_pipeline_camera().get_realsense()
             except KeyError:
                 pass
         if active_camera is None:
@@ -740,6 +647,14 @@ class ForwardAndResetPipeline:
         except Exception:
             pass
 
+    def _extract_skill_sequence_from_skills(self, skills):
+        """skills 인스턴스에서 스킬 시퀀스를 추출"""
+        try:
+            if hasattr(skills, 'skill_sequence'):
+                self._last_skill_sequence = skills.skill_sequence
+        except Exception:
+            pass
+
     @staticmethod
     def _patch_code_block(code: str, block_name: str, new_values: Dict) -> str:
         """코드 내 지정된 dict 블록의 좌표를 치환.
@@ -776,19 +691,19 @@ class ForwardAndResetPipeline:
         """
         from skills.dry_run_skills import DryRunSkills
 
-        patched_code = code.replace(
-            "from skills.skills_lerobot import LeRobotSkills",
-            "from skills.dry_run_skills import DryRunSkills as LeRobotSkills",
-        )
-
         try:
+            dry_skills = DryRunSkills(
+                robot_config=f"robot_configs/robot/so101_robot{self.robot_id}.yaml",
+                frame="base_link",
+            )
             exec_globals = {
                 "__name__": "__generated__",
+                "skills": dry_skills,
                 "positions": positions,
             }
             if extra_globals:
                 exec_globals.update(extra_globals)
-            exec(patched_code, exec_globals)
+            exec(code, exec_globals)
             if "execute_task" in exec_globals:
                 exec_globals["execute_task"]()
             elif "execute_reset_task" in exec_globals:
@@ -807,139 +722,31 @@ class ForwardAndResetPipeline:
             print(f"  [DryRun] Code execution error: {e}")
             return False
 
-    def execute_code(self, code: str, positions: Dict, extra_globals: Dict = None) -> bool:
-        """생성된 코드 실행 (레코딩 모드 지원)
-
-        Args:
-            code: 실행할 Python 코드
-            positions: Forward용 positions dict
-            extra_globals: 추가 globals (Reset용 current_positions, target_positions 등)
-        """
-        self._last_skill_sequence = []  # 초기화
-        try:
-            exec_globals = {
-                "__name__": "__generated__",
-                "positions": positions,
-            }
-            if extra_globals:
-                exec_globals.update(extra_globals)
-
-            # 레코딩 모드: RecordingContext 설정
-            # LeRobotSkills가 생성될 때 자동으로 콜백을 획득
-            if self.record_dataset and self.dataset_recorder:
-                success = self._execute_code_with_recording(code, exec_globals)
-            else:
-                exec(code, exec_globals)
-                if "execute_task" in exec_globals:
-                    exec_globals["execute_task"]()
-                elif "execute_reset_task" in exec_globals:
-                    exec_globals["execute_reset_task"]()
-                success = True
-
-            # 스킬 시퀀스 추출 (LeRobotSkills 인스턴스에서)
-            self._extract_skill_sequence(exec_globals)
-            return success
-
-        except AssertionError as e:
-            error_msg = str(e)
-            # 모터 연결 실패 - 파이프라인 완전 종료
-            if "Failed to connect to robot hardware" in error_msg or "No motors found" in error_msg:
-                print(f"\n[Pipeline] FATAL: Robot connection failed - {e}")
-                print(f"[Pipeline] Terminating pipeline...")
-                raise  # 상위로 전파하여 파이프라인 종료
-            # 그 외 AssertionError는 일반 에러로 처리
-            print(f"[Pipeline] Code execution failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-        except Exception as e:
-            print(f"[Pipeline] Code execution failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def _execute_code_with_recording(self, code: str, exec_globals: Dict) -> bool:
-        """RecordingContext를 사용한 레코딩 포함 코드 실행 (멀티 카메라 지원)
-
-        RecordingContext를 설정하면 LeRobotSkills가 생성될 때
-        자동으로 콜백을 획득하여 제어 루프 내에서 (state, action) 쌍을 캡처합니다.
-
-        멀티 카메라 모드:
-        - camera_manager가 있으면 async_read_all()로 모든 카메라에서 캡처
-        - record_frame_multi()로 멀티 카메라 프레임 저장
-        """
-        try:
-            from record_dataset.context import RecordingContext
-
-            # 레코딩용 카메라 결정 (멀티 카메라 우선)
-            recording_camera = self.camera_manager if self.camera_manager else self.camera
-
-            # RecordingContext 설정 (비동기 캡처 활성화!)
-            # LeRobotSkills.__init__()에서 이 컨텍스트를 확인하고 콜백을 가져감
-            # Reset phase에서는 reset_dataset_recorder를 사용
-            active_recorder = RecordingContext._recorder if RecordingContext._recorder else self.dataset_recorder
-            RecordingContext.setup(
-                recorder=active_recorder,
-                camera_manager=recording_camera,  # MultiCameraManager
-                target_fps=self.recording_fps,
-                control_hz=50,  # 제어 루프 주파수 (skills_lerobot.py의 time.sleep(0.02))
-                use_async_capture=True,  # ✨ 비동기 캡처로 50Hz 달성!
+    def _get_task_runner(self):
+        """TaskRunner 인스턴스 반환 (lazy init)."""
+        if not hasattr(self, '_task_runner') or self._task_runner is None:
+            from pipeline.task_runner import SingleArmTaskRunner
+            skills = self._create_skills()
+            self._task_runner = SingleArmTaskRunner(
+                skills=skills,
+                recorder=self.dataset_recorder if self.record_dataset else None,
+                camera_manager=self.camera_manager,
+                camera=self.camera,
+                recording_fps=self.recording_fps,
             )
-            RecordingContext.reset_episode()
-            print(f"[Recording] Context setup complete (callback will be injected to LeRobotSkills)")
+        return self._task_runner
 
-            # 코드 실행 - LeRobotSkills가 자동으로 콜백 획득
-            exec(code, exec_globals)
-            if "execute_task" in exec_globals:
-                exec_globals["execute_task"]()
-            elif "execute_reset_task" in exec_globals:
-                exec_globals["execute_reset_task"]()
-
-            # 레코딩 통계 출력
-            stats = RecordingContext.get_stats()
-            print(f"[Recording] Recorded {stats['recorded_frames']} frames, effective FPS: {stats['effective_fps']:.1f}")
-            if stats.get('cameras'):
-                print(f"[Recording] Cameras: {stats['cameras']}")
-
-            return True
-
-        except ImportError as e:
-            print(f"[Recording] Warning: RecordingContext not available: {e}")
-            print(f"[Recording] Falling back to non-recording execution")
-            exec(code, exec_globals)
-            if "execute_task" in exec_globals:
-                exec_globals["execute_task"]()
-            elif "execute_reset_task" in exec_globals:
-                exec_globals["execute_reset_task"]()
-            return True
-
-        except AssertionError as e:
-            error_msg = str(e)
-            # 모터 연결 실패 - 파이프라인 완전 종료
-            if "Failed to connect to robot hardware" in error_msg or "No motors found" in error_msg:
-                print(f"\n[Pipeline] FATAL: Robot connection failed - {e}")
-                print(f"[Pipeline] Terminating pipeline...")
-                raise  # 상위로 전파하여 파이프라인 종료
-            # 그 외 AssertionError는 일반 에러로 처리
-            print(f"[Pipeline] Code execution failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-        except Exception as e:
-            print(f"[Pipeline] Code execution failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-        finally:
-            # RecordingContext 정리
-            try:
-                from record_dataset.context import RecordingContext
-                RecordingContext.clear()
-            except:
-                pass
+    def execute_code(self, code: str, positions: Dict, extra_globals: Dict = None) -> bool:
+        """생성된 코드 실행 (TaskRunner에 위임)"""
+        self._last_skill_sequence = []
+        runner = self._get_task_runner()
+        # 카메라가 나중에 초기화될 수 있으므로 동기화
+        if self.camera and runner.skills:
+            runner.skills.camera = self.camera
+        success = runner.execute(code, positions, extra_globals)
+        # 스킬 시퀀스 추출
+        self._extract_skill_sequence_from_skills(runner.skills)
+        return success
 
     def capture_final_image(self) -> Optional[np.ndarray]:
         """최종 이미지 캡처 (해상도도 함께 저장)"""
@@ -957,72 +764,6 @@ class ForwardAndResetPipeline:
             self.final_image_resolution = (self.final_image.shape[1], self.final_image.shape[0])
         return self.final_image
 
-    def run_judge(
-        self,
-        instruction: str,
-        positions: Dict,
-        executed_code: str,
-    ) -> Dict:
-        """Judge 실행"""
-        if self.initial_image is None or self.final_image is None:
-            return {
-                'prediction': 'UNCERTAIN',
-                'reasoning': 'Initial or final image not captured',
-                'success': False,
-            }
-
-        from judge import TaskJudge
-
-        # 이미지 해상도 결정 (final_image 우선, 없으면 initial_image에서)
-        image_resolution = self.final_image_resolution or self.initial_image_resolution
-
-        # 환경변수에서 서버 모드 확인
-        use_server = os.getenv("USE_VLM_SERVER", "").lower() in ("1", "true", "yes")
-        judge = TaskJudge(model=self.judge_model, verbose=self.verbose, use_server=use_server)
-        return judge.judge(
-            instruction=instruction,
-            initial_image=self.initial_image,
-            final_image=self.final_image,
-            object_positions=positions,
-            executed_code=executed_code,
-            image_resolution=image_resolution,
-        )
-
-    def run_reset_judge(
-        self,
-        reset_mode: str,
-        current_positions: Dict,
-        target_positions: Dict,
-        executed_code: str,
-        original_instruction: str = None,
-    ) -> Dict:
-        """Reset Judge 실행"""
-        if self.reset_initial_image is None or self.reset_final_image is None:
-            return {
-                'prediction': 'UNCERTAIN',
-                'reasoning': 'Reset initial or final image not captured',
-                'success': False,
-                'reset_mode': reset_mode,
-            }
-
-        from judge import ResetJudge
-
-        # 이미지 해상도 결정 (reset_final 우선, 없으면 reset_initial에서)
-        image_resolution = self.reset_final_resolution or self.reset_initial_resolution
-
-        # 환경변수에서 서버 모드 확인
-        use_server = os.getenv("USE_VLM_SERVER", "").lower() in ("1", "true", "yes")
-        judge = ResetJudge(model=self.judge_model, verbose=self.verbose, use_server=use_server)
-        return judge.judge(
-            reset_mode=reset_mode,
-            current_positions=current_positions,
-            target_positions=target_positions,
-            initial_image=self.reset_initial_image,
-            final_image=self.reset_final_image,
-            executed_code=executed_code,
-            original_instruction=original_instruction,
-            image_resolution=image_resolution,
-        )
 
     def show_judge_ui(
         self,
@@ -1077,38 +818,6 @@ class ForwardAndResetPipeline:
         )
 
         return result_image
-
-    def save_execution_context(
-        self,
-        instruction: str,
-        positions: Dict,
-        spec: Dict,
-        code: str,
-        success: bool,
-        save_dir: str,
-    ) -> str:
-        """Execution Context 저장"""
-        from code_gen_lerobot.execution_context import save_forward_context
-
-        context = save_forward_context(
-            instruction=instruction,
-            object_positions=positions,
-            generated_spec=spec,
-            generated_code=code,
-            execution_success=success,
-            robot_id=self.robot_id,
-            output_dir=save_dir,
-        )
-
-        self.execution_context = {
-            'instruction': instruction,
-            'object_positions': positions,
-            'generated_spec': spec,
-            'generated_code': code,
-            'execution_success': success,
-        }
-
-        return save_dir
 
     def generate_reset_code(
         self,
@@ -1174,7 +883,7 @@ class ForwardAndResetPipeline:
         external_camera = None
         if current_positions is None and self.camera_manager and self.camera_manager.is_connected:
             try:
-                external_camera = self._get_realsense_from_manager()
+                external_camera = self._get_pipeline_camera().get_realsense()
                 print("  [Reset Detection] Using shared camera from recording")
             except KeyError:
                 pass
@@ -1223,7 +932,7 @@ class ForwardAndResetPipeline:
         active_camera = None
         if self.camera_manager and self.camera_manager.is_connected:
             try:
-                active_camera = self._get_realsense_from_manager()
+                active_camera = self._get_pipeline_camera().get_realsense()
             except KeyError:
                 pass
         if active_camera is None:
@@ -1374,29 +1083,11 @@ class ForwardAndResetPipeline:
                 # 캡처 실패 시 카메라 재초기화 후 재시도
                 if self.initial_image is None:
                     print(f"  {YELLOW}[Warning] Capture failed, reinitializing camera...{RESET}")
-                    # Force-stop camera (including camera_manager owned)
-                    if self.camera:
-                        try:
-                            self.camera.stop()
-                        except Exception:
-                            pass
-                        self.camera = None
-                    if self.camera_manager:
-                        try:
-                            self.camera_manager.disconnect_all()
-                        except Exception:
-                            pass
-                        # Reconnect existing camera_manager (don't recreate dataset)
-                        time.sleep(2.0)
-                        try:
-                            self.camera_manager.connect_all()
-                            print(f"  [Recovery] Camera manager reconnected")
-                        except Exception as e:
-                            print(f"  [Recovery] Camera manager reconnect failed: {e}")
-                            self.camera_manager = None
-                    else:
-                        time.sleep(2.0)
-                    if self.initialize_camera():
+                    pc = self._get_pipeline_camera()
+                    pc.camera_manager = self.camera_manager
+                    if pc.force_recovery():
+                        self.camera = pc.camera
+                        self.camera_manager = pc.camera_manager
                         time.sleep(0.5)
                         self.initial_image = self.capture_frame()
 
@@ -1580,108 +1271,11 @@ class ForwardAndResetPipeline:
             code_path.write_text(self.generated_code)
             print(f"  Generated code saved: {code_path}")
 
-            # [즉시 저장] Multi-turn info (if available)
+            # [즉시 저장] Multi-turn info + visualizations (if available)
             if self.multi_turn and self.multi_turn_info:
-                mt_info_path = Path(forward_dir) / "multi_turn_info.json"
-                mt_save = {
-                    "turn0_response": self.multi_turn_info.get("turn0_response", ""),
-                    "turn1_response": self.multi_turn_info.get("turn1_response", ""),
-                    "turn2_response": self.multi_turn_info.get("turn2_response", ""),
-                    "turn3_response": self.multi_turn_info.get("turn3_response", ""),
-                    "turn1_parsed": self.multi_turn_info.get("turn1_parsed"),
-                    "turn1_sideview_parsed": self.multi_turn_info.get("turn1_sideview_parsed"),
-                    "turn2_parsed": self.multi_turn_info.get("turn2_parsed"),
-                    "detected_objects": self.multi_turn_info.get("detected_objects"),
-                    "all_points": self.multi_turn_info.get("all_points"),
-                    "crop_responses": self.multi_turn_info.get("crop_responses"),
-                    "turn_test_response": self.multi_turn_info.get("turn_test_response", ""),
-                    "turn_test_overhead_waypoints": self.multi_turn_info.get("turn_test_overhead_waypoints"),
-                    "turn_test_sideview_waypoints": self.multi_turn_info.get("turn_test_sideview_waypoints"),
-                }
-                import json as _json
-                with open(mt_info_path, 'w', encoding='utf-8') as f:
-                    _json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
-
-                # LLM 비용 통계 저장 (Judge 추가는 Judge 실행 후)
-                llm_cost = self.multi_turn_info.get("llm_cost")
-                if llm_cost:
-                    cost_path = Path(forward_dir) / "llm_cost.json"
-                    with open(cost_path, 'w') as f:
-                        _json.dump({"phase": "forward", **llm_cost}, f, indent=2)
-                    print(f"  LLM cost saved: {cost_path}")
-                print(f"  Multi-turn info saved: {mt_info_path}")
-
-                # [신규] Turn 시각화 이미지 저장
-                if self.initial_image is not None:
-                    t1_parsed = self.multi_turn_info.get("turn1_parsed")
-                    t2_parsed = self.multi_turn_info.get("turn2_parsed")
-
-                    if t1_parsed:
-                        self._visualize_turn1(
-                            self.initial_image.copy(), t1_parsed,
-                            str(Path(forward_dir) / "turn1_detection.jpg"),
-                            turn1_raw=self.multi_turn_info.get("turn0_response", ""),
-                        )
-                    if t2_parsed:
-                        self._visualize_turn2(
-                            self.initial_image.copy(), t1_parsed, t2_parsed,
-                            str(Path(forward_dir) / "turn2_grasp_points.jpg")
-                        )
-
-                    # Side-view Turn 1 + Turn 2 시각화
-                    sv_image_path = self.multi_turn_info.get("side_view_image")
-                    if sv_image_path and os.path.isfile(sv_image_path):
-                        sv_img_base = cv2.imread(sv_image_path)
-                        if sv_img_base is not None:
-                            sv_img_base = cv2.resize(sv_img_base, (640, 480))
-
-                            # Turn 1 side-view bbox 시각화
-                            t1_sv_parsed = self.multi_turn_info.get("turn1_sideview_parsed")
-                            if t1_sv_parsed:
-                                self._visualize_turn1(
-                                    sv_img_base.copy(), t1_sv_parsed,
-                                    str(Path(forward_dir) / "turn1_sideview_detection.jpg"),
-                                )
-
-                            # Turn 2 side-view grasp points 시각화
-                            sv_grasp = t2_parsed.get("sv_grasp_points") if isinstance(t2_parsed, dict) else None
-                            if sv_grasp:
-                                sv_t2_compat = {"grasp_points": sv_grasp}
-                                self._visualize_turn2(
-                                    sv_img_base.copy(), t1_sv_parsed, sv_t2_compat,
-                                    str(Path(forward_dir) / "turn2_sideview_grasp_points.jpg")
-                                )
-
-                    oh_waypoints = self.multi_turn_info.get("turn_test_overhead_waypoints")
-                    if oh_waypoints:
-                        self._visualize_turn_test(
-                            self.initial_image.copy(), t2_parsed, oh_waypoints,
-                            str(Path(forward_dir) / "turn_test_overhead_waypoints.jpg")
-                        )
-
-                    sv_waypoints = self.multi_turn_info.get("turn_test_sideview_waypoints")
-                    if sv_waypoints and sv_image_path and os.path.isfile(sv_image_path):
-                        sv_img = cv2.imread(sv_image_path)
-                        if sv_img is not None:
-                            sv_img = cv2.resize(sv_img, (640, 480))
-                            self._visualize_turn_test(
-                                sv_img, None, sv_waypoints,
-                                str(Path(forward_dir) / "turn_test_sideview_waypoints.jpg")
-                            )
-
-                # [신규] Turn 2 crop 이미지 저장
-                crop_dir = self.multi_turn_info.get("crop_dir")
-                if crop_dir and os.path.isdir(crop_dir):
-                    import shutil
-                    for fname in sorted(os.listdir(crop_dir)):
-                        if fname.endswith(('.jpg', '.png')):
-                            src = os.path.join(crop_dir, fname)
-                            dst = os.path.join(forward_dir, fname)
-                            shutil.copy2(src, dst)
-                    print(f"  Crop images saved to: {forward_dir}")
-
-                # [신규] Turn description 로그 저장
-                self._save_turn_logs(forward_dir, self.multi_turn_info)
+                from pipeline.save_logs import save_multi_turn_info, save_turn_visualizations
+                save_multi_turn_info(forward_dir, self.multi_turn_info, phase="forward")
+                save_turn_visualizations(forward_dir, self.multi_turn_info, self.initial_image, phase="forward")
 
             print("\n" + "-" * 40)
             print("Generated Forward Code (preview):")
@@ -1729,49 +1323,17 @@ class ForwardAndResetPipeline:
 
             # Update llm_cost with detect_objects token usage
             try:
-                from skills.skills_lerobot import LeRobotSkills
-                skills_inst = LeRobotSkills._last_instance
-                if skills_inst and hasattr(skills_inst, '_detect_token_usage') and skills_inst._detect_token_usage:
-                    cost_path = Path(forward_dir) / "llm_cost.json"
-                    if cost_path.exists():
-                        with open(cost_path) as _f:
-                            _llm_cost = json.load(_f)
-                        detect_turns = skills_inst._detect_token_usage
-                        detect_summary = {
-                            "model": "gemini-3-flash-preview",
-                            "inference_time_s": round(sum(t.get("inference_time_s", 0) for t in detect_turns), 2),
-                            "input_tokens": sum(t.get("input_tokens", 0) for t in detect_turns),
-                            "output_tokens": sum(t.get("output_tokens", 0) for t in detect_turns),
-                            "total_tokens": sum(t.get("total_tokens", 0) for t in detect_turns),
-                            "num_calls": len(detect_turns),
-                            "turns": detect_turns,
-                        }
-                        _llm_cost["detect_objects"] = detect_summary
-                        _old_total = _llm_cost.pop("total", {})
-                        for _k in ["input_tokens", "output_tokens", "total_tokens"]:
-                            _old_total[_k] = _old_total.get(_k, 0) + detect_summary.get(_k, 0)
-                        _old_total["inference_time_s"] = round(
-                            _old_total.get("inference_time_s", 0) + detect_summary["inference_time_s"], 2)
-                        _llm_cost["total"] = _old_total
-                        with open(cost_path, 'w') as _f:
-                            json.dump(_llm_cost, _f, indent=2)
-                        print(f"  detect_objects cost merged (calls={len(detect_turns)}, in={detect_summary['input_tokens']}, out={detect_summary['output_tokens']})")
-                    skills_inst._detect_token_usage = []
+                runner = self._get_task_runner()
+                from pipeline.save_logs import update_llm_cost_with_detect_usage
+                update_llm_cost_with_detect_usage(forward_dir, runner.skills)
             except Exception as e:
                 print(f"  Warning: detect_objects cost merge failed: {e}")
 
             # Step 5: Context 저장
             print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 5/5") + f"{RESET}")
-            self.generated_spec = {}
-            self.save_execution_context(
-                instruction=instruction,
-                positions=self.detected_positions,
-                spec=self.generated_spec,
-                code=self.generated_code,
-                success=forward_success,
-                save_dir=forward_dir,
-            )
-            print(f"  Context saved to: {forward_dir}")
+            from pipeline.save_logs import save_execution_context as _save_ec
+            _save_ec(forward_dir, instruction, self.detected_positions,
+                     self.generated_code, forward_success, robot_id=self.robot_id)
 
             # ================================================================
             # PHASE 2: JUDGE (EVALUATION)
@@ -1807,10 +1369,14 @@ class ForwardAndResetPipeline:
             judge_prediction = "UNCERTAIN"
             print(f"\n{YELLOW}" + self._log(f"Running VLM Judge ({self.judge_model})...", step="Step 2/3", tag="Judge") + f"{RESET}")
             if self.initial_image is not None and self.final_image is not None:
-                judge_result = self.run_judge(
+                image_resolution = self.final_image_resolution or self.initial_image_resolution
+                judge_result = self._run_forward_judge(
                     instruction=instruction,
-                    positions=self.detected_positions,
+                    initial_image=self.initial_image,
+                    final_image=self.final_image,
+                    object_positions=self.detected_positions,
                     executed_code=self.generated_code,
+                    image_resolution=image_resolution,
                 )
                 result['judge'] = judge_result
 
@@ -2064,53 +1630,9 @@ class ForwardAndResetPipeline:
                     # [즉시 저장] Reset multi-turn VLM 데이터
                     reset_mt = getattr(self, 'reset_multi_turn_info', None)
                     if reset_mt:
-                        # multi_turn_info.json
-                        mt_path = Path(reset_dir) / "multi_turn_info.json"
-                        mt_save = {k: v for k, v in reset_mt.items() if k != "crop_dir"}
-                        with open(mt_path, 'w', encoding='utf-8') as f:
-                            json.dump(mt_save, f, indent=2, ensure_ascii=False, default=str)
-                        print(f"  Reset multi-turn info saved: {mt_path}")
-
-                        # Turn 시각화 이미지
-                        reset_base_img = self.reset_initial_image
-                        if reset_base_img is not None:
-                            t1_parsed = reset_mt.get("turn1_parsed")
-                            if t1_parsed:
-                                self._visualize_turn1(
-                                    reset_base_img.copy(), t1_parsed,
-                                    str(Path(reset_dir) / "turn1_detection.jpg"),
-                                )
-                            all_pts = reset_mt.get("all_points", [])
-                            if t1_parsed and all_pts:
-                                # px, py are raw pixels — convert to normalized [norm_y, norm_x] (0-1000)
-                                # _visualize_turn2 expects point_pixel = [norm_y, norm_x]
-                                r_img_h, r_img_w = reset_base_img.shape[:2]
-                                t2_compat = {"grasp_points": [
-                                    {"object_name": p["object_label"], "label": p["label"],
-                                     "role": p["role"],
-                                     "point_pixel": [
-                                         int(p["py"] * 1000 / r_img_h),  # raw_py → norm_y
-                                         int(p["px"] * 1000 / r_img_w),  # raw_px → norm_x
-                                     ]}
-                                    for p in all_pts
-                                ]}
-                                self._visualize_turn2(
-                                    reset_base_img.copy(), t1_parsed, t2_compat,
-                                    str(Path(reset_dir) / "turn2_grasp_points.jpg"),
-                                )
-
-                        # Crop 이미지 복사
-                        crop_dir_path = reset_mt.get("crop_dir")
-                        if crop_dir_path and os.path.isdir(crop_dir_path):
-                            import shutil
-                            for fname in sorted(os.listdir(crop_dir_path)):
-                                if fname.endswith(('.jpg', '.png')):
-                                    shutil.copy2(os.path.join(crop_dir_path, fname),
-                                                 os.path.join(reset_dir, fname))
-                            print(f"  Reset crop images saved to: {reset_dir}")
-
-                        # Turn 로그 저장
-                        self._save_turn_logs(reset_dir, reset_mt)
+                        from pipeline.save_logs import save_multi_turn_info, save_turn_visualizations
+                        save_multi_turn_info(reset_dir, reset_mt, phase="reset")
+                        save_turn_visualizations(reset_dir, reset_mt, self.reset_initial_image, phase="reset")
 
                     print("\n" + "-" * 40)
                     print("Generated Reset Code (preview):")
@@ -2204,12 +1726,16 @@ class ForwardAndResetPipeline:
 
                     # Step 5: Reset Judge 실행
                     print(f"\n{CYAN}" + self._log("Evaluating reset result...", tag="Judge") + f"{RESET}")
-                    reset_judge_result = self.run_reset_judge(
+                    reset_image_resolution = self.reset_final_resolution or self.reset_initial_resolution
+                    reset_judge_result = self._run_reset_judge(
                         reset_mode="original",
                         current_positions=current_positions,
                         target_positions=target_positions,
+                        initial_image=self.reset_initial_image,
+                        final_image=self.reset_final_image,
                         executed_code=reset_code,
                         original_instruction=instruction,
+                        image_resolution=reset_image_resolution,
                     )
                     result['reset_judge'] = reset_judge_result
 
@@ -2532,92 +2058,6 @@ class ForwardAndResetPipeline:
 
         cv2.imwrite(save_path, image)
         print(f"  Turn Test visualization saved: {save_path}")
-
-    def _save_turn_logs(self, forward_dir: str, multi_turn_info: Dict) -> None:
-        """턴별 description 로그를 텍스트 파일로 저장
-
-        Args:
-            forward_dir: forward 결과 저장 디렉토리
-            multi_turn_info: multi-turn 정보 dict
-        """
-        if not multi_turn_info:
-            return
-
-        forward_path = Path(forward_dir)
-
-        # Turn 0 로그 (Scene Understanding)
-        turn0_raw = multi_turn_info.get("turn0_response", "")
-        if turn0_raw:
-            lines = ["=" * 60, "Turn 0: Scene Understanding", "=" * 60, ""]
-            lines.append("[Raw Response]")
-            lines.append(turn0_raw)
-
-            (forward_path / "turn0_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 0 log saved: {forward_path / 'turn0_log.txt'}")
-
-        # Turn 1 로그 (Bounding Box Detection)
-        turn1_raw = multi_turn_info.get("turn1_response", "")
-        turn1_parsed = multi_turn_info.get("turn1_parsed")
-        if turn1_raw:
-            lines = ["=" * 60, "Turn 1: Bounding Box Detection", "=" * 60, ""]
-            lines.append("[Raw Response]")
-            lines.append(turn1_raw)
-            lines.append("")
-
-            if turn1_parsed:
-                lines.append("[Parsed Summary]")
-                obj_list = None
-                if isinstance(turn1_parsed, list):
-                    obj_list = turn1_parsed
-                elif isinstance(turn1_parsed, dict) and "objects" in turn1_parsed:
-                    obj_list = turn1_parsed["objects"]
-
-                if obj_list:
-                    for obj in obj_list:
-                        name = obj.get("label") or obj.get("name", "?")
-                        box = obj.get("box_2d") or obj.get("bbox_pixel", "N/A")
-                        size = obj.get("estimated_size_cm", "N/A")
-                        lines.append(f"  - {name}: bbox={box}, size_cm={size}")
-
-            (forward_path / "turn1_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 1 log saved: {forward_path / 'turn1_log.txt'}")
-
-        # Turn 2+ 로그 (Crop-then-Point)
-        all_points = multi_turn_info.get("all_points", [])
-        crop_responses = multi_turn_info.get("crop_responses", [])
-        if all_points or crop_responses:
-            lines = ["=" * 60, "Turn 2+: Crop-then-Point", "=" * 60, ""]
-
-            # Crop별 응답
-            for cr in crop_responses:
-                lines.append(f"--- Crop: {cr.get('label', '?')} ---")
-                lines.append(cr.get("response", ""))
-                lines.append("")
-
-            # Parsed 포인트 요약
-            lines.append("[Parsed Points Summary]")
-            for pt in all_points:
-                obj = pt.get("object_label", "?")
-                label = pt.get("label", "?")
-                role = pt.get("role", "?")
-                px, py = pt.get("px", 0), pt.get("py", 0)
-                reasoning = pt.get("reasoning", "")
-                lines.append(f"  - {obj}: {label} ({role}) pixel=({px},{py})")
-                if reasoning:
-                    lines.append(f"    reasoning: {reasoning}")
-
-            (forward_path / "turn2_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 2+ log saved: {forward_path / 'turn2_log.txt'}")
-
-        # Turn 3 로그 (Code Generation)
-        turn3_raw = multi_turn_info.get("turn3_response", "")
-        if turn3_raw:
-            lines = ["=" * 60, "Turn 3: Code Generation", "=" * 60, ""]
-            lines.append("[Raw Response]")
-            lines.append(turn3_raw)
-
-            (forward_path / "turn3_log.txt").write_text("\n".join(lines), encoding="utf-8")
-            print(f"  Turn 3 log saved: {forward_path / 'turn3_log.txt'}")
 
     def _update_results(self, all_results: Dict, result: Dict, episode_num: int, skip_reset: bool) -> None:
         """에피소드 결과를 all_results에 추가"""
@@ -3377,13 +2817,6 @@ class ForwardAndResetPipeline:
         if self.record_dataset:
             self._finalize_recording()
 
-    def _save_batch_info(self, episode_dir: str, batch_index: int, slot: int, judge_pred: str) -> None:
-        """batch_info.json 저장. batch_seed_index는 1-based (seed 디렉토리와 일치)."""
-        batch_info = {"batch_seed_index": batch_index + 1, "slot": slot, "judge": judge_pred}
-        bi_path = Path(episode_dir) / "batch_info.json"
-        bi_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(bi_path, 'w') as f:
-            json.dump(batch_info, f, indent=2)
 
     # ================================================================
     # 새 세션 모드
@@ -3481,7 +2914,8 @@ class ForwardAndResetPipeline:
                 _bi = batch_index
                 def _post_judge(res):
                     jp = res['judge'].get('prediction', 'UNCERTAIN')
-                    self._save_batch_info(_ep_dir, _bi, _slot, jp)
+                    from pipeline.save_logs import save_batch_info as _sbi
+                    _sbi(_ep_dir, _bi, _slot, jp)
 
                 result = self.run(
                     instruction=instruction, objects=objects,
@@ -3675,7 +3109,8 @@ class ForwardAndResetPipeline:
                     _bi_r = batch_index
                     def _post_judge_resume(res):
                         jp = res['judge'].get('prediction', 'UNCERTAIN')
-                        self._save_batch_info(_ep_dir_r, _bi_r, _slot_r, jp)
+                        from pipeline.save_logs import save_batch_info as _sbi_r
+                        _sbi_r(_ep_dir_r, _bi_r, _slot_r, jp)
 
                     result = self.run(
                         instruction=instruction, objects=objects,
@@ -3918,6 +3353,13 @@ def main():
     )
 
     parser.add_argument(
+        "--detect-model",
+        type=str,
+        default=None,
+        help="VLM model for detect_objects skill (default: uses gemini-3.1-flash-lite-preview)"
+    )
+
+    parser.add_argument(
         "--side-view-image",
         type=str,
         default=None,
@@ -3982,6 +3424,7 @@ def main():
             task_type=args.task_type,
             reset_instruction=args.reset_instruction,
             skip_turn_test=args.skip_turn_test,
+            detect_model=args.detect_model,
         )
     else:
         # ── Multi-arm: UnifiedMultiArmPipeline ──
@@ -4004,6 +3447,7 @@ def main():
             task_type=args.task_type,
             reset_instruction=args.reset_instruction,
             skip_turn_test=args.skip_turn_test,
+            detect_model=args.detect_model,
         )
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기

@@ -340,6 +340,7 @@ def execute_task():    # NO ARGUMENTS — positions/skills are pre-injected glob
         # Subtask 2: set_subtask → pick → place → clear_subtask
         # ... repeat for each object ...
 
+        skills.move_to_initial_state()
         skills.move_to_free_state()
 
     finally:
@@ -356,7 +357,7 @@ if __name__ == "__main__":
 3. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
 4. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arms from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask.
    - **CRITICAL**: After `pos_left.update()` / `pos_right.update()`, you MUST **re-assign ALL local variables** that were extracted from the positions dict (e.g., `grasp_pt = pos_left["obj"]["points"]["grasp center"]`). The `update()` call replaces dict entries, but previously extracted variables still reference the OLD values.
-5. Always start with `skills.move_to_initial_state()`, end with `skills.move_to_free_state()`.
+5. Always start with `skills.move_to_initial_state()`, end with `skills.move_to_initial_state()` then `skills.move_to_free_state()`.
 6. Use `approach_height = 0.20` for approach/retreat movements.
 7. ALWAYS pass `left_skill_description`/`right_skill_description` and `left_verification_question`/`right_verification_question` for every arm that is NOT `"wait"`.
 8. Always include try/finally with `skills.disconnect()` for cleanup.

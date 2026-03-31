@@ -20,8 +20,8 @@ def _load_api_key() -> str:
 GOOGLE_API_KEY = _load_api_key()
 
 MAX_RETRIES = 10
-RETRY_DELAY = 60  # seconds (fixed interval)
-GEMINI3_DEFAULT_THINKING_BUDGET = 10000  # Gemini 3 thinking 토큰 제한 (기본 10K)
+RETRY_DELAY = 10  # seconds (fixed interval)
+GEMINI3_DEFAULT_THINKING_BUDGET = 0  # Gemini 3 thinking 비활성화 (0 = no thinking)
 
 # Singleton client
 _client: Optional[genai.Client] = None

@@ -5,8 +5,19 @@ from typing import Dict, List, Optional, Tuple
 from google import genai
 from google.genai import types
 
-# Google AI Studio API Key (환경변수로 override 가능)
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyB3TOzSB55WDAvhGqYjXQn_rLxLsCUFbaE")
+# Google AI Studio API Key (환경변수 → JSON 파일 순으로 로드)
+def _load_api_key() -> str:
+    key = os.getenv("GOOGLE_API_KEY")
+    if key:
+        return key
+    key_file = os.path.join(os.path.dirname(__file__), "..", "..", "google_aistudio_key.json")
+    if os.path.exists(key_file):
+        import json
+        with open(key_file) as f:
+            return json.load(f).get("api_key", "")
+    return ""
+
+GOOGLE_API_KEY = _load_api_key()
 
 MAX_RETRIES = 10
 RETRY_DELAY = 60  # seconds (fixed interval)

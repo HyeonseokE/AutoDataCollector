@@ -46,6 +46,7 @@ outputs/
 # Local config
 .env
 openai_api_key.json
+google_aistudio_key.json
 
 # Legacy folders (DO NOT MODIFY)
 code_gen/

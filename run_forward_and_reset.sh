@@ -109,7 +109,7 @@ RESET_INSTRUCTION=""
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=30
-NUM_RANDOM_SEEDS=10 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)

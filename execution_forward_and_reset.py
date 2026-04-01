@@ -332,7 +332,7 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"  Repo ID: {self.dataset_repo_id}")
             print(f"  FPS: {self.recording_fps}")
 
-            # 1. 카메라 매니저 초기화 (YAML에서 동적 로드, num_robots로 arm 그룹 필터링)
+            # 1. 카메라 매니저 초기화 (YAML에서 동적 로드, 싱글암: left_arm만)
             print(f"[Recording] Loading camera configuration...")
             self.camera_manager = create_camera_manager_from_config(num_robots=1)
 
@@ -341,7 +341,7 @@ class ForwardAndResetPipeline(BasePipeline):
             self.camera_manager.connect_all()
             print(f"[Recording] Cameras connected: {self.camera_manager.camera_names}")
 
-            # 3. 카메라 연결 검증 (멀티암과 동일 패턴)
+            # 3. 카메라 연결 검증
             cameras = load_cameras_from_yaml(num_robots=1)
             enabled_cameras = [cam for cam in cameras if cam.enabled]
             connected_names = set(self.camera_manager.camera_names)

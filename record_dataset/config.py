@@ -680,7 +680,7 @@ def _parse_camera_entry(cam_data: dict, group: str = "shared") -> 'CameraConfigR
     )
 
 
-def load_cameras_from_yaml(yaml_path: str = None, robot_id: int = None) -> List[CameraConfigRecord]:
+def load_cameras_from_yaml(yaml_path: str = None, num_robots: int = None) -> List[CameraConfigRecord]:
     """
     YAML 파일에서 카메라 설정을 동적으로 로드.
 
@@ -699,9 +699,8 @@ def load_cameras_from_yaml(yaml_path: str = None, robot_id: int = None) -> List[
 
     Args:
         yaml_path: recording_config.yaml 경로 (None이면 기본 경로)
-        robot_id: 싱글암 모드에서 해당 로봇의 카메라만 로드.
-                  None이면 모든 카메라 로드 (멀티암 모드).
-                  robot2 → shared + left_arm, robot3 → shared + right_arm.
+        num_robots: 로봇 수. 순서대로 left/right/top/bottom arm 그룹 활성화.
+                    None이면 모든 arm 그룹 로드.
 
     Returns:
         List[CameraConfigRecord]: 카메라 설정 리스트
@@ -735,16 +734,12 @@ def load_cameras_from_yaml(yaml_path: str = None, robot_id: int = None) -> List[
                 cameras.append(_parse_camera_entry(cam_data, group="shared"))
 
         elif isinstance(cameras_data, dict):
-            # 새 그룹 구조 (shared / left_arm / right_arm)
-            # robot_id 필터: robot2→left_arm, robot3→right_arm
-            if robot_id is not None:
-                robot_arm_map = {2: "left_arm", 3: "right_arm"}
-                my_arm = robot_arm_map.get(robot_id)
-                allowed_groups = ["shared"]
-                if my_arm:
-                    allowed_groups.append(my_arm)
-            else:
-                allowed_groups = ["shared", "left_arm", "right_arm"]
+            # ROBOT_IDS 순서 → arm 그룹 매핑:
+            #   [0]=left_arm, [1]=right_arm, [2]=top_arm, [3]=bottom_arm
+            # shared는 항상 포함, 제공된 num_robots 수만큼만 arm 그룹 활성화
+            _ARM_GROUPS = ["left_arm", "right_arm", "top_arm", "bottom_arm"]
+            active_arms = _ARM_GROUPS[:num_robots] if num_robots is not None else _ARM_GROUPS
+            allowed_groups = ["shared"] + active_arms
 
             for group_key in allowed_groups:
                 group_cams = cameras_data.get(group_key, [])
@@ -766,13 +761,13 @@ def load_cameras_from_yaml(yaml_path: str = None, robot_id: int = None) -> List[
         return DEFAULT_CAMERAS.copy()
 
 
-def create_camera_manager_from_config(yaml_path: str = None, robot_id: int = None):
+def create_camera_manager_from_config(yaml_path: str = None, num_robots: int = None):
     """
     YAML 설정에서 MultiCameraManager 생성
 
     Args:
         yaml_path: recording_config.yaml 경로
-        robot_id: 싱글암 모드에서 해당 로봇의 카메라만 로드 (None이면 전체)
+        num_robots: 로봇 수. 순서대로 left/right/top/bottom arm 그룹 활성화.
 
     Returns:
         MultiCameraManager 인스턴스
@@ -787,8 +782,8 @@ def create_camera_manager_from_config(yaml_path: str = None, robot_id: int = Non
 
     from cameras import MultiCameraManager, RealSenseCameraConfig, OpenCVCameraConfig
 
-    # YAML에서 카메라 설정 로드 (robot_id로 필터)
-    camera_configs = load_cameras_from_yaml(yaml_path, robot_id=robot_id)
+    # YAML에서 카메라 설정 로드 (num_robots로 arm 그룹 필터링)
+    camera_configs = load_cameras_from_yaml(yaml_path, num_robots=num_robots)
 
     # cameras 모듈용 config 객체로 변환
     configs = []
@@ -823,18 +818,18 @@ def create_camera_manager_from_config(yaml_path: str = None, robot_id: int = Non
     return MultiCameraManager(configs)
 
 
-def build_features_from_yaml(yaml_path: str = None, robot_id: int = None) -> Dict[str, Any]:
+def build_features_from_yaml(yaml_path: str = None, num_robots: int = None) -> Dict[str, Any]:
     """
     YAML 설정 기반으로 LeRobot dataset features 생성
 
     Args:
         yaml_path: recording_config.yaml 경로
-        robot_id: 싱글암 모드에서 해당 로봇의 카메라만 포함 (None이면 전체)
+        num_robots: 로봇 수. 순서대로 left/right/top/bottom arm 그룹 활성화.
 
     Returns:
         LeRobot dataset features dict
     """
-    cameras = load_cameras_from_yaml(yaml_path, robot_id=robot_id)
+    cameras = load_cameras_from_yaml(yaml_path, num_robots=num_robots)
     enabled_cameras = [cam for cam in cameras if cam.enabled]
     skill_enabled = load_skill_features_from_yaml(yaml_path)
     obs_enabled = load_observation_features_from_yaml(yaml_path)

@@ -1,13 +1,17 @@
 """
-MultiArmRecorder: External 50Hz unified recording for multi-arm setups.
+MultiArmRecorder: External 30Hz unified recording for multi-arm setups.
 
 Instead of each LeRobotSkills instance recording independently via callbacks,
-this recorder runs an external 50Hz loop that:
+this recorder runs an external 30Hz loop that:
   1. Reads both arms' joint positions → concat to 12-axis state
   2. Reads both arms' action targets → concat to 12-axis action
   3. Captures images from all cameras (shared RealSense + per-arm Innomaker)
   4. Records per-arm skill info (left_skill.*, right_skill.*)
   5. Writes unified frames to a single LeRobot dataset
+
+Every iteration = 1 frame at 30fps (no frame_skip).
+State/action are provided by skill callbacks (set_left_state etc.)
+to avoid concurrent serial port access.
 
 This follows the ALOHA format: concat left/right state and action.
 
@@ -25,7 +29,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from .config import (
-    CONTROL_HZ,
     DEFAULT_FPS,
     NUM_JOINTS,
     MULTI_ARM_NUM_JOINTS,
@@ -34,17 +37,16 @@ from .config import (
 
 class MultiArmRecorder:
     """
-    External 50Hz recording loop for bi-arm (ALOHA-style) datasets.
+    External 30Hz recording loop for bi-arm (ALOHA-style) datasets.
 
-    Runs in a background thread, sampling both arms at CONTROL_HZ (50Hz)
-    and writing frames at target_fps (30Hz) via frame-skip synchronization.
+    Runs in a background thread at target_fps (30Hz).
+    Every iteration records one frame (no frame_skip).
 
     Args:
         multi_arm: MultiArmSkills instance (provides left_arm/right_arm access).
         recorder: DatasetRecorder instance (initialized with multi-arm features).
         camera_manager: MultiCameraManager for image capture.
         target_fps: Recording FPS (default: 30).
-        control_hz: Sampling frequency (default: 50).
     """
 
     def __init__(
@@ -53,14 +55,11 @@ class MultiArmRecorder:
         recorder,
         camera_manager=None,
         target_fps: int = DEFAULT_FPS,
-        control_hz: int = CONTROL_HZ,
     ):
         self.multi_arm = multi_arm
         self.recorder = recorder
         self.camera_manager = camera_manager
         self.target_fps = target_fps
-        self.control_hz = control_hz
-        self.frame_skip_ratio = control_hz / target_fps
 
         # Threading
         self._thread: Optional[threading.Thread] = None
@@ -68,10 +67,12 @@ class MultiArmRecorder:
         self._lock = threading.Lock()
 
         # Frame counting
-        self._step_counter = 0
-        self._last_record_step = -1
         self._recorded_frames = 0
         self._errors = 0
+
+        # Timing
+        self._start_wall: Optional[float] = None
+        self._stop_wall: Optional[float] = None
 
         # Per-arm skill info (updated externally via set_skill_info)
         self._left_skill_info: Dict[str, Any] = self._default_skill_info("standby")
@@ -136,55 +137,43 @@ class MultiArmRecorder:
         if self._running:
             return
         self._running = True
-        self._step_counter = 0
-        self._last_record_step = -1
         self._recorded_frames = 0
         self._errors = 0
+        self._start_wall = time.time()
         self._thread = threading.Thread(
             target=self._recording_loop,
             name="multi_arm_recorder",
             daemon=True,
         )
         self._thread.start()
-        print(f"[MultiArmRecorder] Started ({self.control_hz}Hz → {self.target_fps}fps)")
+        print(f"[MultiArmRecorder] Started ({self.target_fps}fps)")
 
     def stop(self):
         """Stop the recording thread and wait for it to finish."""
         self._running = False
+        self._stop_wall = time.time()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
         print(f"[MultiArmRecorder] Stopped (frames={self._recorded_frames}, errors={self._errors})")
 
+
     def _recording_loop(self):
-        """Main 50Hz sampling loop running in background thread."""
-        period = 1.0 / self.control_hz
-        next_time = time.monotonic()
-
+        """Camera-driven recording loop running in background thread.
+        Pacing is determined by camera frame delivery (event.wait() inside
+        async_read), not by a fixed timer. This guarantees 1:1 camera-to-record
+        frame mapping regardless of camera FPS."""
         while self._running:
-            loop_start = time.monotonic()
-
-            # Check if we should record this step (FPS sync)
-            target_frame = int(self._step_counter / self.frame_skip_ratio)
-            should_record = target_frame > self._last_record_step
-
-            if should_record and self.recorder.is_recording:
+            if self.recorder.is_recording:
                 try:
                     self._record_frame()
-                    self._last_record_step = target_frame
                     self._recorded_frames += 1
                 except Exception as e:
                     self._errors += 1
                     if self._errors <= 5:
                         print(f"[MultiArmRecorder] Frame error: {e}")
-
-            self._step_counter += 1
-
-            # Timing: sleep until next period
-            next_time += period
-            sleep_time = next_time - time.monotonic()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            else:
+                time.sleep(0.01)  # idle when not recording
 
     def _record_frame(self):
         """Record a single unified frame from both arms + cameras."""
@@ -201,15 +190,12 @@ class MultiArmRecorder:
             left_skill = dict(self._left_skill_info)
             right_skill = dict(self._right_skill_info)
 
-        # Concat to 12-axis
-        state_12 = np.concatenate([left_state, right_state])
-
-        action_12 = np.concatenate([left_action, right_action])
-
-        # Capture images from all cameras
         images = self._capture_images()
 
-        # Build frame dict
+        # Concat to 12-axis
+        state_12 = np.concatenate([left_state, right_state])
+        action_12 = np.concatenate([left_action, right_action])
+
         frame = {
             "observation.state": state_12.astype(np.float32),
             "action": action_12.astype(np.float32),
@@ -226,7 +212,6 @@ class MultiArmRecorder:
             frame[f"{prefix}_skill.type"] = skill.get("type", "standby")
             frame[f"{prefix}_skill.natural_language"] = skill.get("natural_language", "standby")
             frame[f"{prefix}_skill.verification_question"] = skill.get("verification_question", "")
-            # Dynamic progress: 1.0 - (||goal - current|| / ||goal - start||)
             progress = skill.get("progress", 0.0)
             start = skill.get("start_state")
             goal = skill.get("goal_joint")
@@ -252,7 +237,6 @@ class MultiArmRecorder:
         self._add_observation_extras(frame, left_arm, right_arm, left_state, right_state,
                                      left_action, right_action)
 
-        # Write to dataset
         self.recorder.add_frame(frame)
 
     def _read_state(self, arm) -> np.ndarray:
@@ -339,9 +323,24 @@ class MultiArmRecorder:
     def recorded_frames(self) -> int:
         return self._recorded_frames
 
-    def get_stats(self) -> Dict[str, int]:
+    def get_stats(self) -> dict:
+        """Recording performance stats for debugging frame drops.
+
+        Key metrics:
+        - ratio: recorded_frames / expected_frames. 1.0 = perfect, <1.0 = frame drops.
+        - effective_hz: actual loop frequency. Should be ~30Hz. Lower = loop too slow.
+        - overruns: loop iterations where work exceeded 20ms budget (sleep skipped).
+        - loop_ms_*: per-iteration work time (excluding sleep). >20ms = overrun.
+        - record_ms_*: per-frame _record_frame() time (camera + build + write).
+                       This is the heaviest part of each iteration.
+        """
+        wall = (self._stop_wall or time.time()) - (self._start_wall or time.time())
+        expected = int(wall * self.target_fps)
         return {
             "recorded_frames": self._recorded_frames,
+            "expected_frames": expected,
+            "ratio": round(self._recorded_frames / max(expected, 1), 2),
             "errors": self._errors,
-            "total_steps": self._step_counter,
+            "wall_s": round(wall, 1),
+            "effective_hz": round(self._recorded_frames / max(wall, 0.01), 1),
         }

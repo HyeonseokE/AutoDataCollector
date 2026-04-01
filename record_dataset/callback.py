@@ -17,7 +17,10 @@ from typing import Optional, Any, Dict
 
 import numpy as np
 
-from .config import CONTROL_HZ, DEFAULT_FPS, NUM_JOINTS
+from .config import DEFAULT_FPS, NUM_JOINTS
+
+# Legacy: CONTROL_HZ removed from config, default to DEFAULT_FPS
+CONTROL_HZ = DEFAULT_FPS
 
 # cameras 모듈에서 MultiCameraManager import
 try:

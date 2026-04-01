@@ -504,29 +504,9 @@ class RecordingContext:
     def reset_episode(cls) -> None:
         """에피소드 시작 시 카운터 리셋"""
         with cls._lock:
-            cls._step_counter = 0
-            cls._last_record_step = -1
             cls._start_time = time.time()
             cls._recorded_frames = 0
-            cls._skipped_frames = 0
-
-    @classmethod
-    def should_record(cls) -> bool:
-        """
-        현재 스텝에서 레코딩해야 하는지 판단 (FPS 동기화)
-
-        Returns:
-            레코딩 여부
-        """
-        if not cls._is_active or cls._recorder is None:
-            return False
-
-        if not cls._recorder.is_recording:
-            return False
-
-        # FPS 동기화
-        target_frame = int(cls._step_counter / cls._frame_skip_ratio)
-        return target_frame > cls._last_record_step
+            cls._camera_errors = 0
 
     @classmethod
     def record_step(
@@ -535,7 +515,10 @@ class RecordingContext:
         action: np.ndarray,
     ) -> bool:
         """
-        제어 루프에서 호출되는 레코딩 함수 (통합 방식)
+        제어 루프에서 호출되는 레코딩 함수.
+
+        30Hz 단일 루프 방식: 호출될 때마다 무조건 1프레임 기록.
+        FPS 제어는 호출부에서 precise_sleep으로 수행 (LeRobot 공식과 동일).
 
         Args:
             state: 현재 로봇 상태 (6 joints, normalized)
@@ -548,38 +531,27 @@ class RecordingContext:
             return False
 
         if not cls._recorder.is_recording:
-            cls._step_counter += 1
-            return False
-
-        # FPS 동기화 체크
-        if not cls.should_record():
-            cls._step_counter += 1
-            cls._skipped_frames += 1
             return False
 
         try:
-            # 데이터 타입 확인
             state = np.asarray(state, dtype=np.float32)
             action = np.asarray(action, dtype=np.float32)
 
-            # Shape 확인 및 조정
             if state.shape == (5,):
-                # 5 arm joints만 있으면 gripper 추가
                 state = np.concatenate([state, [0.0]], dtype=np.float32)
             if action.shape == (5,):
                 action = np.concatenate([action, [0.0]], dtype=np.float32)
 
-            # 통합 방식: MultiCameraManager로 모든 카메라에서 캡처
+            # 카메라 이미지 캡처 (AsyncCamera 버퍼에서 읽기, ~1ms)
             images = cls._capture_images()
             if not images:
-                cls._step_counter += 1
                 cls._camera_errors += 1
                 return False
 
-            # FK 기반 observation extras 계산 (EE 자세, gripper binary, radian)
+            # FK 기반 observation extras
             obs_extras = cls._compute_observation_extras(state, action)
 
-            # 멀티 카메라 레코딩 (통합) + 스킬 라벨 + observation extras + subtask
+            # 프레임 기록
             subtask_info = cls.get_subtask_info() if cls._current_subtask_label else None
             cls._recorder.record_frame_multi(
                 observation=state,
@@ -590,16 +562,11 @@ class RecordingContext:
                 subtask_info=subtask_info,
             )
 
-            # 상태 업데이트
-            cls._last_record_step = int(cls._step_counter / cls._frame_skip_ratio)
             cls._recorded_frames += 1
-            cls._step_counter += 1
-
             return True
 
         except Exception as e:
             print(f"[RecordingContext] Error recording: {e}")
-            cls._step_counter += 1
             return False
 
     @classmethod
@@ -676,11 +643,7 @@ class RecordingContext:
         stats = {
             "is_active": cls._is_active,
             "recorded_frames": cls._recorded_frames,
-            "skipped_frames": cls._skipped_frames,
             "camera_errors": cls._camera_errors,
-            "total_steps": cls._step_counter,
-            "target_fps": cls._target_fps,
-            "control_hz": cls._control_hz,
             "elapsed_time": elapsed,
             "effective_fps": cls._recorded_frames / elapsed if elapsed > 0 else 0,
         }

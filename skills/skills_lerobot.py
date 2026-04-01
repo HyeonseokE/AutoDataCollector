@@ -759,20 +759,12 @@ class LeRobotSkills:
         target_reached = False
         reach_time = None
 
-        # Timing profiling (accumulated over all iterations, printed at end)
-        _prof_read = []    # _get_current_state (serial read + FK)
-        _prof_write = []   # robot.write_positions (serial write)
-        _prof_rec = []     # recording callback (serial read + camera + frame build + dataset write)
-        _prof_total = []   # total loop body (excl sleep)
-
         while True:
             loop_start = time.perf_counter()
             elapsed = time.time() - start_time
 
             # Read current state
-            _t0 = time.perf_counter()
             actual_norm, actual_rad, current_ee = self._get_current_state(kinematics)
-            _prof_read.append((time.perf_counter() - _t0) * 1000)
             position_error = np.linalg.norm(target_position - current_ee)
 
             # Determine command
@@ -796,19 +788,15 @@ class LeRobotSkills:
                 arm_normalized = self.compensator.compensate(actual_norm, arm_normalized)
 
             # Send command
-            _t0 = time.perf_counter()
             arm_normalized = np.clip(arm_normalized, -99.0, 99.0)
             full_normalized = np.concatenate([arm_normalized, [self.current_gripper_pos]])
             self.robot.write_positions(full_normalized, normalize=True)
-            _prof_write.append((time.perf_counter() - _t0) * 1000)
 
             # Inline recording (every iteration = 1 frame at RECORDING_FPS)
             # Reuse actual_norm from _get_current_state() to avoid redundant serial read
             if self.recording_callback is not None and phase == "Traj":
-                _t0 = time.perf_counter()
                 state_full = np.concatenate([actual_norm, [self.current_gripper_pos]])
                 self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
-                _prof_rec.append((time.perf_counter() - _t0) * 1000)
 
             # Progress display
             if self.verbose:
@@ -834,8 +822,6 @@ class LeRobotSkills:
                     print(f"\n  Timeout after {MAX_TOTAL_TIME:.1f}s")
                 break
 
-            _prof_total.append((time.perf_counter() - loop_start) * 1000)
-
             # precise_sleep to maintain RECORDING_FPS (30Hz)
             dt = time.perf_counter() - loop_start
             sleep_time = loop_period - dt
@@ -847,22 +833,6 @@ class LeRobotSkills:
                 print(f"\r  [{'=' * 30}] Done (err: {position_error*1000:.1f}mm)    ")
             else:
                 print(f"\r  [{'=' * 30}] Timeout (err: {position_error*1000:.1f}mm)")
-
-        # Loop timing profile (per-move summary)
-        if _prof_total:
-            import numpy as _np
-            _rd = _np.array(_prof_read)
-            _wr = _np.array(_prof_write)
-            _rc = _np.array(_prof_rec) if _prof_rec else _np.array([0])
-            _tt = _np.array(_prof_total)
-            _over = int((_tt > 33.3).sum())
-            self._log(
-                f"  [Profile] loops={len(_tt)}, overruns={_over}/{len(_tt)}\n"
-                f"    read:  mean={_rd.mean():.1f}ms p95={_np.percentile(_rd,95):.1f}ms max={_rd.max():.1f}ms\n"
-                f"    write: mean={_wr.mean():.1f}ms p95={_np.percentile(_wr,95):.1f}ms max={_wr.max():.1f}ms\n"
-                f"    rec:   mean={_rc.mean():.1f}ms p95={_np.percentile(_rc,95):.1f}ms max={_rc.max():.1f}ms\n"
-                f"    total: mean={_tt.mean():.1f}ms p95={_np.percentile(_tt,95):.1f}ms max={_tt.max():.1f}ms"
-            )
 
         # Calculate and store final error (use specified kinematics for TCP mode)
         _, final_rad, final_ee = self._get_current_state(kinematics)

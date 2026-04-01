@@ -194,7 +194,6 @@ class MultiCameraManager:
             raise RuntimeError("[MultiCamera] Not connected")
 
         if len(self.cameras) <= 1:
-            # 카메라 1대면 순차로 충분
             images = {}
             for name, camera in self.cameras.items():
                 try:

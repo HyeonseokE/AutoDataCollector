@@ -187,7 +187,6 @@ class DualArmTaskRunner(TaskRunner):
                 recorder=self.recorder,
                 camera_manager=self.camera_manager,
                 target_fps=self.recording_fps,
-                control_hz=50,
             )
             self._multi_arm_recorder = mar
 

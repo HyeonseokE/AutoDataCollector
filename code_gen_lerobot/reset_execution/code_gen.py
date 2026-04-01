@@ -48,6 +48,8 @@ def lerobot_reset_code_gen(
     total_episodes: int = 1,
     # Pre-detected positions (for multi-robot shared detection)
     current_positions: Dict[str, Dict] = None,
+    # Reset quadrant constraint
+    resetspace: str = None,
 ) -> Tuple[str, Dict[str, List[float]], Dict[str, List[float]], Dict[str, List[float]]]:
     """
     LeRobot SO-101용 리셋 코드 생성
@@ -248,6 +250,7 @@ def lerobot_reset_code_gen(
             obstacle_objects=obstacle_objects,
             initial_positions=original_positions,
             seed=random_seed,
+            resetspace=resetspace,
         )
         print(f"  Random target positions generated:")
     else:
@@ -551,6 +554,7 @@ def lerobot_reset_code_gen_multi_turn(
     canonical_labels: List[str] = None,
     robot_ids: List[int] = None,
     original_positions_dual: Dict = None,
+    resetspace: str = None,
 ) -> Tuple[str, Dict, Dict, Dict, Dict, Dict]:
     """
     VLM Multi-Turn Reset 코드 생성 파이프라인.
@@ -676,7 +680,7 @@ def lerobot_reset_code_gen_multi_turn(
     annotated_image_path = None
     current_img = cv2.imread(current_state_image_path)
     if current_img is not None:
-        annotated = draw_workspace_on_image(current_img, robot_id=robot_id)
+        annotated = draw_workspace_on_image(current_img, robot_id=robot_id, resetspace=resetspace)
         annotated_image_path = str(reset_dir / "workspace_annotated.jpg")
         cv2.imwrite(annotated_image_path, annotated)
         print(f"  Workspace annotated image: {annotated_image_path}")
@@ -901,6 +905,7 @@ def lerobot_reset_code_gen_multi_turn(
             workspace=workspace,
             pix2robot=coord_transformer if hasattr(coord_transformer, 'robot_to_pixel') else None,
             seed=random_seed,
+            resetspace=resetspace,
         )
         print(f"  Random target positions generated:")
     else:
@@ -996,8 +1001,16 @@ def lerobot_reset_code_gen_multi_turn(
             current_img_for_ws = cv2.imread(current_state_image_path)
             if current_img_for_ws is not None:
                 arm_labels = ["left_arm", "right_arm"]
+                # resetspace를 로봇별로 분리 (dict이면 robot_id로, 아니면 동일 값 적용)
+                resetspace_map = {}
+                if isinstance(resetspace, dict):
+                    resetspace_map = resetspace
+                else:
+                    for rid in robot_ids:
+                        resetspace_map[rid] = resetspace
                 for i, rid in enumerate(robot_ids):
-                    arm_annotated = draw_workspace_on_image(current_img_for_ws.copy(), robot_id=rid)
+                    arm_rs = resetspace_map.get(rid, None)
+                    arm_annotated = draw_workspace_on_image(current_img_for_ws.copy(), robot_id=rid, resetspace=arm_rs)
                     arm_path = str(reset_dir / f"workspace_{arm_labels[i]}_robot{rid}.jpg")
                     cv2.imwrite(arm_path, arm_annotated)
                     codegen_workspace_images.append(arm_path)

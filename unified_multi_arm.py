@@ -76,10 +76,10 @@ class UnifiedMultiArmPipeline(BasePipeline):
         cad_image_dirs: List[str] = None,
         side_view_image: str = None,
         codegen_model: str = None,
-        task_type: str = "pick_place",
         reset_instruction: str = None,
         skip_turn_test: bool = False,
         detect_model: str = None,
+        resetspace_per_robot: Dict[int, str] = None,
     ):
         assert len(robot_ids) >= 2, f"Multi-arm requires >= 2 robots, got {robot_ids}"
         self.robot_ids = robot_ids
@@ -96,10 +96,11 @@ class UnifiedMultiArmPipeline(BasePipeline):
         self.cad_image_dirs = cad_image_dirs or []
         self.side_view_image = side_view_image
         self.codegen_model = codegen_model
-        self.task_type = task_type
         self.reset_instruction = reset_instruction or "move objects to their original positions"
         self.skip_turn_test = skip_turn_test
         self.detect_model = detect_model
+        # Per-robot reset quadrant: {robot_id: "all"|"top-left"|...}
+        self.resetspace_per_robot = resetspace_per_robot or {rid: "all" for rid in robot_ids}
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
 
@@ -336,7 +337,6 @@ class UnifiedMultiArmPipeline(BasePipeline):
             cad_image_dirs=self.cad_image_dirs,
             side_view_image=self.side_view_image,
             codegen_model=self.codegen_model,
-            task_type=self.task_type,
             skip_turn_test=self.skip_turn_test,
             robot_ids=self.robot_ids,
             skip_codegen=skip_codegen,
@@ -404,6 +404,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
             total_episodes=self.total_episodes,
             codegen_model=self.codegen_model,
             robot_ids=self.robot_ids,
+            resetspace=self.resetspace_per_robot,
         )
 
         self.reset_multi_turn_info = reset_mt_info

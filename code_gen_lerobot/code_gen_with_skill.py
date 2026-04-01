@@ -408,7 +408,6 @@ def lerobot_code_gen_multi_turn(
     skip_codegen: bool = False,
     canonical_labels: List[str] = None,
     canonical_point_labels: Dict[str, List[str]] = None,
-    task_type: str = "pick_place",
     skip_turn_test: bool = False,
     robot_ids: List[int] = None,
 ) -> Tuple[str, Dict, Dict]:
@@ -900,13 +899,13 @@ def lerobot_code_gen_multi_turn(
                     # Multi-arm: separate workspace image per arm
                     arm_labels = ["left_arm", "right_arm"]
                     for i, rid in enumerate(robot_ids):
-                        arm_annotated = draw_workspace_on_image(raw_img.copy(), robot_id=rid, task_type=task_type)
+                        arm_annotated = draw_workspace_on_image(raw_img.copy(), robot_id=rid)
                         arm_path = str(Path(image_path).parent / f"workspace_{arm_labels[i]}_robot{rid}.jpg")
                         cv2.imwrite(arm_path, arm_annotated)
                         codegen_extra_images.append(arm_path)
                         print(f"  Workspace image ({arm_labels[i]}/robot{rid}): {arm_path}")
                 else:
-                    annotated = draw_workspace_on_image(raw_img, robot_id=robot_id, task_type=task_type)
+                    annotated = draw_workspace_on_image(raw_img, robot_id=robot_id)
                     annotated_path = str(Path(image_path).parent / "workspace_annotated_codegen.jpg")
                     cv2.imwrite(annotated_path, annotated)
                     codegen_image = annotated_path

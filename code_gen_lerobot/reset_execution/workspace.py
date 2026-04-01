@@ -29,6 +29,32 @@ if TYPE_CHECKING:
 GRIPPER_MAX_OPEN_PX = 80  # 그리퍼 최대 열림 폭 (pixels, ~10cm 상당)
 
 
+# ============================================================
+# Reset Quadrant Definitions (오버헤드 카메라 pixel 기준, 640x480)
+# ============================================================
+QUADRANT_DEFINITIONS = {
+    "all": None,  # 제약 없음
+    "top-left":     {"u_range": (0, 320), "v_range": (0, 240)},
+    "top-right":    {"u_range": (320, 640), "v_range": (0, 240)},
+    "bottom-left":  {"u_range": (0, 320), "v_range": (240, 480)},
+    "bottom-right": {"u_range": (320, 640), "v_range": (240, 480)},
+}
+
+VALID_RESETSPACE_TYPES = list(QUADRANT_DEFINITIONS.keys())
+
+
+def is_in_quadrant(u: int, v: int, quadrant: str) -> bool:
+    """pixel 좌표 (u, v)가 지정된 quadrant 안에 있는지 체크."""
+    if quadrant == "all" or quadrant is None:
+        return True
+    bounds = QUADRANT_DEFINITIONS.get(quadrant)
+    if bounds is None:
+        return True
+    u_min, u_max = bounds["u_range"]
+    v_min, v_max = bounds["v_range"]
+    return u_min <= u < u_max and v_min <= v < v_max
+
+
 class ResetWorkspace(BaseWorkspace):
     """
     Reset 태스크 전용 Workspace.
@@ -121,8 +147,8 @@ class ResetWorkspace(BaseWorkspace):
         pix2robot=None,
         max_attempts: int = 500,
         max_iou: float = 0.3,
-        y_min_abs: Optional[float] = None,
         exclusion_zones: Optional[List[dict]] = None,
+        resetspace: Optional[str] = None,
     ) -> Optional[List[float]]:
         """
         단일 객체용 랜덤 위치 생성 (reach + FOV + IoU 기반 충돌 검증).
@@ -136,12 +162,11 @@ class ResetWorkspace(BaseWorkspace):
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
             max_iou: grippable 장애물과 허용 최대 IoU (default: 0.5)
-            y_min_abs: 최소 |y| 제한 (robot base_link frame, meters).
-                       arrange 태스크에서 |y| > y_min_abs인 영역(테이블 상/하단)에만 배치.
-                       None이면 제한 없음.
             exclusion_zones: 제외 영역 리스트 (robot base_link frame).
                        [{"center": [x, y], "radius": float}, ...]
                        예: free state EE 주변 8cm 제외.
+            resetspace: reset quadrant 제약 ("all", "top-left", "top-right",
+                       "bottom-left", "bottom-right"). None이면 제약 없음.
 
         Returns:
             [x, y, z] 또는 None (실패 시)
@@ -164,11 +189,7 @@ class ResetWorkspace(BaseWorkspace):
 
             candidate = [x, y, z]
 
-            # 조건 0: y_min_abs 제한 (arrange 태스크용 영역 분리 — |y| > threshold)
-            if y_min_abs is not None and abs(y) < y_min_abs:
-                continue
-
-            # 조건 0b: exclusion_zones 제한 (free state EE 주변 등)
+            # 조건 0: exclusion_zones 제한 (free state EE 주변 등)
             if exclusion_zones:
                 in_exclusion = False
                 for zone in exclusion_zones:
@@ -181,15 +202,15 @@ class ResetWorkspace(BaseWorkspace):
                 if in_exclusion:
                     continue
 
-            # 조건 1: 기본 IK 검증
-            if not self._check_ik_feasible(np.array(candidate)):
-                continue
-
-            # 조건 2: 픽셀 공간 검증
+            # 조건 1: pixel 변환 + quadrant 체크 + FOV 체크 (가벼운 연산 먼저)
             if pix2robot is not None:
                 try:
                     cu, cv = pix2robot.robot_to_pixel(x, y)
                 except Exception:
+                    continue
+
+                # Quadrant 체크 (resetspace 제약)
+                if not is_in_quadrant(cu, cv, resetspace):
                     continue
 
                 # FOV + 가장자리 마진
@@ -199,7 +220,16 @@ class ResetWorkspace(BaseWorkspace):
                 if (cu - hw < edge_margin or cu + hw >= img_w - edge_margin or
                     cv - hh < edge_margin or cv + hh >= img_h - edge_margin):
                     continue
+            elif resetspace is not None and resetspace != "all":
+                # pix2robot 없으면 quadrant 체크 불가 → 스킵
+                continue
 
+            # 조건 2: 기본 IK 검증 (무거운 연산)
+            if not self._check_ik_feasible(np.array(candidate)):
+                continue
+
+            # 조건 3: 충돌 검사 (pix2robot 필요)
+            if pix2robot is not None:
                 # 충돌 검사: IoU 기반
                 collision = False
                 for occ in obstacles:
@@ -332,10 +362,10 @@ def generate_random_positions(
     seed: int = None,
     max_attempts: int = 500,
     bbox_margin_px: int = 10,
-    y_min_abs: Optional[float] = None,
     current_positions: Dict[str, dict] = None,
     current_positions_margin_px: int = 15,
     exclusion_zones: Optional[List[dict]] = None,
+    resetspace: Optional[str] = None,
 ) -> Dict[str, List[float]]:
     """
     랜덤 위치 생성 (IoU 기반 충돌 검증).
@@ -484,8 +514,8 @@ def generate_random_positions(
             obj_bbox_px=obj_bbox_px,
             pix2robot=pix2robot,
             max_attempts=max_attempts,
-            y_min_abs=y_min_abs,
             exclusion_zones=exclusion_zones,
+            resetspace=resetspace,
         )
 
         if position is not None:
@@ -552,7 +582,7 @@ def draw_workspace_on_image(
     pix2robot_calibrator=None,
     workspace_bounds=None,
     coord_transformer=None,
-    task_type: str = "pick_place",
+    resetspace: Optional[str] = None,
 ) -> np.ndarray:
     """
     로봇 워크스페이스를 이미지에 시각화 (pix2robot 직접 매핑 기반).
@@ -560,7 +590,7 @@ def draw_workspace_on_image(
     시각적 요소:
     - 도달 가능 영역 밝게 / 불가 영역 어둡게 (convex hull 마스킹)
     - CYAN 점선: min_reach / max_reach 원호 (로봇 base 중심)
-    - arrange 태스크: |y| > 0.12m 영역을 검정으로 마스킹 (reset 영역, 배치 불가)
+    - resetspace: 지정된 quadrant 외 영역을 어둡게 처리 + 경계선 + 라벨
 
     Args:
         image: BGR 이미지 (numpy array)
@@ -568,7 +598,7 @@ def draw_workspace_on_image(
         pix2robot_calibrator: Pix2RobotCalibrator 인스턴스 (우선 사용)
         workspace_bounds: (legacy, 미사용) 호환성 유지
         coord_transformer: (legacy, 미사용) 호환성 유지
-        task_type: 태스크 유형. "arrange"일 때 reset 영역 마스킹 적용.
+        resetspace: reset quadrant 제약. 지정 시 해당 quadrant 외 영역 어둡게.
 
     Returns:
         시각화된 이미지 (numpy array, copy)
@@ -633,23 +663,21 @@ def draw_workspace_on_image(
     if np.any(ws_mask):
         result[ws_mask == 0] = (result[ws_mask == 0] * 0.4).astype(np.uint8)
 
-    # ── arrange 태스크: reset 영역 (|y| > 0.12m) 마스킹 ──
-    # 도달 가능 영역 내 reset 영역도 도달 불가와 동일한 밝기(0.4배)로 통일
-    if task_type == "arrange":
-        ARRANGE_Y_BOUNDARY = 0.12
-        for v in range(0, img_h, step_px):
-            for u in range(0, img_w, step_px):
-                if ws_mask[v, u] == 0:
-                    continue  # 이미 도달 불가로 어두워진 영역은 스킵
-                try:
-                    rx, ry, _ = p2r.pixel_to_robot(u, v)
-                    if abs(ry) > ARRANGE_Y_BOUNDARY:
-                        # 원본 이미지 기준 0.4배로 맞춤 (도달 불가 영역과 동일)
+    # ── Resetspace quadrant 마스킹 ──
+    if resetspace is not None and resetspace != "all":
+        bounds = QUADRANT_DEFINITIONS.get(resetspace)
+        if bounds is not None:
+            u_min, u_max = bounds["u_range"]
+            v_min, v_max = bounds["v_range"]
+            for v in range(0, img_h, step_px):
+                for u in range(0, img_w, step_px):
+                    if ws_mask[v, u] == 0:
+                        continue  # 이미 도달 불가로 어두워진 영역은 스킵
+                    if not (u_min <= u < u_max and v_min <= v < v_max):
                         result[v:v+step_px, u:u+step_px] = (
                             image[v:v+step_px, u:u+step_px] * 0.4
                         ).astype(np.uint8)
-                except Exception:
-                    continue
+                        ws_mask[v:v+step_px, u:u+step_px] = 0
 
     # ── Free state EE exclusion zone (반경 8cm) 마스킹 ──
     FREE_STATE_EXCLUSION_RADIUS = 0.08
@@ -745,6 +773,28 @@ def draw_workspace_on_image(
                   (img_w - edge_margin - 1, img_h - edge_margin - 1),
                   COLOR_GREEN, 1)
 
+    # ── Resetspace quadrant 경계선 (Yellow 점선) ──
+    COLOR_YELLOW = (0, 255, 255)
+    if resetspace is not None and resetspace != "all":
+        bounds = QUADRANT_DEFINITIONS.get(resetspace)
+        if bounds is not None:
+            u_min, u_max = bounds["u_range"]
+            v_min, v_max = bounds["v_range"]
+            # 점선으로 경계 그리기
+            dash_len = 8
+            # 수평선 (v_min, v_max)
+            for line_v in [v_min, v_max - 1]:
+                if 0 < line_v < img_h:
+                    for u_start in range(u_min, u_max, dash_len * 2):
+                        u_end = min(u_start + dash_len, u_max)
+                        cv2.line(result, (u_start, line_v), (u_end, line_v), COLOR_YELLOW, 1)
+            # 수직선 (u_min, u_max)
+            for line_u in [u_min, u_max - 1]:
+                if 0 < line_u < img_w:
+                    for v_start in range(v_min, v_max, dash_len * 2):
+                        v_end = min(v_start + dash_len, v_max)
+                        cv2.line(result, (line_u, v_start), (line_u, v_end), COLOR_YELLOW, 1)
+
     # ── 라벨 텍스트 ──
     reach_label = f"Reach: [{min_reach:.2f}, {max_reach:.2f}]m"
     cv2.putText(result, reach_label, (10, img_h - 10),
@@ -752,6 +802,10 @@ def draw_workspace_on_image(
     margin_label = f"Edge margin: {edge_margin}px"
     cv2.putText(result, margin_label, (10, img_h - 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_GREEN, 1, cv2.LINE_AA)
+    if resetspace is not None and resetspace != "all":
+        rs_label = f"Reset: {resetspace}"
+        cv2.putText(result, rs_label, (10, img_h - 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_YELLOW, 1, cv2.LINE_AA)
 
     return result
 
@@ -797,11 +851,11 @@ def generate_multi_robot_seed_positions(
     seed: int = None,
     max_attempts: int = 500,
     bbox_margin_px: int = 10,
-    y_min_abs: Optional[float] = None,
     current_positions: Dict[str, dict] = None,
     current_positions_margin_px: int = 15,
     exclusion_zones: Optional[List[dict]] = None,
     previous_seed_positions: Optional[List[Dict]] = None,
+    resetspace: Optional[str] = None,
 ) -> Dict[str, List[float]]:
     """
     Generate random seed positions for multi-robot setup.
@@ -819,7 +873,6 @@ def generate_multi_robot_seed_positions(
         seed: Random seed for reproducibility.
         max_attempts: Max attempts per object.
         bbox_margin_px: Margin for non-grippable object collision check.
-        y_min_abs: |y| constraint for arrange task.
         current_positions: Current object positions for collision avoidance.
         current_positions_margin_px: Margin for current position collision.
         exclusion_zones: Zones to avoid (e.g., free state EE positions).
@@ -840,10 +893,10 @@ def generate_multi_robot_seed_positions(
             seed=seed,
             max_attempts=max_attempts,
             bbox_margin_px=bbox_margin_px,
-            y_min_abs=y_min_abs,
             current_positions=current_positions,
             current_positions_margin_px=current_positions_margin_px,
             exclusion_zones=exclusion_zones,
+            resetspace=resetspace,
         )
 
     # Use first robot's pix2robot for pixel↔position conversion
@@ -887,10 +940,10 @@ def generate_multi_robot_seed_positions(
         seed=seed,
         max_attempts=max_attempts,
         bbox_margin_px=bbox_margin_px,
-        y_min_abs=y_min_abs,
         current_positions=current_positions,
         current_positions_margin_px=current_positions_margin_px,
         exclusion_zones=all_exclusion_zones,
+        resetspace=resetspace,
     )
 
     print()

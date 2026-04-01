@@ -142,10 +142,10 @@ class ForwardAndResetPipeline(BasePipeline):
         cad_image_dirs: List[str] = None,
         side_view_image: str = None,
         codegen_model: str = None,
-        task_type: str = "pick_place",
         reset_instruction: str = None,
         skip_turn_test: bool = False,
         detect_model: str = None,
+        resetspace: str = None,
     ):
         """
         초기화
@@ -162,8 +162,6 @@ class ForwardAndResetPipeline(BasePipeline):
             recording_fps: 레코딩 FPS (기본: 30)
             multi_turn: True면 crop-then-point 멀티턴 LLM 코드 생성 사용
             cad_image_dirs: CAD 참조 이미지 디렉토리 리스트 (옵션)
-            task_type: 태스크 유형 ("arrange", "pick_place", "stack" 등).
-                      arrange일 때 seed 위치를 x < 0.15m로 제한하여 정렬 영역과 분리.
         """
         self.robot_id = robot_id
         self.llm_model = llm_model
@@ -177,10 +175,10 @@ class ForwardAndResetPipeline(BasePipeline):
         self.cad_image_dirs = cad_image_dirs or []
         self.side_view_image = side_view_image
         self.codegen_model = codegen_model
-        self.task_type = task_type
         self.reset_instruction = reset_instruction or "move objects to certain position"
         self.skip_turn_test = skip_turn_test
         self.detect_model = detect_model
+        self.resetspace = resetspace
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
 
@@ -623,7 +621,6 @@ class ForwardAndResetPipeline(BasePipeline):
             skip_codegen=skip_codegen,
             canonical_labels=canonical_labels,
             canonical_point_labels=canonical_point_labels,
-            task_type=self.task_type,
             skip_turn_test=self.skip_turn_test,
         )
 
@@ -902,6 +899,7 @@ class ForwardAndResetPipeline(BasePipeline):
             current_episode=self.current_episode,
             total_episodes=self.total_episodes,
             current_positions=current_positions,
+            resetspace=self.resetspace,
         )
 
         return reset_code, orig_pos, current_pos, target_pos
@@ -952,6 +950,7 @@ class ForwardAndResetPipeline(BasePipeline):
             codegen_model=self.codegen_model,
             skip_codegen=skip_codegen,
             canonical_labels=canonical_labels,
+            resetspace=self.resetspace,
         )
 
         self.reset_multi_turn_info = reset_mt_info
@@ -2203,18 +2202,15 @@ class ForwardAndResetPipeline(BasePipeline):
         accepted_positions = None
 
         for attempt in range(10):
-            # arrange 태스크: seed 위치를 |y| > 0.15m (테이블 상/하단)으로 제한
-            seed_y_min_abs = 0.15 if self.task_type == "arrange" else None
-
             random_targets = generate_random_positions(
                 grippable_objects=grippable,
                 obstacle_objects=obstacles,
                 initial_positions=all_initial,
                 workspace=workspace,
                 pix2robot=pix2robot,
-                y_min_abs=seed_y_min_abs,
                 current_positions=current_positions,
                 exclusion_zones=exclusion_zones,
+                resetspace=self.resetspace,
             )
             if not random_targets:
                 print(f"  [SeedGen] Attempt {attempt+1}: position generation failed, retrying...")
@@ -2297,7 +2293,7 @@ class ForwardAndResetPipeline(BasePipeline):
             base_img = np.zeros((480, 640, 3), dtype=np.uint8) + 60
 
         # workspace 시각화 베이스
-        result = draw_workspace_on_image(base_img, robot_id=self.robot_id, pix2robot_calibrator=pix2robot)
+        result = draw_workspace_on_image(base_img, robot_id=self.robot_id, pix2robot_calibrator=pix2robot, resetspace=self.resetspace)
 
         def _draw_bbox(img, center_px, bbox_px, color, thickness, label=""):
             hw, hh = bbox_px[0] // 2, bbox_px[1] // 2
@@ -2392,7 +2388,7 @@ class ForwardAndResetPipeline(BasePipeline):
         else:
             base_img = np.zeros((480, 640, 3), dtype=np.uint8) + 60
 
-        result = draw_workspace_on_image(base_img, robot_id=self.robot_id, pix2robot_calibrator=pix2robot)
+        result = draw_workspace_on_image(base_img, robot_id=self.robot_id, pix2robot_calibrator=pix2robot, resetspace=self.resetspace)
 
         # 객체 이름 수집 (grippable만)
         all_obj_names = set()
@@ -3367,14 +3363,6 @@ def main():
     )
 
     parser.add_argument(
-        "--task-type",
-        type=str,
-        default="pick_place",
-        choices=["pick_place", "arrange", "stack"],
-        help="Task type (default: pick_place). 'arrange' restricts seed positions to x<0.15m to separate from arrangement area."
-    )
-
-    parser.add_argument(
         "--reset-instruction",
         type=str,
         default=None,
@@ -3385,6 +3373,15 @@ def main():
         "--skip-turn-test",
         action="store_true",
         help="Skip Turn Test (Waypoint Trajectory Prediction) in multi-turn code generation"
+    )
+
+    parser.add_argument(
+        "--resetspace-per-robot",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Per-robot reset quadrant (all, top-left, top-right, bottom-left, bottom-right). "
+             "Order matches --robot order. Default: 'all' for each robot."
     )
 
     args = parser.parse_args()
@@ -3406,6 +3403,10 @@ def main():
 
     if len(robot_ids) == 1:
         # ── Single-arm: 기존 ForwardAndResetPipeline ──
+        # resetspace: single-arm이면 첫 번째 값 사용
+        _rs = args.resetspace_per_robot
+        single_resetspace = _rs[0] if _rs else None
+
         pipeline = ForwardAndResetPipeline(
             robot_id=robot_ids[0],
             llm_model=args.llm,
@@ -3421,14 +3422,21 @@ def main():
             side_view_image=args.side_view_image,
             recording_fps=args.recording_fps,
             codegen_model=args.codegen_session2_model,
-            task_type=args.task_type,
             reset_instruction=args.reset_instruction,
             skip_turn_test=args.skip_turn_test,
             detect_model=args.detect_model,
+            resetspace=single_resetspace,
         )
     else:
         # ── Multi-arm: UnifiedMultiArmPipeline ──
         from unified_multi_arm import UnifiedMultiArmPipeline
+        # resetspace: multi-arm이면 로봇 순서대로 매핑
+        _rs = args.resetspace_per_robot or ["all"] * len(robot_ids)
+        # 부족하면 마지막 값으로 채움
+        while len(_rs) < len(robot_ids):
+            _rs.append(_rs[-1] if _rs else "all")
+        resetspace_per_robot = dict(zip(robot_ids, _rs))
+
         pipeline = UnifiedMultiArmPipeline(
             robot_ids=robot_ids,
             llm_model=args.llm,
@@ -3444,10 +3452,10 @@ def main():
             side_view_image=args.side_view_image,
             recording_fps=args.recording_fps,
             codegen_model=args.codegen_session2_model,
-            task_type=args.task_type,
             reset_instruction=args.reset_instruction,
             skip_turn_test=args.skip_turn_test,
             detect_model=args.detect_model,
+            resetspace_per_robot=resetspace_per_robot,
         )
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기

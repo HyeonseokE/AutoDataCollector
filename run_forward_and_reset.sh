@@ -95,7 +95,7 @@ ROBOT_IDS=(2 3)
 ### [dual arm task]
 ## towel folding
 INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
-RESET_INSTRUCTION=""
+RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
 
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
@@ -103,9 +103,10 @@ RESET_INSTRUCTION=""
 NUM_EPISODES=30
 NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
-# [선택] 태스크 유형 (pick_place, arrange, stack)
-# arrange: seed 위치를 테이블 뒤쪽(x<0.15m)으로 제한하여 정렬 영역과 분리
-TASK_TYPE="pick_place"
+# [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
+# 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
+# all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
+RESETSPACE_PER_ROBOT=(top-left bottom-right)
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -383,6 +384,10 @@ if [ -n "$RESUME_SESSION" ]; then
     EXTRA_ARGS="$EXTRA_ARGS --resume $RESUME_SESSION"
 fi
 
+if [ ${#RESETSPACE_PER_ROBOT[@]} -gt 0 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --resetspace-per-robot ${RESETSPACE_PER_ROBOT[@]}"
+fi
+
 # ============================================================
 # 파이프라인 실행
 # ============================================================
@@ -399,7 +404,6 @@ python execution_forward_and_reset.py \
     --judge-model "$JUDGE_MODEL" \
     --judge-timeout "$JUDGE_TIMEOUT" \
     --num-random-seeds "$NUM_RANDOM_SEEDS" \
-    --task-type "$TASK_TYPE" \
     ${RESET_INSTRUCTION:+--reset-instruction "$RESET_INSTRUCTION"} \
     $( [ "$SKIP_TURN_TEST" = "true" ] && echo "--skip-turn-test" ) \
     --save "$SAVE_DIR" \

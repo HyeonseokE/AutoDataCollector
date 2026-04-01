@@ -69,16 +69,24 @@ cd "$SCRIPT_DIR"
 # You need to carefully assemble the green hinge's male part to red hinge's hole part.
 # since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
-# [필수] 로봇 번호 배열 (단일: (2), 듀얼: (2 3))
-ROBOT_IDS=(2 3)
+# [필수] 로봇 번호 배열 — 순서가 arm 그룹을 결정 (최대 4대):
+#   ROBOT_IDS[0] → left_arm
+#   ROBOT_IDS[1] → right_arm
+#   ROBOT_IDS[2] → top_arm
+#   ROBOT_IDS[3] → bottom_arm
+# shared 카메라는 항상 포함. 제공된 ID 수만큼만 arm 그룹 활성화.
+# 예: (0)       → shared + left_arm
+#     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
+#     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
+ROBOT_IDS=(0)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
 
 ### [single arm task]
 ## pick and place
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# RESET_INSTRUCTION=""
+INSTRUCTION="pick up the red block and place it on the blue dish"
+RESET_INSTRUCTION=""
 
 ## stack red and yellow
 # INSTRUCTION="stack the blocks in the order of red and yellow"
@@ -94,19 +102,19 @@ ROBOT_IDS=(2 3)
 
 ### [dual arm task]
 ## towel folding
-INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
-RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
+# INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
+# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
 
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=30
-NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_RANDOM_SEEDS=10 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
 # all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(top-left bottom-right)
+RESETSPACE_PER_ROBOT=(top-left)
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"

@@ -322,22 +322,58 @@ class ForwardAndResetPipeline(BasePipeline):
 
         try:
             from record_dataset import DatasetRecorder
-            from record_dataset.config import create_camera_manager_from_config
+            from record_dataset.config import (
+                create_camera_manager_from_config,
+                load_cameras_from_yaml,
+                build_features_from_yaml,
+            )
 
             print(f"\n[Recording] Initializing multi-camera dataset recorder...")
             print(f"  Repo ID: {self.dataset_repo_id}")
             print(f"  FPS: {self.recording_fps}")
 
-            # 1. 카메라 매니저 초기화 (YAML에서 동적 로드)
+            # 1. 카메라 매니저 초기화 (YAML에서 동적 로드, num_robots로 arm 그룹 필터링)
             print(f"[Recording] Loading camera configuration...")
-            self.camera_manager = create_camera_manager_from_config(robot_id=self.robot_id)
+            self.camera_manager = create_camera_manager_from_config(num_robots=1)
 
             # 2. 카메라 연결
             print(f"[Recording] Connecting cameras...")
             self.camera_manager.connect_all()
             print(f"[Recording] Cameras connected: {self.camera_manager.camera_names}")
 
-            # 3. 기존 dataset 존재 여부 미리 체크 (forward + reset)
+            # 3. 카메라 연결 검증 (멀티암과 동일 패턴)
+            cameras = load_cameras_from_yaml(num_robots=1)
+            enabled_cameras = [cam for cam in cameras if cam.enabled]
+            connected_names = set(self.camera_manager.camera_names)
+            expected_names = {cam.feature_name for cam in enabled_cameras}
+            missing = expected_names - connected_names
+            if missing:
+                missing_details = []
+                for cam in enabled_cameras:
+                    if cam.feature_name in missing:
+                        device = cam.get_device_path() or cam.serial_number or "unknown"
+                        missing_details.append(f"  - {cam.feature_name} ({cam.type}, device={device})")
+                raise AssertionError(
+                    f"\n"
+                    f"========================================\n"
+                    f"Camera connection failed!\n"
+                    f"========================================\n"
+                    f"The following cameras are enabled in recording_config.yaml\n"
+                    f"but failed to connect:\n"
+                    + "\n".join(missing_details) + "\n"
+                    f"\n"
+                    f"To fix, either:\n"
+                    f"  1. Connect the camera hardware and verify device path\n"
+                    f"     (run: v4l2-ctl --list-devices)\n"
+                    f"  2. Set 'enabled: false' for unavailable cameras in\n"
+                    f"     pipeline_config/recording_config.yaml\n"
+                    f"========================================"
+                )
+
+            # 4. Features 빌드 (연결된 카메라 기준, 멀티암과 동일 패턴)
+            features = build_features_from_yaml(num_robots=1)
+
+            # 5. 기존 dataset 존재 여부 미리 체크 (forward + reset)
             from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
             reset_repo_id = self.dataset_repo_id + "_reset"
             existing = []
@@ -361,24 +397,24 @@ class ForwardAndResetPipeline(BasePipeline):
                     f"========================================"
                 )
 
-            # 4. 레코더 초기화 (YAML에서 features 동적 생성)
+            # 6. 레코더 초기화 (빌드된 features 전달, 멀티암과 동일 패턴)
             self.dataset_recorder = DatasetRecorder(
                 repo_id=self.dataset_repo_id,
                 fps=self.recording_fps,
                 resume=self.resume_recording,
-                robot_id=self.robot_id,
+                features=features,
             )
             print(f"[Recording] Recorder initialized successfully")
             print(f"[Recording] Features: {list(self.dataset_recorder.features.keys())}")
 
-            # 5. Reset 레코더 초기화 (별도 dataset)
+            # 7. Reset 레코더 초기화 (별도 dataset, 동일 features)
             print(f"\n[Recording] Initializing reset dataset recorder...")
             print(f"  Reset Repo ID: {reset_repo_id}")
             self.reset_dataset_recorder = DatasetRecorder(
                 repo_id=reset_repo_id,
                 fps=self.recording_fps,
                 resume=self.resume_recording,
-                robot_id=self.robot_id,
+                features=features,
             )
             print(f"[Recording] Reset recorder initialized")
 

@@ -687,7 +687,7 @@ def _parse_camera_entry(cam_data: dict, group: str = "shared") -> 'CameraConfigR
     )
 
 
-def load_cameras_from_yaml(yaml_path: str = None) -> List[CameraConfigRecord]:
+def load_cameras_from_yaml(yaml_path: str = None, num_robots: int = None) -> List[CameraConfigRecord]:
     """
     YAML 파일에서 카메라 설정을 동적으로 로드.
 
@@ -706,6 +706,8 @@ def load_cameras_from_yaml(yaml_path: str = None) -> List[CameraConfigRecord]:
 
     Args:
         yaml_path: recording_config.yaml 경로 (None이면 기본 경로)
+        num_robots: 로봇 수. 순서대로 left/right/top/bottom arm 그룹 활성화.
+                    None이면 모든 arm 그룹 로드.
 
     Returns:
         List[CameraConfigRecord]: 카메라 설정 리스트
@@ -739,8 +741,14 @@ def load_cameras_from_yaml(yaml_path: str = None) -> List[CameraConfigRecord]:
                 cameras.append(_parse_camera_entry(cam_data, group="shared"))
 
         elif isinstance(cameras_data, dict):
-            # 새 그룹 구조 (shared / left_arm / right_arm)
-            for group_key in ["shared", "left_arm", "right_arm"]:
+            # ROBOT_IDS 순서 → arm 그룹 매핑:
+            #   [0]=left_arm, [1]=right_arm, [2]=top_arm, [3]=bottom_arm
+            # shared는 항상 포함, 제공된 robot_ids 수만큼만 arm 그룹 활성화
+            _ARM_GROUPS = ["left_arm", "right_arm", "top_arm", "bottom_arm"]
+            active_arms = _ARM_GROUPS[:num_robots] if num_robots is not None else _ARM_GROUPS
+            active_groups = ["shared"] + active_arms
+
+            for group_key in active_groups:
                 group_cams = cameras_data.get(group_key, [])
                 if group_cams is None:
                     continue
@@ -760,12 +768,13 @@ def load_cameras_from_yaml(yaml_path: str = None) -> List[CameraConfigRecord]:
         return DEFAULT_CAMERAS.copy()
 
 
-def create_camera_manager_from_config(yaml_path: str = None):
+def create_camera_manager_from_config(yaml_path: str = None, num_robots: int = None):
     """
     YAML 설정에서 MultiCameraManager 생성
 
     Args:
         yaml_path: recording_config.yaml 경로
+        num_robots: 로봇 수. 순서대로 left/right/top/bottom arm 그룹 활성화.
 
     Returns:
         MultiCameraManager 인스턴스
@@ -780,8 +789,8 @@ def create_camera_manager_from_config(yaml_path: str = None):
 
     from cameras import MultiCameraManager, RealSenseCameraConfig, OpenCVCameraConfig
 
-    # YAML에서 카메라 설정 로드
-    camera_configs = load_cameras_from_yaml(yaml_path)
+    # YAML에서 카메라 설정 로드 (num_robots에 따라 arm 그룹 필터링)
+    camera_configs = load_cameras_from_yaml(yaml_path, num_robots=num_robots)
 
     # cameras 모듈용 config 객체로 변환
     configs = []
@@ -816,17 +825,18 @@ def create_camera_manager_from_config(yaml_path: str = None):
     return MultiCameraManager(configs)
 
 
-def build_features_from_yaml(yaml_path: str = None) -> Dict[str, Any]:
+def build_features_from_yaml(yaml_path: str = None, num_robots: int = None) -> Dict[str, Any]:
     """
     YAML 설정 기반으로 LeRobot dataset features 생성
 
     Args:
         yaml_path: recording_config.yaml 경로
+        num_robots: 로봇 수. 순서대로 left/right/top/bottom arm 그룹 활성화.
 
     Returns:
         LeRobot dataset features dict
     """
-    cameras = load_cameras_from_yaml(yaml_path)
+    cameras = load_cameras_from_yaml(yaml_path, num_robots=num_robots)
     enabled_cameras = [cam for cam in cameras if cam.enabled]
     skill_enabled = load_skill_features_from_yaml(yaml_path)
     obs_enabled = load_observation_features_from_yaml(yaml_path)

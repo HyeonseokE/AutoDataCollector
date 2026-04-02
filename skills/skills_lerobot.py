@@ -629,30 +629,37 @@ class LeRobotSkills:
             end_gripper = start_gripper  # 변화 없음
 
         start_time = time.time()
+        loop_period = 1.0 / self.RECORDING_FPS
 
         while True:
+            loop_start = time.perf_counter()
             elapsed = time.time() - start_time
             if elapsed >= duration:
                 break
 
-            # Cosine smoothing (time-based)
+            # 1. Read current state BEFORE writing command (_execute_trajectory와 동일)
+            actual_arm = self.robot.read_positions(normalize=True)[:5]
+
+            # 2. Cosine smoothing (time-based)
             alpha = min(elapsed / duration, 1.0)
             smooth_alpha = (1 - np.cos(alpha * np.pi)) / 2
 
-            # Arm + Gripper interpolation
+            # 3. Arm + Gripper interpolation
             arm_normalized = np.clip(
                 start_normalized + smooth_alpha * (end_normalized - start_normalized),
                 -99.0, 99.0
             )
             gripper_pos = start_gripper + smooth_alpha * (end_gripper - start_gripper)
 
+            # 4. Send command
             full_normalized = np.concatenate([arm_normalized, [gripper_pos]])
             self.robot.write_positions(full_normalized, normalize=True)
 
-            # LeRobot dataset recording callback (reuse interpolated state, no extra serial read)
+            # 5. Recording: state=명령 전 실제 서보, action=보간된 목표
             if self.recording_callback is not None:
                 try:
-                    self.recording_callback(full_normalized.astype(np.float32), full_normalized.copy())
+                    state_full = np.concatenate([actual_arm, [gripper_pos]]).astype(np.float32)
+                    self.recording_callback(state_full, full_normalized.copy())
                 except Exception as _rec_e:
                     if not getattr(self, '_rec_err_logged', False):
                         print(f"\n[Recording] Callback error: {_rec_e}")
@@ -663,7 +670,11 @@ class LeRobotSkills:
                 filled = int(30 * progress)
                 print(f"\r  [{'=' * filled}{'-' * (30 - filled)}] {progress*100:5.1f}%", end="", flush=True)
 
-            time.sleep(0.02)  # 50Hz
+            # 6. precise_sleep to maintain RECORDING_FPS (30Hz, _execute_trajectory와 동일)
+            dt = time.perf_counter() - loop_start
+            sleep_time = loop_period - dt
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
         # Final position
         arm_normalized = np.clip(end_normalized, -99.0, 99.0)
@@ -753,7 +764,7 @@ class LeRobotSkills:
         loop_period = 1.0 / self.RECORDING_FPS
 
         POSITION_TOLERANCE = 0.015  # 15mm
-        MAX_TOTAL_TIME = duration + 2.0
+        MAX_TOTAL_TIME = duration + 1.0
         SETTLE_TIME = 0.2
 
         target_reached = False
@@ -793,8 +804,8 @@ class LeRobotSkills:
             self.robot.write_positions(full_normalized, normalize=True)
 
             # Inline recording (every iteration = 1 frame at RECORDING_FPS)
-            # Reuse actual_norm from _get_current_state() to avoid redundant serial read
-            if self.recording_callback is not None and phase == "Traj":
+            # Traj + Hold 모두 녹화: state=실제 서보, action=명령 목표
+            if self.recording_callback is not None:
                 state_full = np.concatenate([actual_norm, [self.current_gripper_pos]])
                 self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
 

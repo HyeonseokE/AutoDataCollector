@@ -76,7 +76,7 @@ class DatasetRecorder:
         config_yaml: Optional[str] = None,
         features: Optional[Dict] = None,
         resume: bool = False,
-        robot_id: int = None,
+        num_robots: int = None,
     ):
         self.repo_id = repo_id
         self.fps = fps
@@ -87,16 +87,24 @@ class DatasetRecorder:
         self.config_yaml = config_yaml
         self.resume = resume
 
-        # 카메라 설정 로드 (YAML에서 동적으로, robot_id로 필터)
-        self.camera_configs: List[CameraConfigRecord] = load_cameras_from_yaml(config_yaml, robot_id=robot_id)
-        self.enabled_cameras = [cam for cam in self.camera_configs if cam.enabled]
-        self.camera_names = [cam.feature_name for cam in self.enabled_cameras]
-
-        # Features: 수동 지정 또는 YAML에서 동적 생성
+        # Features & 카메라 설정: features가 전달되면 그 기준으로, 아니면 YAML에서 동적 생성
         if features is not None:
             self.features = features
+            # features에서 카메라 목록 추출 (observation.images.* 키)
+            self.camera_names = [
+                k.replace("observation.images.", "")
+                for k in features if k.startswith("observation.images.")
+            ]
+            self.camera_configs = [
+                cam for cam in load_cameras_from_yaml(config_yaml, num_robots=num_robots)
+                if cam.enabled and cam.feature_name in self.camera_names
+            ]
+            self.enabled_cameras = self.camera_configs
         else:
-            self.features = build_features_from_yaml(config_yaml, robot_id=robot_id)
+            self.camera_configs: List[CameraConfigRecord] = load_cameras_from_yaml(config_yaml, num_robots=num_robots)
+            self.enabled_cameras = [cam for cam in self.camera_configs if cam.enabled]
+            self.camera_names = [cam.feature_name for cam in self.enabled_cameras]
+            self.features = build_features_from_yaml(config_yaml, num_robots=num_robots)
 
         # Skill feature enabled 설정 로드
         self._skill_enabled = load_skill_features_from_yaml(config_yaml)

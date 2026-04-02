@@ -34,7 +34,7 @@ cameras:
     - name: "wrist"
       type: "opencv"
       enabled: true
-      index_or_path: "/dev/video8"
+      index_or_path: "/dev/video1"
       width: 640
       height: 480
       fps: 30
@@ -45,7 +45,7 @@ cameras:
     - name: "wrist"
       type: "opencv"
       enabled: true
-      index_or_path: "/dev/video6"
+      index_or_path: "/dev/video8"
       width: 640
       height: 480
       fps: 30

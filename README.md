@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="AutoDataCollector" width="400">
+  <img src="docs/assets/image (6).png" alt="AutoDataCollector" width="400">
 </p>
 
 <h3 align="center">Automated Robot Manipulation Data Factory</h3>
@@ -22,7 +22,7 @@
 
 <!-- Replace with actual demo GIF/video -->
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="Demo" width="720">
+  <img src="docs/assets/ITRC1-ezgif.com-video-to-gif-converter.gif" alt="Demo" width="720">
 </p>
 
 ---

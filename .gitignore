@@ -47,6 +47,8 @@ outputs/
 .env
 openai_api_key.json
 google_aistudio_key.json
+pipeline_config/recording_config.yaml
+run_forward_and_reset.sh
 
 # Legacy folders (DO NOT MODIFY)
 code_gen/

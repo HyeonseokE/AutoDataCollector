@@ -22,7 +22,7 @@
 
 <!-- Replace with actual demo GIF/video -->
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="Demo" width="720">
+  <img src="docs/assets/ITRC1-ezgif.com-video-to-gif-converter.gif" alt="Demo" width="720">
 </p>
 
 ---

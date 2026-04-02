@@ -413,6 +413,482 @@ class UnifiedMultiArmPipeline(BasePipeline):
         return reset_code
 
     # ─────────────────────────────────────────────
+    # Seed Position Generation (multi-arm)
+    # ─────────────────────────────────────────────
+
+    def _generate_seed_positions(self, session_dir: str, seed_index: int, current_positions: Dict = None) -> Optional[Dict]:
+        """
+        새 seed 위치 생성 (멀티암): per-arm 구조 랜덤 위치 생성.
+
+        각 물체의 "home arm"을 pixel 좌표 기반으로 결정하고,
+        해당 arm의 resetspace 안에서 랜덤 위치를 생성한 뒤,
+        pixel 경유로 양 팔 좌표계에 동기화합니다.
+
+        Args:
+            session_dir: 세션 디렉토리
+            seed_index: 시드 인덱스
+            current_positions: forward 후 실제 검출 위치 (per-arm dict)
+
+        Returns:
+            성공 시 per-arm positions dict, 실패 시 None
+        """
+        from code_gen_lerobot.reset_execution.workspace import (
+            generate_random_positions, classify_objects, ResetWorkspace,
+        )
+
+        if self.first_episode_positions is None:
+            print("  [SeedGen] No first_episode_positions, cannot generate")
+            return None
+
+        save_dir = str(Path(session_dir) / f"seed_{seed_index+1:02d}_setup")
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+        # ── per-arm pix2robot 로드 ──
+        pix2robot_map = {}  # {robot_id: Pix2RobotCalibrator}
+        try:
+            from pix2robot_calibrator import Pix2RobotCalibrator
+            for rid in self.robot_ids:
+                calib_path = Path(__file__).parent / "robot_configs" / "pix2robot_matrices" / f"robot{rid}_pix2robot_data.npz"
+                if calib_path.exists():
+                    p2r = Pix2RobotCalibrator(robot_id=rid)
+                    if p2r.load(str(calib_path)):
+                        pix2robot_map[rid] = p2r
+        except Exception:
+            pass
+
+        # ── per-arm workspace + kinematics ──
+        workspace_map = {}  # {robot_id: ResetWorkspace}
+        kin_map = {}        # {robot_id: KinematicsEngine}
+        try:
+            from lerobot_cap.kinematics.engine import KinematicsEngine
+            for rid in self.robot_ids:
+                urdf_path = Path(__file__).parent / "assets" / "urdf" / f"so101_robot{rid}.urdf"
+                if urdf_path.exists():
+                    kin = KinematicsEngine(str(urdf_path))
+                    kin_map[rid] = kin
+                    workspace_map[rid] = ResetWorkspace(kinematics_engine=kin)
+        except Exception:
+            pass
+
+        # ── per-arm free state exclusion zones ──
+        FREE_STATE_EXCLUSION_RADIUS = 0.08
+        exclusion_map = {}  # {robot_id: [zone, ...]}
+        for rid in self.robot_ids:
+            exclusion_map[rid] = []
+            # 각 팔의 free state EE 위치를 해당 팔의 exclusion zone으로 추가
+            for excl_rid in self.robot_ids:
+                try:
+                    from lerobot_cap.kinematics import load_calibration_limits as _load_cl
+                    free_state_path = Path(__file__).parent / "robot_configs" / "free_state" / f"robot{excl_rid}_free_state.json"
+                    calib_path = Path(__file__).parent / "robot_configs" / "motor_calibration" / "so101" / f"robot{excl_rid}_calibration.json"
+                    if free_state_path.exists() and calib_path.exists() and excl_rid in kin_map:
+                        with open(free_state_path) as f:
+                            free_norm = np.array(json.load(f)["initial_state_normalized"])
+                        _cl = _load_cl(str(calib_path),
+                            joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"])
+                        free_rad = _cl.normalized_to_radians(free_norm)
+                        free_ee = kin_map[excl_rid].get_ee_position(free_rad)
+                        # free_ee는 excl_rid 좌표계 → rid 좌표계로 변환 (pixel 경유)
+                        if excl_rid != rid and excl_rid in pix2robot_map and rid in pix2robot_map:
+                            px = pix2robot_map[excl_rid].robot_to_pixel(free_ee[0], free_ee[1])
+                            rx, ry, _ = pix2robot_map[rid].pixel_to_robot(int(px[0]), int(px[1]))
+                            center = [float(rx), float(ry)]
+                        else:
+                            center = [float(free_ee[0]), float(free_ee[1])]
+                        exclusion_map[rid].append({"center": center, "radius": FREE_STATE_EXCLUSION_RADIUS})
+                except Exception:
+                    pass
+
+        # ── 물체 분류 (한쪽 arm dict에서 추출) ──
+        one_arm_pos = (self.first_episode_positions.get("left_arm")
+                       or self.first_episode_positions.get("right_arm") or {})
+        grippable, obstacles = classify_objects(one_arm_pos)
+
+        # ── 물체별 home arm 결정 (pixel x 좌표 기준) ──
+        IMAGE_WIDTH = 640
+        arm_keys = {self.left_id: "left_arm", self.right_id: "right_arm"}
+
+        def _get_home_arm(obj_name):
+            """pixel x 좌표 기준으로 home arm 결정."""
+            for arm_key in ["left_arm", "right_arm"]:
+                info = self.first_episode_positions.get(arm_key, {}).get(obj_name)
+                if info and "pixel" in info:
+                    px_x = info["pixel"][0]  # pixel [u, v] → u가 x
+                    return self.left_id if px_x < IMAGE_WIDTH // 2 else self.right_id
+            return self.left_id  # fallback
+
+        # ── 과거 시드 위치 (겹침 방지) ──
+        all_initial = {}
+        for name in one_arm_pos:
+            all_initial[f"{name}_pseed_init"] = one_arm_pos[name]
+        for i, prev in enumerate(self._all_previous_seed_positions):
+            one_arm_prev = prev.get("left_arm") or prev.get("right_arm") or prev
+            for name, info in one_arm_prev.items():
+                all_initial[f"{name}_pseed{i}"] = info
+
+        # ── arm별로 랜덤 위치 생성 (최대 10회 재시도) ──
+        accepted = None
+        for attempt in range(10):
+            per_arm_targets = {}  # {arm_key: {obj_name: [x, y, z]}}
+
+            for arm_key, rid in [("left_arm", self.left_id), ("right_arm", self.right_id)]:
+                # 이 arm의 resetspace에 속하는 물체 필터
+                my_grippable = {name: info for name, info in grippable.items()
+                                if _get_home_arm(name) == rid}
+                if not my_grippable:
+                    per_arm_targets[arm_key] = {}
+                    continue
+
+                ws = workspace_map.get(rid)
+                p2r = pix2robot_map.get(rid)
+                rs = self.resetspace_per_robot.get(rid, "all")
+                excl = exclusion_map.get(rid, [])
+
+                targets = generate_random_positions(
+                    grippable_objects=my_grippable,
+                    obstacle_objects=obstacles,
+                    initial_positions=all_initial,
+                    workspace=ws,
+                    pix2robot=p2r,
+                    current_positions=None,
+                    exclusion_zones=excl,
+                    resetspace=rs,
+                )
+                per_arm_targets[arm_key] = targets or {}
+
+            # 유효성 검사: 모든 grippable 물체에 위치가 생성되었는지
+            generated_names = set()
+            for targets in per_arm_targets.values():
+                generated_names.update(targets.keys())
+            if generated_names >= set(grippable.keys()):
+                accepted = per_arm_targets
+                print(f"  [SeedGen] Attempt {attempt+1}: positions generated for {len(generated_names)} objects")
+                break
+            else:
+                missing = set(grippable.keys()) - generated_names
+                print(f"  [SeedGen] Attempt {attempt+1}: missing {missing}, retrying...")
+        else:
+            print(f"  [SeedGen] All 10 attempts failed")
+            return None
+
+        # ── per-arm positions dict 조합 (pixel 경유 양팔 좌표 동기화) ──
+        candidate = self._build_batch_positions_multi_arm(accepted, obstacles, pix2robot_map)
+
+        # ── dry_run 검증: 캐시된 reset 코드로 IK 도달 가능 여부 확인 ──
+        reset_code = self.cached_reset_code
+        if reset_code is not None:
+            print(f"  [SeedGen] Dry-run validating with cached reset code...")
+            dry_current = current_positions if current_positions else candidate
+            try:
+                dry_ok = self.execute_code(reset_code, {}, extra_globals={
+                    "current_positions": dry_current,
+                    "target_positions": candidate,
+                })
+                if not dry_ok:
+                    print(f"  [SeedGen] Dry-run FAILED, using positions anyway (best effort)")
+                else:
+                    print(f"  [SeedGen] Dry-run PASSED")
+            except Exception as e:
+                print(f"  [SeedGen] Dry-run error: {e}, using positions anyway")
+
+        result = candidate
+
+        # 로그
+        print(f"  [SeedGen] seed_{seed_index+1} positions:")
+        for arm_key in ["left_arm", "right_arm"]:
+            for name, info in result.get(arm_key, {}).items():
+                pos = info.get("position") if isinstance(info, dict) else None
+                if pos:
+                    print(f"    {arm_key}/{name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
+
+        # ── seed_positions.json 저장 ──
+        try:
+            seed_json = {
+                "seed_index": seed_index,
+                "positions": self._make_serializable(result),
+            }
+            with open(Path(save_dir) / "seed_positions.json", 'w') as f:
+                json.dump(seed_json, f, indent=2, default=str)
+            print(f"  [SeedGen] Saved: {save_dir}/seed_positions.json")
+        except Exception as e:
+            print(f"  [SeedGen] Warning: Failed to save seed JSON: {e}")
+
+        # ── seed 시각화 (per-arm workspace overlay) ──
+        self._visualize_seed_positions_multi_arm(save_dir, result, seed_index, pix2robot_map)
+
+        # 과거 시드에 추가 (다음 시드 겹침 방지)
+        self._all_previous_seed_positions.append(copy.deepcopy(result))
+
+        return result
+
+    def _build_batch_positions_multi_arm(
+        self,
+        per_arm_targets: Dict[str, Dict],
+        obstacles: Dict,
+        pix2robot_map: Dict,
+    ) -> Dict:
+        """
+        arm별 랜덤 타겟을 per-arm positions dict로 조합.
+        한쪽 arm에서 생성된 위치를 pixel 경유로 상대 arm 좌표계에도 동기화.
+
+        Args:
+            per_arm_targets: {"left_arm": {obj: [x,y,z]}, "right_arm": {obj: [x,y,z]}}
+            obstacles: 비grippable 물체 dict
+            pix2robot_map: {robot_id: Pix2RobotCalibrator}
+
+        Returns:
+            {"left_arm": {obj: {"position":..., "points":..., "pixel":...}},
+             "right_arm": {obj: {"position":..., "points":..., "pixel":...}}}
+        """
+        arm_to_rid = {"left_arm": self.left_id, "right_arm": self.right_id}
+        other_arm = {"left_arm": "right_arm", "right_arm": "left_arm"}
+        result = {"left_arm": {}, "right_arm": {}}
+
+        # 1. 각 arm의 grippable 물체: 생성된 위치 + pixel 경유로 상대 arm 좌표 생성
+        for arm_key, targets in per_arm_targets.items():
+            rid = arm_to_rid[arm_key]
+            p2r = pix2robot_map.get(rid)
+            opp_arm_key = other_arm[arm_key]
+            opp_rid = arm_to_rid[opp_arm_key]
+            opp_p2r = pix2robot_map.get(opp_rid)
+
+            for name, pos in targets.items():
+                pos = list(pos) if not isinstance(pos, list) else pos
+                orig = (self.first_episode_positions.get(arm_key, {}).get(name)
+                        or self.first_episode_positions.get(opp_arm_key, {}).get(name) or {})
+                bbox_px = orig.get("bbox_px", (30, 30))
+
+                # pixel 좌표 계산
+                pixel = None
+                if p2r is not None:
+                    try:
+                        pixel = list(p2r.robot_to_pixel(pos[0], pos[1]))
+                    except Exception:
+                        pass
+
+                # home arm entry
+                entry = {
+                    "position": pos,
+                    "points": {pt_name: pos for pt_name in orig.get("points", {"grasp center": None})},
+                    "bbox_px": bbox_px,
+                }
+                if pixel:
+                    entry["pixel"] = pixel
+                result[arm_key][name] = entry
+
+                # 상대 arm entry (pixel 경유 좌표 변환)
+                if pixel and opp_p2r is not None:
+                    try:
+                        ox, oy, oz = opp_p2r.pixel_to_robot(int(pixel[0]), int(pixel[1]))
+                        opp_pos = [ox, oy, pos[2]]  # z는 동일 (물체 높이)
+                        opp_entry = {
+                            "position": opp_pos,
+                            "points": {pt_name: opp_pos for pt_name in orig.get("points", {"grasp center": None})},
+                            "pixel": pixel,
+                            "bbox_px": bbox_px,
+                        }
+                        result[opp_arm_key][name] = opp_entry
+                    except Exception:
+                        pass
+
+        # 2. obstacle 물체: first_episode_positions에서 그대로 복사
+        for name in obstacles:
+            for arm_key in ["left_arm", "right_arm"]:
+                orig = self.first_episode_positions.get(arm_key, {}).get(name)
+                if orig and name not in result[arm_key]:
+                    result[arm_key][name] = copy.deepcopy(orig)
+
+        return result
+
+    def _visualize_seed_positions_multi_arm(
+        self,
+        save_dir: str,
+        positions: Dict,
+        seed_index: int,
+        pix2robot_map: Dict,
+    ):
+        """
+        Seed 위치를 per-arm workspace 이미지에 시각화.
+
+        Args:
+            save_dir: 저장 디렉토리
+            positions: per-arm positions dict
+            seed_index: 시드 인덱스
+            pix2robot_map: {robot_id: Pix2RobotCalibrator}
+        """
+        try:
+            import cv2
+            from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image
+
+            # forward 초기 이미지 로드 (가장 최근 에피소드)
+            base_image = None
+            for ep_idx in range(self.current_episode, 0, -1):
+                img_path = Path(save_dir).parent / f"episode_{ep_idx:02d}" / "forward" / "initial_state.jpg"
+                if img_path.exists():
+                    base_image = cv2.imread(str(img_path))
+                    break
+            if base_image is None:
+                return
+
+            arm_to_rid = {"left_arm": self.left_id, "right_arm": self.right_id}
+
+            for arm_key in ["left_arm", "right_arm"]:
+                rid = arm_to_rid[arm_key]
+                rs = self.resetspace_per_robot.get(rid, "all")
+                img = draw_workspace_on_image(base_image.copy(), robot_id=rid, resetspace=rs)
+
+                # seed 위치에 bbox 그리기
+                arm_positions = positions.get(arm_key, {})
+                for name, info in arm_positions.items():
+                    pixel = info.get("pixel")
+                    bbox_px = info.get("bbox_px", (30, 30))
+                    if pixel is None:
+                        continue
+                    u, v = int(pixel[0]), int(pixel[1])
+                    bw, bh = int(bbox_px[0] // 2), int(bbox_px[1] // 2)
+                    # 새 seed: 초록 박스
+                    cv2.rectangle(img, (u - bw, v - bh), (u + bw, v + bh), (0, 255, 0), 2)
+                    cv2.putText(img, name, (u - bw, v - bh - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+                # 과거 시드: 회색 박스
+                for prev in self._all_previous_seed_positions:
+                    prev_arm = prev.get(arm_key, prev) if isinstance(prev, dict) and "left_arm" in prev else prev
+                    if isinstance(prev_arm, dict):
+                        for name, info in prev_arm.items():
+                            pixel = info.get("pixel") if isinstance(info, dict) else None
+                            if pixel is None:
+                                continue
+                            u, v = int(pixel[0]), int(pixel[1])
+                            cv2.circle(img, (u, v), 4, (128, 128, 128), -1)
+
+                out_path = str(Path(save_dir) / f"seed_{seed_index+1:02d}_{arm_key}.jpg")
+                cv2.imwrite(out_path, img)
+
+            print(f"  [SeedGen] Visualization saved: {save_dir}/seed_{seed_index+1:02d}_*.jpg")
+        except Exception as e:
+            print(f"  [SeedGen] Visualization warning: {e}")
+
+        # ── 포인트 시각화 추가 ──
+        self._visualize_seed_points_multi_arm(save_dir, positions, seed_index, pix2robot_map)
+
+    def _visualize_seed_points_multi_arm(
+        self,
+        save_dir: str,
+        positions: Dict,
+        seed_index: int,
+        pix2robot_map: Dict,
+    ):
+        """
+        객체 종류별 색상으로 per-arm 시드 위치를 점으로 시각화.
+
+        싱글암 _visualize_seed_points()와 동일한 방식:
+        - 각 객체에 고유 색상 할당
+        - 과거 시드: 작은 점 + 시드 번호
+        - 현재 시드: 큰 점 + 시드 번호
+        """
+        try:
+            import cv2
+            from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image
+
+            # forward 초기 이미지 로드
+            base_image = None
+            for ep_idx in range(self.current_episode, 0, -1):
+                img_path = Path(save_dir).parent / f"episode_{ep_idx:02d}" / "forward" / "initial_state.jpg"
+                if img_path.exists():
+                    base_image = cv2.imread(str(img_path))
+                    break
+            if base_image is None:
+                return
+
+            arm_to_rid = {"left_arm": self.left_id, "right_arm": self.right_id}
+
+            # 객체별 고유 색상 (BGR)
+            OBJ_COLORS = [
+                (0, 0, 255),    # 빨강
+                (255, 0, 0),    # 파랑
+                (0, 200, 0),    # 초록
+                (0, 200, 255),  # 노랑
+                (255, 0, 255),  # 마젠타
+                (255, 200, 0),  # 시안
+                (0, 128, 255),  # 주황
+                (200, 0, 128),  # 보라
+            ]
+
+            for arm_key in ["left_arm", "right_arm"]:
+                rid = arm_to_rid[arm_key]
+                rs = self.resetspace_per_robot.get(rid, "all")
+                img = draw_workspace_on_image(base_image.copy(), robot_id=rid, resetspace=rs)
+
+                # 이 팔의 모든 객체 이름 수집
+                all_obj_names = set()
+                arm_positions = positions.get(arm_key, {})
+                for name, info in arm_positions.items():
+                    if isinstance(info, dict):
+                        all_obj_names.add(name)
+                for prev in self._all_previous_seed_positions:
+                    prev_arm = prev.get(arm_key, prev) if isinstance(prev, dict) and "left_arm" in prev else prev
+                    if isinstance(prev_arm, dict):
+                        for name, info in prev_arm.items():
+                            if isinstance(info, dict):
+                                all_obj_names.add(name)
+                all_obj_names = sorted(all_obj_names)
+
+                obj_color_map = {name: OBJ_COLORS[i % len(OBJ_COLORS)] for i, name in enumerate(all_obj_names)}
+
+                # 과거 시드 (작은 점 + 시드 번호)
+                for seed_i, prev in enumerate(self._all_previous_seed_positions):
+                    prev_arm = prev.get(arm_key, prev) if isinstance(prev, dict) and "left_arm" in prev else prev
+                    if not isinstance(prev_arm, dict):
+                        continue
+                    for name, info in prev_arm.items():
+                        if name not in obj_color_map or not isinstance(info, dict):
+                            continue
+                        pixel = info.get("pixel")
+                        if pixel is None:
+                            continue
+                        u, v = int(pixel[0]), int(pixel[1])
+                        color = obj_color_map[name]
+                        cv2.circle(img, (u, v), 5, color, -1, cv2.LINE_AA)
+                        cv2.circle(img, (u, v), 5, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.putText(img, f"s{seed_i+1}", (u + 7, v + 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.28, color, 1, cv2.LINE_AA)
+
+                # 현재 시드 (큰 점 + 시드 번호)
+                for name, info in arm_positions.items():
+                    if name not in obj_color_map or not isinstance(info, dict):
+                        continue
+                    pixel = info.get("pixel")
+                    if pixel is None:
+                        continue
+                    u, v = int(pixel[0]), int(pixel[1])
+                    color = obj_color_map[name]
+                    cv2.circle(img, (u, v), 9, color, -1, cv2.LINE_AA)
+                    cv2.circle(img, (u, v), 9, (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.putText(img, f"s{seed_index+1}", (u + 11, v + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+
+                # 범례: 객체별 색상
+                img_h = img.shape[0]
+                y_offset = img_h - 15 * len(all_obj_names) - 20
+                for i, name in enumerate(all_obj_names):
+                    color = obj_color_map[name]
+                    y = y_offset + i * 15
+                    cv2.circle(img, (15, y), 5, color, -1, cv2.LINE_AA)
+                    cv2.putText(img, name, (25, y + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+
+                cv2.putText(img, f"Seed {seed_index+1} | {len(self._all_previous_seed_positions)} past seeds",
+                            (10, img_h - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+
+                out_path = str(Path(save_dir) / f"seed_{seed_index+1:02d}_{arm_key}_point.jpg")
+                cv2.imwrite(out_path, img)
+
+            print(f"  [SeedGen] Point visualization saved: {save_dir}/seed_{seed_index+1:02d}_*_point.jpg")
+        except Exception as e:
+            print(f"  [SeedGen] Point visualization warning: {e}")
+
+    # ─────────────────────────────────────────────
     # Code Execution
     # ─────────────────────────────────────────────
 
@@ -561,7 +1037,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
             print(f"{GREEN}{'-'*70}{RESET_COLOR}")
 
             # Step 1: Capture initial image
-            print(f"\n{YELLOW}" + self._log("Capturing initial image...", step="Step 1/4") + f"{RESET_COLOR}")
+            print(f"\n{YELLOW}" + self._log("Capturing initial image...", step="Step 1/5") + f"{RESET_COLOR}")
             initial_image = self._capture_frame()
             if initial_image is not None:
                 cv2.imwrite(str(Path(forward_dir) / "initial_state.jpg"), initial_image)
@@ -572,7 +1048,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
 
             if self.cached_forward_code is not None:
                 # Reuse: T0~T2 only (detection), skip T3 (codegen)
-                print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code)...", step="Step 2/4") + f"{RESET_COLOR}")
+                print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code)...", step="Step 2/5") + f"{RESET_COLOR}")
                 self._generate_forward_code(
                     instruction, image_path,
                     skip_codegen=True,
@@ -594,15 +1070,28 @@ class UnifiedMultiArmPipeline(BasePipeline):
                     self.cached_forward_keys = []
                     code = self._generate_forward_code(instruction, image_path)
             else:
-                print(f"\n{YELLOW}" + self._log(f"Generating forward code via multi-turn VLM...", step="Step 2/4") + f"{RESET_COLOR}")
+                print(f"\n{YELLOW}" + self._log(f"Generating forward code via multi-turn VLM...", step="Step 2/5") + f"{RESET_COLOR}")
                 code = self._generate_forward_code(instruction, image_path)
 
             result['forward']['code'] = code
             result['forward']['positions'] = self.detected_positions
 
-            # Store first episode positions
+            # Store first episode positions + seed_01 즉시 저장
             if self.first_episode_positions is None and self.detected_positions:
                 self.first_episode_positions = copy.deepcopy(self.detected_positions)
+                # seed_01_setup 즉시 생성 (세션 디렉토리에)
+                try:
+                    _session_dir = str(Path(forward_dir).parent.parent)
+                    _seed01_dir = Path(_session_dir) / "seed_01_setup"
+                    _seed01_dir.mkdir(parents=True, exist_ok=True)
+                    with open(_seed01_dir / "seed_positions.json", 'w') as f:
+                        json.dump({
+                            "seed_index": 0,
+                            "positions": self._make_serializable(self.first_episode_positions),
+                        }, f, indent=2, default=str)
+                    print(f"  [Seed] seed_01_setup saved: {_seed01_dir}/seed_positions.json")
+                except Exception as e:
+                    print(f"  [Seed] Warning: Failed to save seed_01: {e}")
 
             # Save generated code
             with open(Path(forward_dir) / "generated_code.py", 'w') as f:
@@ -613,8 +1102,44 @@ class UnifiedMultiArmPipeline(BasePipeline):
             save_multi_turn_info(forward_dir, self.multi_turn_info, phase="forward")
             save_turn_visualizations(forward_dir, self.multi_turn_info, initial_image, phase="forward")
 
-            # Step 3: Execute code
-            print(f"\n{YELLOW}" + self._log("Executing forward code...", step="Step 3/4") + f"{RESET_COLOR}")
+            # Step 3: Code Verification (LLM 기반 코드 검증)
+            code_was_cached = (self.cached_forward_code is not None
+                               and code == self.cached_forward_code)
+            if code_was_cached:
+                print(f"\n{YELLOW}" + self._log("Skipping verification (cached code, already verified)...", step="Step 3/5", tag="Verify") + f"{RESET_COLOR}")
+            else:
+                print(f"\n{YELLOW}" + self._log(f"Verifying generated code via LLM ({self.llm_model})...", step="Step 3/5", tag="Verify") + f"{RESET_COLOR}")
+                from verification import verify_generated_code
+
+                max_verification_retries = 2
+                for verify_attempt in range(1, max_verification_retries + 1):
+                    passed, reason = verify_generated_code(
+                        instruction=instruction,
+                        generated_code=code,
+                        object_positions=self.detected_positions,
+                        llm_model=self.llm_model,
+                    )
+
+                    if passed:
+                        print(f"  {GREEN}[Verify] PASS{RESET_COLOR}")
+                        break
+                    else:
+                        print(f"  {RED}[Verify] FAIL (attempt {verify_attempt}/{max_verification_retries}): {reason}{RESET_COLOR}")
+
+                        if verify_attempt < max_verification_retries:
+                            print(f"  {YELLOW}[Verify] Regenerating code...{RESET_COLOR}")
+                            code = self._generate_forward_code(instruction, image_path)
+                            result['forward']['code'] = code
+
+                            # 재생성된 코드 저장
+                            with open(Path(forward_dir) / "generated_code.py", 'w') as f:
+                                f.write(code)
+                            print(f"  {YELLOW}[Verify] Regenerated code saved{RESET_COLOR}")
+                        else:
+                            print(f"  {YELLOW}[Verify] Max retries reached, proceeding with current code{RESET_COLOR}")
+
+            # Step 4: Execute code
+            print(f"\n{YELLOW}" + self._log("Executing forward code...", step="Step 4/5") + f"{RESET_COLOR}")
 
             # Set execution dir for skill_detect_results logging
             import builtins as _builtins
@@ -684,7 +1209,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
                      getattr(self, '_current_slot', 0), "PENDING")
 
             # Step 4: Judge evaluation
-            print(f"\n{YELLOW}" + self._log("Running judge evaluation...", step="Step 4/4") + f"{RESET_COLOR}")
+            print(f"\n{YELLOW}" + self._log("Running judge evaluation...", step="Step 5/5") + f"{RESET_COLOR}")
             if initial_image is not None and final_image is not None:
                 judge_result = self._run_forward_judge(
                     instruction, initial_image, final_image,
@@ -769,7 +1294,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
 
                 # Pre-reset callback (seed transition)
                 if pre_reset_callback:
-                    reset_target = pre_reset_callback(current_positions=positions)
+                    reset_target = pre_reset_callback(current_positions=self.detected_positions)
                     if reset_target:
                         reset_target_positions = reset_target
 
@@ -942,6 +1467,8 @@ class UnifiedMultiArmPipeline(BasePipeline):
             episode_num = episode_idx + 1
             batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
             slot = episode_idx % episodes_per_seed
+            is_batch_last = (slot == episodes_per_seed - 1)
+            next_batch_index = batch_index + 1
             self.current_episode = episode_num
             self._current_batch_index = batch_index
             self._current_slot = slot
@@ -953,7 +1480,21 @@ class UnifiedMultiArmPipeline(BasePipeline):
             episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
             reset_target = seed_positions[batch_index]
 
-            slot = episode_idx % episodes_per_seed
+            # 배치 마지막이면: Forward 후 다음 seed 생성 → Reset target 갱신 콜백
+            pre_reset_cb = None
+            if is_batch_last and next_batch_index < self.num_random_seeds:
+                _next_idx = next_batch_index
+                _sp = seed_positions
+                _sd = session_dir
+                def _make_next_seed(next_idx=_next_idx, sp=_sp, sd=_sd, current_positions=None):
+                    if sp[0] is None and self.first_episode_positions is not None:
+                        sp[0] = copy.deepcopy(self.first_episode_positions)
+                        self._all_previous_seed_positions.append(sp[0])
+                    if sp[next_idx] is None:
+                        print(f"\n{MAGENTA}  [Seed Transition] Generating seed_{next_idx+1}...{RESET_COLOR}")
+                        sp[next_idx] = self._generate_seed_positions(sd, next_idx, current_positions=current_positions)
+                    return sp[next_idx]
+                pre_reset_cb = _make_next_seed
 
             try:
                 result = self.run(
@@ -965,6 +1506,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
                     use_timestamp_subdir=False,
                     skip_reset=skip_reset,
                     reset_target_positions=reset_target,
+                    pre_reset_callback=pre_reset_cb,
                 )
 
                 # Save batch_info.json
@@ -975,6 +1517,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 # Store first episode positions for seed[0]
                 if seed_positions[0] is None and self.first_episode_positions is not None:
                     seed_positions[0] = copy.deepcopy(self.first_episode_positions)
+                    self._all_previous_seed_positions.append(seed_positions[0])
 
                 # Update summary
                 s = all_results['summary']

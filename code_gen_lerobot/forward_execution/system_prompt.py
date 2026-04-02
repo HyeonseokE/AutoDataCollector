@@ -99,9 +99,11 @@ Workspace Constraints:
   - IMPORTANT: The green rectangle is only the table edge, NOT the reachable area.
     You can ONLY place objects inside the cyan arc. Positions outside the cyan arc
     are physically unreachable by the robot, even if they are on the table.
+  - The BRIGHT area (inside the cyan arc) = physically reachable by the robot.
+    The DARK area (outside the cyan arc) = physically unreachable (will cause IK failure).
   - When specifying pixel coordinates with `move_to_pixel` or `execute_place_at_pixel`,
-    verify that your chosen [y, x] position falls inside the cyan arc in the image.
-    If it does not, adjust the coordinates inward until the position is within the arc.
+    the [y, x] position MUST fall inside the BRIGHT area (cyan arc). If it does not,
+    adjust the coordinates inward to the nearest point within the bright region.
 
 Grasp Guidelines:                           
   - Always open the gripper before approaching the grasp pose.      

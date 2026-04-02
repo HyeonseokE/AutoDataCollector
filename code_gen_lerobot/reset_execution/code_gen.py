@@ -680,7 +680,9 @@ def lerobot_reset_code_gen_multi_turn(
     annotated_image_path = None
     current_img = cv2.imread(current_state_image_path)
     if current_img is not None:
-        annotated = draw_workspace_on_image(current_img, robot_id=robot_id, resetspace=resetspace)
+        # resetspace가 dict이면 (multi-arm) 해당 robot_id의 값 추출
+        _rs = resetspace.get(robot_id, "all") if isinstance(resetspace, dict) else resetspace
+        annotated = draw_workspace_on_image(current_img, robot_id=robot_id, resetspace=_rs)
         annotated_image_path = str(reset_dir / "workspace_annotated.jpg")
         cv2.imwrite(annotated_image_path, annotated)
         print(f"  Workspace annotated image: {annotated_image_path}")
@@ -960,7 +962,7 @@ def lerobot_reset_code_gen_multi_turn(
             from ..multi_arm.reset_execution.turn3_prompt import multi_arm_turn3_reset_codegen_prompt
             from ..code_gen_with_skill import _points_to_positions
 
-            codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=MULTI_ARM_CODEGEN_RESET_SYSTEM_PROMPT, thinking_budget=10000)
+            codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=MULTI_ARM_CODEGEN_RESET_SYSTEM_PROMPT, thinking_budget=5000)
 
             # Build dual-arm current positions (pixel → per-arm robot frame)
             # Only include grippable objects (exclude obstacles like large containers)
@@ -1025,7 +1027,7 @@ def lerobot_reset_code_gen_multi_turn(
             target_positions = target_dual
         else:
             from ..forward_execution.system_prompt import CODEGEN_SYSTEM_PROMPT
-            codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT, thinking_budget=10000)
+            codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=CODEGEN_SYSTEM_PROMPT, thinking_budget=5000)
             codegen_resp = gemini_chat_send(codegen_chat, codegen_config,
                 {"text": codegen_reset_with_context_prompt(
                     context_summary=summary_resp,

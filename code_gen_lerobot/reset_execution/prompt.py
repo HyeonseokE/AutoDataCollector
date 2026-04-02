@@ -298,7 +298,8 @@ if __name__ == "__main__":
 ### **Guidelines**
 
 1. Generate code that moves each object from current to target position
-2. **MUST call `skills.set_subtask("move object_name to target")` before each object's pick-place sequence** — this labels the recording
+2. **MUST call `skills.set_subtask("move object_name to target")` before each logical unit of work** — this labels the recording.
+   - CRITICAL: At both `set_subtask()` and `clear_subtask()`, the gripper must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. Do NOT call `clear_subtask()` until the gripper has released.
 3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
    - **CRITICAL**: After re-detection, you MUST **re-assign ALL local variables** (e.g., `cur`, `tgt`) from the updated dict. Previously extracted variables still reference OLD values.
 4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
@@ -552,7 +553,8 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 ### **Guidelines**
 
 1. Generate code that moves each object from current to target position
-2. **MUST call `skills.set_subtask("move object_name to target")` before each object's pick-place sequence** — this labels the recording
+2. **MUST call `skills.set_subtask("move object_name to target")` before each logical unit of work** — this labels the recording.
+   - CRITICAL: At both `set_subtask()` and `clear_subtask()`, the gripper must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. Do NOT call `clear_subtask()` until the gripper has released.
 3. **For the 2nd object onward, MUST call `skills.detect_objects([...all object names...])` right after `set_subtask()`** to get updated positions (especially z height after stacking/unstacking). Update local variables with the returned values before pick/place. The 1st object does NOT need re-detection (scene is unchanged from the initial detection).
    - **CRITICAL**: After re-detection, you MUST **re-assign ALL local variables** (e.g., `cur`, `tgt`) from the updated dict. Previously extracted variables still reference OLD values.
 4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach

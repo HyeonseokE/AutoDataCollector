@@ -432,7 +432,8 @@ if __name__ == "__main__":
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
 4. `is_table=True` on table, `is_table=False` on another object.
-5. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
+5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
+   - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
 6. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arm from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection (scene is unchanged).
    - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
@@ -451,13 +452,16 @@ def context_summary_prompt() -> str:
     """Session 1 마지막에 컨텍스트 요약을 요청하는 프롬프트"""
     return """### Context Handoff Summary
 
-Before we move to code generation, summarize your understanding concisely (under 300 words):
+Before we move to code generation, summarize ONLY the factual observations concisely (under 300 words).
+Do NOT plan any strategy, sequence, or approach — just describe what you see.
 
-1. **Scene Layout**: Table setup, object positions relative to each other, workspace boundaries
+1. **Scene Layout**: Table setup, object positions, workspace boundaries
 2. **Object Properties**: Each object's size, shape, color, graspability, fragility
 3. **Spatial Relationships**: Which objects are near/far, above/below, stacking order if any
-4. **Task Strategy**: Step-by-step plan — which object to pick first, where to place, approach directions
-5. **Potential Risks**: Collision risks, workspace limits, objects that might tip over
+4. **Arm Reachability**: For each object, state which arm(s) can reach it based on the workspace image (bright area = reachable). Example: "yellow block is in the left arm's bright area only" or "red cup is in the overlap zone, reachable by both arms"
+5. **Physical Constraints**: Observable risks such as tight clearance between objects, objects near edges, unstable stacking — factual observations only, no action recommendations
+
+IMPORTANT: Do NOT include any task strategy, action sequence, or movement plan. The code generation session will decide the approach based on the API and workspace constraints.
 
 Output as a structured summary. This will be passed to a fresh code generation session."""
 
@@ -568,7 +572,9 @@ skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_na
 
 # PLACE AT PIXEL (is_table=True) — target is NOT in positions dict (e.g., empty spot on table)
 # Specify [y, x] in normalized 0–1000 coordinates from the top-view image.
-# Example: place at the left side of the table → [500, 200]
+# ⚠ REACHABILITY CHECK: Before using any pixel coordinate, verify on the workspace image
+#   that [y, x] falls inside the BRIGHT area (cyan arc). If not, shift inward.
+# Example: place at the left side of table → [500, 200] (verified: inside bright area)
 skills.move_to_pixel([500, 200], target_name="left side", skill_description="Move object_name above left side of table", verification_question="Is object_name above the left side?")
 skills.execute_place_at_pixel([500, 200], is_table=True, gripper_open_ratio=0.7, target_name="left side", skill_description="Place object_name at left side of table", verification_question="Is object_name placed at the left side?")
 skills.move_to_pixel([500, 200], target_name="left side", skill_description="Retract from left side", verification_question="Is the gripper clear of the left side?")
@@ -637,7 +643,8 @@ if __name__ == "__main__":
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
 4. `is_table=True` on table, `is_table=False` on another object.
-5. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
+5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
+   - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
 6. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arm from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection (scene is unchanged).
    - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
@@ -647,7 +654,15 @@ if __name__ == "__main__":
    - `skill_description`: concise sentence describing the action (e.g., "Move gripper above chocolate_pie_1")
    - `verification_question`: Yes/No question to verify the outcome (e.g., "Is the gripper above chocolate_pie_1?")
 10. **NEVER hardcode coordinate values** (e.g., `[0.15, -0.25, 0.0]`). Use `positions` dict for detected objects, and `move_to_pixel([y, x])` / `execute_place_at_pixel([y, x])` with normalized 0–1000 coordinates for any location not in the dict.
-11. Before finalizing pixel coordinates, visually confirm each target position is inside the cyan arc (reachable area) in the provided image. If a position is outside the arc, move it inward.
+11. **MANDATORY — Pixel Coordinate Reachability Check**:
+    Whenever you write a hardcoded pixel coordinate (e.g., `[500, 200]`), you MUST follow this checklist BEFORE using it in code:
+      (a) **Locate on image**: Find the [y, x] point on the workspace image.
+      (b) **Check brightness**: Is the point inside the **BRIGHT area** (within the cyan arc)? The bright area is the robot's reachable donut-shaped zone.
+      (c) **If YES** → use the coordinate as-is.
+      (d) **If NO** (point is in the darkened/unreachable area) → shift the coordinate inward to the nearest point that IS inside the bright area. Typical adjustments: move away from image edges, move toward the center of the cyan arc.
+      (e) **Document in a code comment**: Write a comment on the same line explaining WHY you chose that coordinate.
+          Example: `target_pixel = [450, 300]  # left-center of bright area, task says "left side of table"`
+    NEVER guess extreme values like [900, 900] or [100, 100] — these are almost always in the dark (unreachable) area.
 
 **Output**: Complete executable Python code (no code blocks, plain text).
 

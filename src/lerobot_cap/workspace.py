@@ -36,7 +36,7 @@ class BaseWorkspace:
     def __init__(
         self,
         kinematics_engine: Optional["KinematicsEngine"] = None,
-        min_reach: float = 0.20,
+        min_reach: float = 0.22,
         max_reach: float = 0.407,
         z_floor: float = -0.02,  # 캘리브레이션 오차 허용 (-2cm)
         **kwargs,

@@ -147,10 +147,20 @@ Move each object from its current position to its target position so the next ta
 - Call `skills.connect()` at the start and `skills.disconnect()` in a finally block.
 
 **Workspace Images** (provided as attached images):
-- **Image 1**: left_arm (robot{robot_ids[0]}) workspace. The bright area inside the cyan arc is the reachable zone for left_arm.
-- **Image 2**: right_arm (robot{robot_ids[1]}) workspace. The bright area inside the cyan arc is the reachable zone for right_arm.
-- Assign each object to the arm whose workspace covers that object (bright area).
-- If an object is reachable by both arms, prefer the arm closer to it.
+- **Image 1**: left_arm (robot{robot_ids[0]}) workspace. **Image 2**: right_arm (robot{robot_ids[1]}) workspace.
+- Each image shows a **green rectangle** (table boundary) and a **cyan arc** (that arm's reachable range).
+- **BRIGHT area** (inside the cyan arc) = reachable zone. **DARK area** (outside the cyan arc) = physically unreachable.
+- CRITICAL: The robot CANNOT move to, pick from, or place at ANY position in the darkened area.
+  Positions outside the cyan arc are physically unreachable by that arm, even if they appear in the positions dict.
+
+**Arm Selection Rule for Reset** (CRITICAL):
+- For each object, check which arm can reach BOTH the current position AND the target position.
+- If the current and target are in different arms' workspaces, you MUST use a handover:
+  1. Arm A picks from current → places at a handover point in the center (reachable by both arms).
+  2. Arm B picks from the handover point → places at the target.
+  Use `move_to_pixel` / `place_at_pixel` with a center pixel (e.g., [500, 500]) for the handover point.
+- If one arm can reach both current and target, use that single arm (no handover needed).
+- NEVER attempt to place at a position outside the executing arm's cyan arc — it will fail with IK error.
 
 {points_section}
 ### Environment States
@@ -288,6 +298,68 @@ skills.pick_object(left_arm="wait", right_arm=cur,
 skills.clear_subtask()
 
 # === STEP 3+: repeat set_subtask → move_to_initial → detect → update → pick → place → clear_subtask ===
+
+# === HANDOVER PATTERN (when current and target are in different arms' workspaces) ===
+# Example: object is currently in right arm's area, target is in left arm's area.
+#
+# ⚠ MANDATORY — Pixel Coordinate Reachability Check (for handover_pixel and any other hardcoded pixel):
+#   (a) Identify which arm will execute the move_to_pixel / place_at_pixel.
+#   (b) Look at THAT arm's workspace image (Image 1 = left arm, Image 2 = right arm).
+#   (c) Verify [y, x] is inside the BRIGHT area (cyan arc) of THAT arm.
+#       For handover points, the coordinate must be in the bright area of BOTH arms.
+#   (d) If the point is in the dark area → shift to the nearest bright region.
+#   (e) Add a comment explaining why this coordinate was chosen.
+#   NEVER guess extreme values like [900, 900].
+handover_pixel = [500, 500]  # center of table — verified: inside bright area of BOTH arms
+
+# Phase 1: Right arm picks from current → places at center handover point
+skills.set_subtask("right arm picks object and places at center for handover")
+cur = cur_right["object_name"]["points"]["grasp center"]
+
+skills.gripper_control(left_arm="wait", right_arm="open",
+    right_skill_description="Open right gripper", right_verification_question="Is right open?")
+skills.move_to_position(left_arm="wait", right_arm=[cur[0], cur[1], approach_height],
+    right_skill_description="Approach object", right_verification_question="Is right above object?")
+skills.pick_object(left_arm="wait", right_arm=cur, right_object_name="object_name",
+    right_skill_description="Pick object", right_verification_question="Is object grasped?")
+skills.move_to_position(left_arm="wait", right_arm=[cur[0], cur[1], approach_height],
+    right_skill_description="Retract after pick", right_verification_question="Is right lifted?")
+skills.move_to_pixel(left_arm="wait", right_arm=handover_pixel,
+    right_skill_description="Move to handover point", right_verification_question="Is right above center?")
+skills.place_at_pixel(left_arm="wait", right_arm=handover_pixel, right_is_table=True,
+    right_skill_description="Place at handover", right_verification_question="Is object at center?")
+skills.move_to_pixel(left_arm="wait", right_arm=handover_pixel,
+    right_skill_description="Retract after place", right_verification_question="Is right clear?")
+skills.clear_subtask()
+
+# Re-detect after handover
+skills.move_to_initial_state()
+updated = skills.detect_objects(["object_name"])
+if "left_arm" in updated:
+    cur_left.update(updated["left_arm"])
+if "right_arm" in updated:
+    cur_right.update(updated["right_arm"])
+
+# Phase 2: Left arm picks from center → places at target
+skills.set_subtask("left arm picks object from center and places at target")
+cur_updated = cur_left["object_name"]["points"]["grasp center"]
+tgt = tgt_left["object_name"]["points"]["grasp center"]
+
+skills.gripper_control(left_arm="open", right_arm="wait",
+    left_skill_description="Open left gripper", left_verification_question="Is left open?")
+skills.move_to_position(left_arm=[cur_updated[0], cur_updated[1], approach_height], right_arm="wait",
+    left_skill_description="Approach object at center", left_verification_question="Is left above object?")
+skills.pick_object(left_arm=cur_updated, right_arm="wait", left_object_name="object_name",
+    left_skill_description="Pick object from center", left_verification_question="Is object grasped?")
+skills.move_to_position(left_arm=[cur_updated[0], cur_updated[1], approach_height], right_arm="wait",
+    left_skill_description="Retract after pick", left_verification_question="Is left lifted?")
+skills.move_to_position(left_arm=[tgt[0], tgt[1], approach_height], right_arm="wait",
+    left_skill_description="Move to target", left_verification_question="Is left above target?")
+skills.place_object(left_arm=tgt, right_arm="wait", left_is_table=True,
+    left_skill_description="Place at target", left_verification_question="Is object at target?")
+skills.move_to_position(left_arm=[tgt[0], tgt[1], approach_height], right_arm="wait",
+    left_skill_description="Retract after place", left_verification_question="Is left clear?")
+skills.clear_subtask()
 ```
 
 ### Unstacking (Disassembling a Stack)
@@ -378,11 +450,23 @@ if __name__ == "__main__":
 ```
 
 ### Task Requirements
-1. Assign objects to the appropriate arm based on workspace images (bright area = reachable).
+1. **Arm selection by reachability** (CRITICAL): For each object, check which arm can reach BOTH the current AND target positions (bright area in workspace images).
+   - If one arm reaches both → use that arm directly.
+   - If current and target are in different arms' workspaces → use the HANDOVER pattern (Arm A picks → places at center → Arm B picks from center → places at target).
+   - NEVER attempt to move/place at a position outside the executing arm's cyan arc.
+   - **MANDATORY (pixel reachability check)**: Before writing ANY hardcoded pixel coordinate:
+     (a) Identify the executing arm. (b) Check THAT arm's workspace image (Image 1 = left, Image 2 = right).
+     (c) Verify [y, x] is inside the BRIGHT area (cyan arc). For handover points, verify BOTH arms' images.
+     (d) If in dark area → shift inward to nearest bright point. (e) Add a code comment with reasoning.
+     NEVER use extreme values like [900, 900].
 2. Use `skills.move_to_position()` / `skills.pick_object()` / `skills.place_object()` / `skills.gripper_control()` for ALL operations. Pass `left_arm="wait"` or `right_arm="wait"` for the arm that should hold position.
-3. **Subtask pattern**: Each pick-place of one object = one subtask. Wrap with `set_subtask()` before and `clear_subtask()` after.
+   - **Pick pattern**: open → approach (move to approach_height above object) → pick_object (descend + grip) → **retract (move back to approach_height — MANDATORY)** → move to next target.
+   - **Place pattern**: move_to_position (approach above target) → place_object (descend + release) → retract (move back to approach_height).
+   - NEVER skip the retract step after pick or place.
+3. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
+   - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
 4. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arms from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection.
-   - **CRITICAL**: After `pos_left.update()` / `pos_right.update()`, you MUST **re-assign ALL local variables** extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
+   - **CRITICAL**: After `cur_left.update()` / `cur_right.update()`, you MUST **re-assign ALL local variables** extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 5. Always start with `skills.move_to_initial_state()`, end with `skills.move_to_initial_state()` then `skills.move_to_free_state()`.
 6. Use `approach_height = 0.20` for approach/retreat movements.
 7. ALWAYS pass `left_skill_description`/`right_skill_description` and `left_verification_question`/`right_verification_question` for every arm that is NOT `"wait"`.

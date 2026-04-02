@@ -17,10 +17,10 @@ cd "$SCRIPT_DIR"
 # # Grasping:                                                                  
 # (1, 완료) pick up the red block and place it on the blue plate
 # (2, 완료) distribute chocolate pies to each plate                           
-# (3) clear the table after a meal
+# (3) -
 
 # # Arrangement:                                                               
-# (1, 완료) place the red block between chocolate pies             
+# (1, 완료) place the yellow block between chocolate pies             
 # (2, 완료) arrange yellow, red, and purple blocks in a line from left to right
 # (3, 완료) stack the blocks in the order of red and yellow
 # (3, 완료) stack the blocks in the order of red and yellow, purple
@@ -31,9 +31,9 @@ cd "$SCRIPT_DIR"
 # (3, 성공) Open the trash can lid
 
 # # Deformable:
-# (1) fold the towel
+# (1, 완료) fold the towel
 # (2) sweep the floor with a towel
-# (3, 성공) bend the microphone gooseneck leftward
+# (3) bend the microphone gooseneck leftward
 
 # # Articulated:
 # (1) open the drawers
@@ -78,15 +78,15 @@ cd "$SCRIPT_DIR"
 # 예: (0)       → shared + left_arm
 #     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
-ROBOT_IDS=(0)
+ROBOT_IDS=(2 3)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
 
 ### [single arm task]
 ## pick and place
-INSTRUCTION="pick up the red block and place it on the blue dish"
-RESET_INSTRUCTION=""
+# INSTRUCTION="pick up the red block and place it on the blue dish"
+# RESET_INSTRUCTION=""
 
 ## stack red and yellow
 # INSTRUCTION="stack the blocks in the order of red and yellow"
@@ -105,6 +105,14 @@ RESET_INSTRUCTION=""
 # INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
 # RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
 
+## move
+INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
+RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left area"
+
+## hand over the sponge
+# INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
+# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
+
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
@@ -114,7 +122,7 @@ NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
 # all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(top-left)
+RESETSPACE_PER_ROBOT=(top-left bottom-right) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"

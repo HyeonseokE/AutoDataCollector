@@ -1105,7 +1105,7 @@ class ForwardAndResetPipeline(BasePipeline):
                 # ============================================================
 
                 # Step 1: 이미지 캡처 (Detection 없이)
-                print(f"\n{YELLOW}" + self._log("Capturing image for VLM (no detection)...", step="Step 1/5") + f"{RESET}")
+                print(f"\n{YELLOW}" + self._log("Capturing image for VLM (no detection)...", step="Step 1/6") + f"{RESET}")
 
                 # 카메라 초기화
                 if not self.camera and not (self.camera_manager and self.camera_manager.is_connected):
@@ -1149,7 +1149,7 @@ class ForwardAndResetPipeline(BasePipeline):
                 # 코드 재사용: 캐싱된 코드가 있으면 T0~T2(검출)만 수행, T3(코드생성) 스킵
                 use_cached = self.cached_forward_code is not None
                 if use_cached:
-                    print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code, T3 skipped)...", step="Step 3/5") + f"{RESET}")
+                    print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code, T3 skipped)...", step="Step 3/6") + f"{RESET}")
                     # T0~T2만 수행 (positions 갱신) — point 라벨도 강제
                     self.generate_forward_code(
                         instruction, self.detected_positions,
@@ -1172,7 +1172,7 @@ class ForwardAndResetPipeline(BasePipeline):
                             image_path=str(initial_path),
                         )
                 else:
-                    print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, multi-turn)...", step="Step 3/5") + f"{RESET}")
+                    print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, multi-turn)...", step="Step 3/6") + f"{RESET}")
                     self.generated_code = self.generate_forward_code(
                         instruction, self.detected_positions,
                         image_path=str(initial_path),
@@ -1185,7 +1185,7 @@ class ForwardAndResetPipeline(BasePipeline):
 
                 # Step 1: 객체 검출
                 # Note: Recording 카메라가 있으면 run_detection에서 자동 공유
-                print(f"\n{YELLOW}" + self._log(f"Detecting objects: {objects}", step="Step 1/5") + f"{RESET}")
+                print(f"\n{YELLOW}" + self._log(f"Detecting objects: {objects}", step="Step 1/6") + f"{RESET}")
                 if visualize_detection:
                     print("  (Visualization mode)")
                 else:
@@ -1247,7 +1247,7 @@ class ForwardAndResetPipeline(BasePipeline):
                     return result
 
                 # Step 2: Initial 이미지 캡처
-                print(f"\n{YELLOW}" + self._log("Capturing initial state...", step="Step 2/5") + f"{RESET}")
+                print(f"\n{YELLOW}" + self._log("Capturing initial state...", step="Step 2/6") + f"{RESET}")
                 if self.initial_image is None:
                     self.initial_image = self.capture_frame()
                 if self.initial_image is not None:
@@ -1264,7 +1264,7 @@ class ForwardAndResetPipeline(BasePipeline):
                 # 코드 재사용: 캐싱된 코드가 있고 key 일치하면 스킵
                 if self._can_reuse_code(self.cached_forward_code, self.cached_forward_keys, self.detected_positions):
                     self.generated_code = self.cached_forward_code
-                    print(f"\n{YELLOW}" + self._log(f"Reusing cached code (single-turn, T3 skipped)...", step="Step 3/5") + f"{RESET}")
+                    print(f"\n{YELLOW}" + self._log(f"Reusing cached code (single-turn, T3 skipped)...", step="Step 3/6") + f"{RESET}")
                     print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET}")
                 else:
                     if self.cached_forward_code is not None:
@@ -1272,7 +1272,7 @@ class ForwardAndResetPipeline(BasePipeline):
                         print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET}")
                         self.cached_forward_code = None
                         self.cached_forward_keys = []
-                    print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, single-turn)...", step="Step 3/5") + f"{RESET}")
+                    print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, single-turn)...", step="Step 3/6") + f"{RESET}")
                     self.generated_code = self.generate_forward_code(
                         instruction,
                         self.detected_positions,
@@ -1321,8 +1321,55 @@ class ForwardAndResetPipeline(BasePipeline):
             print(code_preview)
             print("-" * 40)
 
-            # Step 4: Forward 코드 실행
-            print(f"\n{YELLOW}" + self._log(f"Executing forward code on Robot {self.robot_id}...", step="Step 4/5") + f"{RESET}")
+            # Step 4: Code Verification (LLM 기반 코드 검증)
+            # 캐시된 코드를 재사용하는 경우 검증 스킵 (이미 이전에 검증됨)
+            code_was_cached = (self.cached_forward_code is not None
+                               and self.generated_code == self.cached_forward_code)
+            if code_was_cached:
+                print(f"\n{YELLOW}" + self._log("Skipping verification (cached code, already verified)...", step="Step 4/6", tag="Verify") + f"{RESET}")
+            else:
+                print(f"\n{YELLOW}" + self._log(f"Verifying generated code via LLM ({self.llm_model})...", step="Step 4/6", tag="Verify") + f"{RESET}")
+                from verification import verify_generated_code
+
+                max_verification_retries = 2
+                for verify_attempt in range(1, max_verification_retries + 1):
+                    passed, reason = verify_generated_code(
+                        instruction=instruction,
+                        generated_code=self.generated_code,
+                        object_positions=self.detected_positions,
+                        llm_model=self.llm_model,
+                    )
+
+                    if passed:
+                        print(f"  {GREEN}[Verify] PASS{RESET}")
+                        break
+                    else:
+                        print(f"  {RED}[Verify] FAIL (attempt {verify_attempt}/{max_verification_retries}): {reason}{RESET}")
+
+                        if verify_attempt < max_verification_retries:
+                            # 코드 재생성
+                            print(f"  {YELLOW}[Verify] Regenerating code...{RESET}")
+                            if self.multi_turn:
+                                self.generated_code = self.generate_forward_code(
+                                    instruction, self.detected_positions,
+                                    image_path=self.forward_initial_image_path,
+                                )
+                            else:
+                                self.generated_code = self.generate_forward_code(
+                                    instruction, self.detected_positions,
+                                )
+                            result['forward']['code'] = self.generated_code
+
+                            # 재생성된 코드 저장
+                            code_path = Path(forward_dir) / "generated_code.py"
+                            code_path.write_text(self.generated_code)
+                            print(f"  {YELLOW}[Verify] Regenerated code saved: {code_path}{RESET}")
+                        else:
+                            # 최대 재시도 도달 — 현재 코드로 진행
+                            print(f"  {YELLOW}[Verify] Max retries reached, proceeding with current code{RESET}")
+
+            # Step 5: Forward 코드 실행
+            print(f"\n{YELLOW}" + self._log(f"Executing forward code on Robot {self.robot_id}...", step="Step 5/6") + f"{RESET}")
 
             # 레코딩 모드: 에피소드 시작
             if self.record_dataset:
@@ -1365,7 +1412,7 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"  Warning: detect_objects cost merge failed: {e}")
 
             # Step 5: Context 저장
-            print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 5/5") + f"{RESET}")
+            print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 6/6") + f"{RESET}")
             from pipeline.save_logs import save_execution_context as _save_ec
             _save_ec(forward_dir, instruction, self.detected_positions,
                      self.generated_code, forward_success, robot_id=self.robot_id)

@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/move_yellow_block"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
+dataset_repo_id: "local/ttttest"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
 recording_fps: 30
 robot_type: "so101"
 
@@ -22,7 +22,7 @@ cameras:
   shared:
     - name: "top"
       type: "realsense"
-      serial_number: "254622075836"
+      serial_number: "335622072328"
       enabled: true
       enable_depth: true
       width: 640

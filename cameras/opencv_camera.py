@@ -5,6 +5,7 @@ Innomaker U20CAM 등 일반 USB 카메라를 위한 래퍼 클래스
 LeRobot 공식 구현과 동일한 async_read() 지원
 """
 
+import time
 import numpy as np
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -82,7 +83,6 @@ class OpenCVCamera:
 
         # 장치 열기 (V4L2 백엔드 사용 - Qt 스레드 문제 방지)
         # USB 버스 불안정(RealSense reset 등)으로 간헐적 실패 → 재시도
-        import time
         for attempt in range(self.MAX_CONNECT_RETRIES):
             self.cap = cv2.VideoCapture(self.config.index_or_path, cv2.CAP_V4L2)
             if self.cap.isOpened():
@@ -174,6 +174,28 @@ class OpenCVCamera:
     # 비동기 읽기 (LeRobot 공식 구현과 동일)
     # =========================================================================
 
+    _MAX_READ_RETRIES = 3
+    _READ_RETRY_DELAY = 0.5  # seconds
+
+    def _reconnect_cap(self) -> bool:
+        """VideoCapture 재연결 시도. 성공 시 True."""
+        try:
+            if self.cap:
+                self.cap.release()
+            self.cap = cv2.VideoCapture(self.config.index_or_path, cv2.CAP_V4L2)
+            if self.cap.isOpened():
+                self._configure()
+                # warmup: 처음 몇 프레임 버리기
+                for _ in range(min(self.config.warmup_frames, 3)):
+                    self.cap.read()
+                return True
+            else:
+                self.cap.release()
+                self.cap = None
+                return False
+        except Exception:
+            return False
+
     def _read_loop(self) -> None:
         """
         백그라운드 스레드에서 실행되는 연속 캡처 루프
@@ -182,9 +204,14 @@ class OpenCVCamera:
         1. 프레임 캡처
         2. latest_frame에 저장 (thread-safe)
         3. new_frame_event 설정
+
+        cap.read() 실패 시 VideoCapture 재연결을 시도하여
+        일시적 USB 단절로부터 자동 복구합니다.
         """
         if self.stop_event is None:
             raise RuntimeError(f"[OpenCV:{self.name}] stop_event not initialized")
+
+        consecutive_failures = 0
 
         while not self.stop_event.is_set():
             try:
@@ -194,12 +221,25 @@ class OpenCVCamera:
                     self.latest_frame = frame
                 self.new_frame_event.set()
 
+                consecutive_failures = 0
+
             except RuntimeError:
-                # 연결 끊김
+                consecutive_failures += 1
+                if consecutive_failures <= self._MAX_READ_RETRIES:
+                    print(
+                        f"[OpenCV:{self.name}] cap.read() failed, "
+                        f"reconnecting ({consecutive_failures}/{self._MAX_READ_RETRIES})..."
+                    )
+                    time.sleep(self._READ_RETRY_DELAY)
+                    if self._reconnect_cap():
+                        print(f"[OpenCV:{self.name}] Reconnected successfully")
+                        continue
+                # 재연결 실패 or 최대 재시도 초과
+                print(f"[OpenCV:{self.name}] Giving up after {consecutive_failures} retries")
                 break
             except Exception as e:
                 print(f"[OpenCV:{self.name}] Background read error: {e}")
-                _time.sleep(0.05)
+                time.sleep(0.05)
 
     def _start_read_thread(self) -> None:
         """백그라운드 읽기 스레드 시작"""

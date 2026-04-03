@@ -59,6 +59,10 @@ claude_document/branch_guidelines.md
 cloud_inference2/
 lerobot/
 
+# Local documents
+참고자료_Docker_File_제출_가이드라인_및_목록_예시.md
+RAPIDS_결과보고서_v3_3_1_1.md
+
 # Model checkpoints and artifacts
 models/checkpoints/
 models/**/*.pt

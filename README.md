@@ -104,8 +104,7 @@ Each episode produces a complete LeRobot dataset with synchronized multi-camera 
 git clone https://github.com/SKKU-PRISM/AutoDataCollector.git
 cd AutoDataCollector
 
-pip install -e .                        # all dependencies included
-conda install -c conda-forge pinocchio  # IK/FK engine (conda recommended)
+pip install -e .   # all dependencies included (Gemini API, LeRobot, Pinocchio, etc.)
 ```
 
 ### 2. Configure

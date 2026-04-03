@@ -34,8 +34,8 @@ dependencies = [
     "safetensors>=0.4.0",
 
     # VLM/LLM API
-    "google-generativeai>=0.8.0", # Gemini API
-    "lerobot>=0.1.0",             # LeRobot dataset format
+    "google-genai>=1.0.0",        # Gemini API (google.genai)
+    "lerobot>=0.5.0",             # LeRobot dataset format
 
     # Utilities
     "numpy>=1.24.0",

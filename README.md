@@ -104,46 +104,50 @@ Each episode produces a complete LeRobot dataset with synchronized multi-camera 
 git clone https://github.com/SKKU-PRISM/AutoDataCollector.git
 cd AutoDataCollector
 
-pip install -e .
-pip install google-generativeai    # Gemini API
-pip install lerobot                # LeRobot dataset
-conda install -c conda-forge pinocchio  # IK/FK engine
+pip install -e .                        # all dependencies included
+conda install -c conda-forge pinocchio  # IK/FK engine (conda recommended)
 ```
 
 ### 2. Configure
 
-**`pipeline_config/paid_api_config.yaml`** — VLM/LLM model selection:
+**`pipeline_config/paid_api_config.yaml`** — VLM/LLM models for each pipeline stage:
 ```yaml
-codegen_llm_model: "gemini-3.1-flash-lite-preview"      # Perception (Turn 0~2)
-codegen_session2_model: "gemini-3.1-flash-lite-preview"  # Code generation (Turn 3)
-judge_vlm_model: "gemini-2.5-flash"                      # Task success judge
+codegen_llm_model: "gemini-3.1-flash-lite-preview"      # Scene understanding & object detection (Turn 0~2)
+codegen_session2_model: "gemini-3.1-flash-lite-preview"  # Code generation from context summary (Turn 3)
+detect_objects_model: "gemini-3.1-flash-lite-preview"    # Runtime object re-detection during execution
+judge_vlm_model: "gemini-2.5-flash"                      # Before/after image comparison for task success
+judge_timeout: 0.5                                       # Auto-judge delay (seconds), 0 = wait for manual input
 ```
 
-**`pipeline_config/recording_config.yaml`** — Camera devices (adjust to your setup):
+**`pipeline_config/recording_config.yaml`** — Camera devices and dataset settings:
 ```yaml
+dataset_repo_id: "local/my_dataset"    # Output dataset name (HuggingFace format)
+recording_fps: 30                      # Recording frame rate
+
 cameras:
-  shared:
+  shared:                              # Workspace overview camera (shared across all arms)
     - name: "top"
       type: "realsense"
-      serial_number: "YOUR_REALSENSE_SERIAL"
-  left_arm:
+      serial_number: "YOUR_REALSENSE_SERIAL"   # rs-enumerate-devices to find this
+  left_arm:                            # Left arm wrist camera
     - name: "wrist"
       type: "opencv"
-      index_or_path: "/dev/video6"    # adjust to your device
-  right_arm:
+      index_or_path: "/dev/video6"     # ls /dev/video* to find your device
+  right_arm:                           # Right arm wrist camera
     - name: "wrist"
       type: "opencv"
-      index_or_path: "/dev/video8"    # adjust to your device
+      index_or_path: "/dev/video8"
 ```
 
 ### 3. Run
 
-Edit `run_forward_and_reset.sh` to set your task:
+Edit `run_forward_and_reset.sh` to set your task and robot configuration:
 ```bash
-ROBOT_IDS=(2 3)                    # left_arm=robot2, right_arm=robot3
-INSTRUCTION="pick up the red block and place it on the blue plate"
-NUM_EPISODES=10
-NUM_RANDOM_SEEDS=5
+ROBOT_IDS=(2 3)          # Robot IDs — order determines arm mapping: [0]=left, [1]=right
+INSTRUCTION="pick up the red block and place it on the blue plate"  # Natural language task
+NUM_EPISODES=10          # Number of forward-reset cycles to run
+NUM_RANDOM_SEEDS=5       # Number of unique object layouts (episodes divided evenly)
+RECORD_DATASET=true      # Enable LeRobot dataset recording
 ```
 
 Then launch:

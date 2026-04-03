@@ -98,18 +98,56 @@ Each episode produces a complete LeRobot dataset with synchronized multi-camera 
 
 ## Quick Start
 
+### 1. Install
+
 ```bash
-# 1. Clone & install
 git clone https://github.com/SKKU-PRISM/AutoDataCollector.git
 cd AutoDataCollector
-pip install -e ".[all]"
-conda install -c conda-forge pinocchio
 
-# 2. Configure
-cp pipeline_config/paid_api_config.yaml.example pipeline_config/paid_api_config.yaml
-# Edit: set your Gemini API key, robot IDs, camera devices
+pip install -e .
+pip install google-generativeai    # Gemini API
+pip install lerobot                # LeRobot dataset
+conda install -c conda-forge pinocchio  # IK/FK engine
+```
 
-# 3. Run
+### 2. Configure
+
+**`pipeline_config/paid_api_config.yaml`** — VLM/LLM model selection:
+```yaml
+codegen_llm_model: "gemini-3.1-flash-lite-preview"      # Perception (Turn 0~2)
+codegen_session2_model: "gemini-3.1-flash-lite-preview"  # Code generation (Turn 3)
+judge_vlm_model: "gemini-2.5-flash"                      # Task success judge
+```
+
+**`pipeline_config/recording_config.yaml`** — Camera devices (adjust to your setup):
+```yaml
+cameras:
+  shared:
+    - name: "top"
+      type: "realsense"
+      serial_number: "YOUR_REALSENSE_SERIAL"
+  left_arm:
+    - name: "wrist"
+      type: "opencv"
+      index_or_path: "/dev/video6"    # adjust to your device
+  right_arm:
+    - name: "wrist"
+      type: "opencv"
+      index_or_path: "/dev/video8"    # adjust to your device
+```
+
+### 3. Run
+
+Edit `run_forward_and_reset.sh` to set your task:
+```bash
+ROBOT_IDS=(2 3)                    # left_arm=robot2, right_arm=robot3
+INSTRUCTION="pick up the red block and place it on the blue plate"
+NUM_EPISODES=10
+NUM_RANDOM_SEEDS=5
+```
+
+Then launch:
+```bash
 bash run_forward_and_reset.sh
 ```
 

@@ -104,10 +104,34 @@ Each episode produces a complete LeRobot dataset with synchronized multi-camera 
 git clone https://github.com/SKKU-PRISM/AutoDataCollector.git
 cd AutoDataCollector
 
-pip install -e .   # all dependencies included (Gemini API, LeRobot, Pinocchio, etc.)
+# Option A: pip (Pinocchio requires conda-forge for best results)
+pip install -e .
+
+# Option B: conda (recommended)
+conda env create -f environment.yaml
+conda activate lerobot_cap
+pip install -e .
 ```
 
+> LeRobot is bundled in the `lerobot/` directory — no separate clone needed.
+
 ### 2. Configure
+
+**API Keys** — Set via environment variables (recommended) or JSON files:
+```bash
+# Environment variables (Docker / production)
+export GOOGLE_API_KEY="your-google-api-key"
+export OPENAI_API_KEY="your-openai-api-key"       # Optional: for GPT-based judge
+
+# Or create JSON files in project root (local development)
+# google_aistudio_key.json: {"api_key": "your-key"}
+# openai_api_key.json: {"openai_api_key": "your-key"}
+```
+
+**Robot Calibration** — Pre-configured calibration files are included:
+- Motor calibration: `robot_configs/motor_calibration/so101/`
+- Initial/free states: `robot_configs/initial_state/`, `robot_configs/free_state/`
+- Customize these if your robot setup differs.
 
 **`pipeline_config/paid_api_config.yaml`** — VLM/LLM models for each pipeline stage:
 ```yaml

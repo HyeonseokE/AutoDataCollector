@@ -57,7 +57,7 @@ claude_document/branch_guidelines.md
 
 # Cloud inference (local development)
 cloud_inference2/
-lerobot/
+# lerobot/ — 프로젝트에 포함하여 배포
 
 # Local documents
 참고자료_Docker_File_제출_가이드라인_및_목록_예시.md

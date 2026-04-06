@@ -8,7 +8,7 @@ Crops are generated from bboxes detected in Turn 1, and this prompt is called on
 """
 
 
-def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False, canonical_point_labels: dict = None) -> str:
+def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False, canonical_point_labels: dict = None, manipulation_strategy: dict = None) -> str:
     """
     Turn 2: exact location for each critical manipulation point on the cropped image of the target object.
 
@@ -18,6 +18,8 @@ def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False, c
                        and the output includes points for both views.
         canonical_point_labels: {object_label: ["grasp center", "plate center", ...]}
                                이전 에피소드에서 사용된 point 라벨. 제공되면 동일 라벨 강제.
+        manipulation_strategy: Turn 1에서 수립된 조작 전략 dict
+                               {"arm_assignment", "grasp_approach", "expected_points", ...}
 
     Returns:
         prompt string corpus for turn 2
@@ -27,6 +29,7 @@ def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False, c
 Now I am showing you **two cropped close-up images** of the object "{object_label}":
 1. **Crop 1 (Overhead view)** — cropped from the overhead camera image.
 2. **Crop 2 (Side view)** — cropped from the side camera image.
+Based on your analysis and manipulation strategy above, identify the precise points on this object.
 
 Based on your analysis above, identify critical points on this object in **both** views.
 
@@ -64,6 +67,7 @@ Return a JSON block:
     else:
         prompt = f"""
 Now I am showing you a **cropped close-up image** of the object "{object_label}" from the overhead camera.
+Based on your analysis and manipulation strategy above, identify the precise points on this object.
 
 Based on your analysis above, identify critical points on this object.
 
@@ -93,10 +97,28 @@ Return a JSON block:
 - Coordinates are normalized 0–1000 relative to this cropped image.
 - **Grasp stability**: Choose the grasp point that maximizes gripper contact and grip stability. Prefer the geometric center of the widest graspable surface. Avoid edges, corners, or thin protrusions where the gripper may slip.
 - **Deformable objects** (towel, cloth, paper): NEVER place grasp points at exact corners or extreme edges — the gripper will slip off. Instead, place grasp points **at least 75 pixels inward from the edge** (in the 0–1000 normalized coordinate space of the cropped image) so the gripper can firmly pinch the material with sufficient contact area.
+- **Unfolding a folded towel/cloth**: The fold edge (the edge to grasp for unfolding) is where the fabric doubles over. For a top-to-bottom fold, this is the **bottom edge** of the folded area (closest to the bottom of the image). Place grasp points along this bottom fold edge, inset from the corners.
 - **Task awareness**: Consider what the robot needs to do with this object. If the object will be stacked, placed precisely, or inserted, choose a grasp point that allows stable holding during the entire manipulation sequence.
 """.strip()
 
-    # canonical point labels가 있으면 강제 추가
+    # manipulation_strategy가 있으면 전략 컨텍스트 추가
+    if manipulation_strategy:
+        arm = manipulation_strategy.get("arm_assignment", "unknown")
+        approach = manipulation_strategy.get("grasp_approach", "")
+        expected = manipulation_strategy.get("expected_points", [])
+
+        strategy_lines = [
+            f"\n\n### Manipulation Strategy (from prior analysis)",
+            f"- **Arm assignment**: {arm}",
+            f"- **Approach**: {approach}",
+        ]
+        if expected:
+            pts_str = ", ".join(f'"{p}"' for p in expected)
+            strategy_lines.append(f"- **Expected points**: [{pts_str}]")
+            strategy_lines.append(f"\nYou MUST identify exactly these points with these labels: [{pts_str}]. Match each label to the correct physical location based on the approach described above.")
+        prompt += "\n".join(strategy_lines)
+
+    # canonical point labels가 있으면 강제 추가 (expected_points보다 우선)
     if canonical_point_labels and object_label in canonical_point_labels:
         labels = canonical_point_labels[object_label]
         labels_str = ", ".join(f'"{l}"' for l in labels)

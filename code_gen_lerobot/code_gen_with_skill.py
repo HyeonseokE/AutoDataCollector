@@ -598,12 +598,19 @@ def lerobot_code_gen_multi_turn(
             obj_list = []
 
     valid_objects = []
+    strategy_by_label = {}  # label → manipulation_strategy dict
     for obj in obj_list:
         box = obj.get("box_2d") or obj.get("bbox") or []
         if len(box) == 4 and obj.get("label"):
             obj["box_2d"] = box
             valid_objects.append(obj)
-            print(f"    [overhead] [{obj['label']}] bbox={box}")
+            # 조작 전략 추출
+            strat = obj.get("manipulation_strategy")
+            if strat:
+                strategy_by_label[obj["label"]] = strat
+                print(f"    [overhead] [{obj['label']}] bbox={box} | arm={strat.get('arm_assignment','?')} | approach={strat.get('grasp_approach','?')}")
+            else:
+                print(f"    [overhead] [{obj['label']}] bbox={box}")
 
     assert valid_objects, "No valid bboxes detected from Turn 1"
 
@@ -681,9 +688,10 @@ def lerobot_code_gen_multi_turn(
             sv_crop_path = f"{crop_dir}/crop_sv_{safe_label}.jpg"
             cv2.imwrite(sv_crop_path, sv_crop_img)
 
-        # Send crop(s) + pointing prompt
+        # Send crop(s) + pointing prompt (with manipulation strategy from Turn 1)
+        obj_strategy = strategy_by_label.get(label)
         turn2_msg = {
-            "text": turn2_crop_pointing_prompt(label, has_side_view=obj_has_sv, canonical_point_labels=canonical_point_labels),
+            "text": turn2_crop_pointing_prompt(label, has_side_view=obj_has_sv, canonical_point_labels=canonical_point_labels, manipulation_strategy=obj_strategy),
             "image_path": crop_path,
         }
         if obj_has_sv and sv_crop_path:

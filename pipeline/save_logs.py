@@ -29,7 +29,7 @@ def save_turn_logs(save_dir: str, mt_info: Dict) -> None:
     # Turn 1
     turn1_raw = mt_info.get("turn1_response", "")
     if turn1_raw:
-        lines = ["=" * 60, "Turn 1: Bounding Box Detection", "=" * 60, "", turn1_raw]
+        lines = ["=" * 60, "Turn 1: Bounding Box Detection + Manipulation Strategy", "=" * 60, "", turn1_raw]
         t1_parsed = mt_info.get("turn1_parsed")
         if t1_parsed:
             lines.append("\n[Parsed Summary]")
@@ -42,6 +42,13 @@ def save_turn_logs(save_dir: str, mt_info: Dict) -> None:
                 name = obj.get("label") or obj.get("name", "?")
                 box = obj.get("box_2d") or obj.get("bbox_pixel", "N/A")
                 lines.append(f"  - {name}: bbox={box}")
+                strat = obj.get("manipulation_strategy")
+                if strat:
+                    lines.append(f"    [Strategy] arm={strat.get('arm_assignment', '?')}, "
+                                 f"approach={strat.get('grasp_approach', '?')}")
+                    expected = strat.get("expected_points", [])
+                    if expected:
+                        lines.append(f"    [Expected Points] {expected}")
         (fwd / "turn1_log.txt").write_text("\n".join(lines), encoding="utf-8")
         print(f"  Turn 1 log saved: {fwd / 'turn1_log.txt'}")
 

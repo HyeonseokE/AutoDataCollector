@@ -555,6 +555,7 @@ def lerobot_reset_code_gen_multi_turn(
     robot_ids: List[int] = None,
     original_positions_dual: Dict = None,
     resetspace: str = None,
+    reset_instruction: str = None,
 ) -> Tuple[str, Dict, Dict, Dict, Dict, Dict]:
     """
     VLM Multi-Turn Reset 코드 생성 파이프라인.
@@ -707,12 +708,14 @@ def lerobot_reset_code_gen_multi_turn(
             original_instruction=original_instruction,
             reset_mode=reset_mode,
             original_object_labels=original_labels,
+            reset_instruction=reset_instruction,
         )
     else:
         turn0_text = turn0_reset_scene_understanding_prompt(
             original_instruction=original_instruction,
             reset_mode=reset_mode,
             original_object_labels=original_labels,
+            reset_instruction=reset_instruction,
         )
     if original_labels:
         print(f"  Original labels provided to VLM: {original_labels}")
@@ -734,6 +737,8 @@ def lerobot_reset_code_gen_multi_turn(
     enforced_labels = canonical_labels if canonical_labels else (original_labels if original_labels else None)
     turn1_text = turn1_reset_bbox_detection_prompt(
         original_object_labels=enforced_labels,
+        original_instruction=original_instruction,
+        reset_instruction=reset_instruction,
     )
     if enforced_labels:
         print(f"  Enforcing labels in Turn 1: {enforced_labels}")
@@ -756,12 +761,18 @@ def lerobot_reset_code_gen_multi_turn(
         obj_list = []
 
     valid_objects = []
+    strategy_by_label = {}  # label → manipulation_strategy dict
     for obj in obj_list:
         box = obj.get("box_2d") or obj.get("bbox") or []
         if len(box) == 4 and obj.get("label"):
             obj["box_2d"] = box
             valid_objects.append(obj)
-            print(f"    [{obj['label']}] bbox={box}")
+            strat = obj.get("manipulation_strategy")
+            if strat:
+                strategy_by_label[obj["label"]] = strat
+                print(f"    [{obj['label']}] bbox={box} | arm={strat.get('arm_assignment','?')} | approach={strat.get('grasp_approach','?')}")
+            else:
+                print(f"    [{obj['label']}] bbox={box}")
 
     assert valid_objects, "No valid bboxes detected from Turn 1"
 
@@ -802,10 +813,11 @@ def lerobot_reset_code_gen_multi_turn(
         crop_path = f"{crop_dir}/crop_{safe_label}.jpg"
         cv2.imwrite(crop_path, crop_img)
 
-        # Send crop + pointing prompt
+        # Send crop + pointing prompt (with manipulation strategy from Turn 1)
+        obj_strategy = strategy_by_label.get(label)
         resp = gemini_chat_send(chat, gen_config,
             {
-                "text": turn2_crop_pointing_prompt(label, has_side_view=False),
+                "text": turn2_crop_pointing_prompt(label, has_side_view=False, manipulation_strategy=obj_strategy),
                 "image_path": crop_path,
             },
             turn_label=f"Crop: {label}")

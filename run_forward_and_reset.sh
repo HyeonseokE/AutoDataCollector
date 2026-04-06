@@ -102,12 +102,12 @@ ROBOT_IDS=(2 3)
 
 ### [dual arm task]
 ## towel folding
-# INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
-# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
+INSTRUCTION="fold the towel in half from top to bottom."
+RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
 
 ## move
-INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
-RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left area"
+# INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
+# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left area"
 
 ## hand over the sponge
 # INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
@@ -122,7 +122,7 @@ NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
 # all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(top-left bottom-right) 
+RESETSPACE_PER_ROBOT=(all all) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"

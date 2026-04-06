@@ -373,17 +373,27 @@ When objects are stacked, you MUST unstack from **top to bottom**.
 When a towel or cloth is folded and needs to be unfolded back to its original flat state,
 use the bimanual UNFOLD pattern — the reverse of FOLD.
 
+- **Grasp points** (`current_positions`): detected on the current folded state — where to grab the folded edge.
+- **Unfold targets** (`target_positions`): the original pre-fold positions from the forward task. The forward task's grasp points are exactly where the edge should return after unfolding. Access via `tgt_left["object"]["points"]` / `tgt_right["object"]["points"]`.
+
 ```python
 # UNFOLD pattern: grasp the folded edge → arc trajectory to unfold → place flat
 skills.set_subtask("unfold towel — grasp folded edge, pull back to flat")
 
-# Get grasp points from detected critical points (the folded/free edge)
-left_grasp = cur_left["towel"]["points"]["left grasp point"]
-right_grasp = cur_right["towel"]["points"]["right grasp point"]
+# Get grasp points from current_positions (detected on the folded towel)
+left_grasp = cur_left["towel"]["points"]["left fold edge grasp"]
+right_grasp = cur_right["towel"]["points"]["right fold edge grasp"]
 
-# Target: where the edge should end up when unfolded (from target_positions)
-left_target = tgt_left["towel"]["points"]["left grasp point"]
-right_target = tgt_right["towel"]["points"]["right grasp point"]
+# Unfold targets: each arm goes to a DIFFERENT corner of the original towel.
+# left arm → first point (left side of towel in left arm's frame)
+# right arm → second point (right side of towel in right arm's frame)
+# CRITICAL: left arm and right arm must go to DIFFERENT physical corners.
+left_tgt_pts = tgt_left["towel"]["points"]
+right_tgt_pts = tgt_right["towel"]["points"]
+left_tgt_keys = list(left_tgt_pts.keys())
+right_tgt_keys = list(right_tgt_pts.keys())
+left_target = left_tgt_pts[left_tgt_keys[0]]    # left arm's target (e.g., "top left corner")
+right_target = right_tgt_pts[right_tgt_keys[1]]  # right arm's target (e.g., "top right corner")
 
 # 1. Open + approach
 skills.gripper_control(left_arm="open", right_arm="open",

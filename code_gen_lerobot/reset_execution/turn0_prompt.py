@@ -13,6 +13,7 @@ def turn0_reset_scene_understanding_prompt(
     reset_mode: str,
     workspace_bounds: Tuple[Tuple[float, float], Tuple[float, float]] = None,
     original_object_labels: List[str] = None,
+    reset_instruction: str = None,
 ) -> str:
     """
     Turn 0: Reset 장면 이해 프롬프트 (VLM multi-turn 용).
@@ -25,6 +26,7 @@ def turn0_reset_scene_understanding_prompt(
         reset_mode: "original" | "random"
         workspace_bounds: (legacy, 미사용)
         original_object_labels: Forward에서 검출된 원래 물체 라벨 리스트
+        reset_instruction: 명시적 reset 태스크 명령 (주어지면 forward 기반 추론 대신 사용)
     """
     workspace_desc = """\
 In Image 1, the robot's reachable workspace is visually marked:
@@ -60,10 +62,19 @@ and map them to the objects you see in the current image."""
     else:
         label_guidance = ""
 
+    if reset_instruction:
+        task_desc = f'Reset task: {reset_instruction}'
+        img1_desc = f'the workspace AFTER the forward task was executed'
+    else:
+        task_desc = f'The forward task was: "{original_instruction}". Determine how to reverse it.'
+        img1_desc = f'the workspace AFTER the forward task "{original_instruction}" was executed'
+
     return f"""\
 You are given **two images**:
-1. **Image 1 (Current state)** — the workspace AFTER the forward task "{original_instruction}" was executed.
+1. **Image 1 (Current state)** — {img1_desc}.
 2. **Image 2 (Initial state)** — the workspace BEFORE the forward task was executed.
+
+**{task_desc}**
 
 {workspace_desc}
 

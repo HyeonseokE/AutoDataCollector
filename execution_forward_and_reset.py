@@ -987,6 +987,7 @@ class ForwardAndResetPipeline(BasePipeline):
             skip_codegen=skip_codegen,
             canonical_labels=canonical_labels,
             resetspace=self.resetspace,
+            reset_instruction=self.reset_instruction,
         )
 
         self.reset_multi_turn_info = reset_mt_info

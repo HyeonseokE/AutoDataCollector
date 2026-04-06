@@ -104,15 +104,20 @@ Analyze the scene and describe:
 
 def turn1_reset_bbox_detection_prompt(
     original_object_labels: List[str] = None,
+    original_instruction: str = None,
+    reset_instruction: str = None,
 ) -> str:
     """
-    Turn 1 (Reset 전용): Forward에서 검출된 라벨을 강제 사용하여 bbox 검출.
+    Turn 1 (Reset 전용): Forward에서 검출된 라벨을 강제 사용하여 bbox 검출 + 조작 전략 수립.
 
     Forward의 turn1_prompt와 달리, VLM이 라벨을 자유롭게 생성하지 않고
     Forward에서 사용한 정확한 라벨을 그대로 사용하도록 강제합니다.
+    추가로 각 객체의 reset 조작 전략을 수립합니다.
 
     Args:
         original_object_labels: Forward에서 검출된 물체 라벨 리스트 (필수)
+        original_instruction: Forward에서 수행한 태스크 명령 (reset 전략 수립에 활용)
+        reset_instruction: 명시적 reset 태스크 명령 (주어지면 original_instruction 대신 사용)
     """
     if original_object_labels:
         labels_json = ", ".join(f'"{l}"' for l in original_object_labels)
@@ -126,27 +131,63 @@ These are the object labels from the forward task detection. Each label correspo
         label_instruction = """
 **Every label must be unique.** If multiple objects of the same type exist, append a numeric suffix to distinguish them (e.g., `"egg_1"`, `"egg_2"`, `"red_plate_1"`, `"red_plate_2"`)."""
 
+    if reset_instruction:
+        forward_context = f"""
+**Reset task**: {reset_instruction}
+Manipulate the objects to accomplish this reset goal.
+- For **rigid objects** (blocks, cups, etc.): simple pick-and-place is sufficient.
+- For **deformable objects** (towel, cloth, paper) that need unfolding/reversing: only identify grasp points on the current (deformed) state. The unfold destination is already known and will be provided separately."""
+    elif original_instruction:
+        forward_context = f"""
+**Forward task context**: The forward task was "{original_instruction}".
+The objects are now in their post-task state. Your goal is to figure out how to REVERSE the effect of the forward task to restore each object to its original state.
+- For **rigid objects** (blocks, cups, etc.): simple pick-and-place is sufficient.
+- For **deformable objects** (towel, cloth, paper) that were folded/bent: you must UNFOLD/REVERSE the deformation (e.g., if the towel was folded top-to-bottom, grab the folded edge and unfold it back upward). The unfold destination is already known — only identify grasp points on the current (deformed) state."""
+    else:
+        forward_context = ""
+
     return f"""\
-Now, for each task-relevant object you identified above, detect their bounding boxes in the given image (overhead camera image).
+Based on your Reset plan above, now for each task-relevant object, do TWO things:
+
+**Part A — Bounding Box Detection**
+Detect bounding boxes in the given image (overhead camera image).
+
+**Part B — Reset Manipulation Strategy**
+For each detected object, reason about how it should be manipulated to RESET it back to its original state.
+{forward_context}
 
 For each object, provide:
 1. **box_2d**: Bounding box as `[ymin, xmin, ymax, xmax]` — exactly 4 integers, each normalized to 0–1000 (where 0,0 is the top-left corner and 1000,1000 is the bottom-right corner of this image).
 2. **label**: The object label.
 {label_instruction}
+3. **manipulation_strategy**: An object describing how to reset this object:
+   - **needs_manipulation** (bool): Does this object need to be physically manipulated?
+   - **arm_assignment** (`"left"`, `"right"`, or `"bimanual"`): Which arm(s) should handle this object?
+   - **grasp_approach** (string): HOW to manipulate — e.g., "pick from center and place at target position" for rigid objects, "grab the folded edge with both arms and unfold upward" for deformable objects that were folded.
+   - **expected_points** (list of strings): Point labels to identify in the crop step. Only include **grasp points** (where to grab the object) — e.g., `["grasp center"]` for simple pick-and-place, `["left fold edge grasp", "right fold edge grasp"]` for unfolding. Do NOT include target/destination points — the unfold destination is already known from the original pre-task positions and will be provided separately.
 
 ### Output Format
 Return a JSON array:
 ```json
 [
-  {{"box_2d": [ymin, xmin, ymax, xmax], "label": "object_name"}},
-  {{"box_2d": [ymin, xmin, ymax, xmax], "label": "object_name"}}
+  {{
+    "box_2d": [ymin, xmin, ymax, xmax],
+    "label": "object_name",
+    "manipulation_strategy": {{
+      "needs_manipulation": true,
+      "arm_assignment": "left",
+      "grasp_approach": "Pick from center and place at target position",
+      "expected_points": ["grasp center"]
+    }}
+  }}
 ]
 ```
 
 **Important**:
 - Only include the main task-relevant objects (not sub-parts).
 - Focus on providing accurate bounding box coordinates.
-- **Carefully match each bounding box to the correct label** by comparing the visual appearance of each detected object with your analysis from above. Do NOT swap labels between objects."""
+- **Carefully match each bounding box to the correct label** by comparing the visual appearance of each detected object with your analysis from above. Do NOT swap labels between objects.
+- **Reset strategy must consider the forward task**: if the object was folded, it needs to be unfolded; if it was simply moved, a pick-and-place is sufficient."""
 
 
 def lerobot_reset_code_gen_prompt(
@@ -549,6 +590,7 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 skills.execute_place_object([a_tx, a_ty, a_tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
 skills.move_to_position([a_tx, a_ty, approach_height], target_name="original position")
 ```
+
 
 ### **Guidelines**
 

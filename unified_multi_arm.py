@@ -405,6 +405,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
             codegen_model=self.codegen_model,
             robot_ids=self.robot_ids,
             resetspace=self.resetspace_per_robot,
+            reset_instruction=self.reset_instruction,
         )
 
         self.reset_multi_turn_info = reset_mt_info

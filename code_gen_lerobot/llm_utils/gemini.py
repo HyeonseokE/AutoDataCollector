@@ -270,6 +270,12 @@ def gemini_response(
                     time.sleep(wait_time)
                     if attempt == MAX_RETRIES_LOCAL - 1:
                         raise
+                elif "503" in err_str or "UNAVAILABLE" in err_str:
+                    wait_time = 2 ** attempt * 5
+                    print(f"[GEMINI] 503 Unavailable. Retrying in {wait_time}s... (attempt {attempt+1}/{MAX_RETRIES_LOCAL})")
+                    time.sleep(wait_time)
+                    if attempt == MAX_RETRIES_LOCAL - 1:
+                        raise
                 else:
                     raise
 

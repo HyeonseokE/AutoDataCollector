@@ -837,11 +837,10 @@ class MultiArmSkills:
                 z = max(z_arc, release_z)
 
                 if use_pixel_trajectory:
-                    # Interpolate midpoint + offset in pixel space (maintains arm spacing)
                     mid_px = mid_start_px + (mid_end_px - mid_start_px) * t
-                    offset = offset_start + (offset_end - offset_start) * t
-                    left_wp_px = mid_px + offset
-                    right_wp_px = mid_px - offset
+                    # Keep arm spacing fixed throughout arc (use start offset)
+                    left_wp_px = mid_px + offset_start
+                    right_wp_px = mid_px - offset_start
 
                     # Convert pixel waypoints back to each arm's robot frame
                     left_robot = left_p2r.pixel_to_robot(int(round(left_wp_px[0])), int(round(left_wp_px[1])))
@@ -849,11 +848,13 @@ class MultiArmSkills:
                     left_wp = [left_robot[0], left_robot[1], float(z)]
                     right_wp = [right_robot[0], right_robot[1], float(z)]
                 else:
-                    # Fallback: independent linear interpolation per arm
-                    left_xy = left_start[:2] + (left_end[:2] - left_start[:2]) * t
-                    right_xy = right_start[:2] + (right_end[:2] - right_start[:2]) * t
-                    left_wp = [float(left_xy[0]), float(left_xy[1]), float(z)]
-                    right_wp = [float(right_xy[0]), float(right_xy[1]), float(z)]
+                    # Fallback: midpoint interpolation with fixed spacing
+                    mid_start = (left_start[:2] + right_start[:2]) / 2
+                    mid_end = (left_end[:2] + right_end[:2]) / 2
+                    fb_offset = left_start[:2] - mid_start  # fixed offset from start
+                    mid_xy = mid_start + (mid_end - mid_start) * t
+                    left_wp = [float(mid_xy[0] + fb_offset[0]), float(mid_xy[1] + fb_offset[1]), float(z)]
+                    right_wp = [float(mid_xy[0] - fb_offset[0]), float(mid_xy[1] - fb_offset[1]), float(z)]
 
                 step_desc = f"({i+1}/{num_points})"
                 last_result = self.bimanual_move(

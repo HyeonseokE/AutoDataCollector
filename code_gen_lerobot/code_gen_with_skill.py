@@ -640,6 +640,15 @@ def lerobot_code_gen_multi_turn(
         label = obj["label"]
         ymin, xmin, ymax, xmax = obj["box_2d"]
 
+        # obstacle 스킵: needs_manipulation=false AND expected_points도 비어있을 때만
+        # plate 등 placement target은 needs_manipulation=false이지만 expected_points가 있으므로 스킵 안 함
+        strategy = obj.get("manipulation_strategy", {})
+        if strategy and strategy.get("needs_manipulation") is False:
+            expected_pts = strategy.get("expected_points", [])
+            if not expected_pts:
+                print(f"\n{GRAY}" + _log(f"Skip — {label} (obstacle, no points needed)", step=f"Crop{i}") + f"{RESET}")
+                continue
+
         print(f"\n{YELLOW}" + _log(f"Crop — {label}", step=f"Crop{i}") + f"{RESET}")
 
         # ── Overhead crop ──
@@ -788,6 +797,27 @@ def lerobot_code_gen_multi_turn(
     # Positions 구성 (pixel → world)
     print(f"\n{YELLOW}" + _log("Building positions...", step="Positions") + f"{RESET}")
     positions = _points_to_positions(all_points, robot_id=robot_id, camera=camera, valid_objects=valid_objects)
+
+    # Obstacle 물체 (needs_manipulation=false)를 positions에 bbox만 추가
+    # → seed 생성 시 장애물로 사용됨
+    for obj in valid_objects:
+        label = obj.get("label", "")
+        strategy = obj.get("manipulation_strategy", {})
+        if strategy and strategy.get("needs_manipulation") is False and label not in positions:
+            box = obj.get("box_2d", [])
+            if len(box) == 4:
+                ymin, xmin, ymax, xmax = box
+                cx = int((xmin + xmax) / 2 * img_w / 1000)
+                cy = int((ymin + ymax) / 2 * img_h / 1000)
+                w_px = int((xmax - xmin) * img_w / 1000)
+                h_px = int((ymax - ymin) * img_h / 1000)
+                positions[label] = {
+                    "position": [0, 0, 0],  # placeholder — pix2robot 변환은 seed에서 수행
+                    "pixel": [cx, cy],
+                    "bbox_px": (max(w_px, 10), max(h_px, 10)),
+                    "is_obstacle": True,
+                }
+                print(f"    {label}: obstacle bbox=({w_px}x{h_px}) pixel=({cx},{cy})")
 
     # Fallback
     if fallback_positions:

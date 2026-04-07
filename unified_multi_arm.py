@@ -1356,8 +1356,10 @@ class UnifiedMultiArmPipeline(BasePipeline):
                     self._start_episode_recording(self.reset_instruction)
 
                 # current_positions / target_positions를 globals로 주입 (싱글암 패턴과 동일)
+                # _reset_current_positions: reset turn2 검출 결과 (per-arm)
+                # _reset_target_positions: codegen에서 계산된 target (per-arm, label remapped)
                 reset_current = getattr(self, '_reset_current_positions', {})
-                reset_target = target_positions
+                reset_target = getattr(self, '_reset_target_positions', target_positions)
                 reset_success = self.execute_code(reset_code, {}, extra_globals={
                     "current_positions": reset_current,
                     "target_positions": reset_target,

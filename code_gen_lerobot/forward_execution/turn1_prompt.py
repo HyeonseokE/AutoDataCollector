@@ -80,7 +80,9 @@ Return a JSON array:
 ```
 
 **Important**:
-- Only include the main task-relevant objects (not sub-parts).
+- Include **ALL visible objects** on the workspace — both task-relevant objects AND non-task objects (obstacles).
+- For **placement targets** (plates, bowls, containers where other objects will be placed ON): set `needs_manipulation: false` but `expected_points: ["plate center"]`. Their center position is needed for placement.
+- For **pure obstacles** (objects not mentioned in the task at all): set `needs_manipulation: false` and `expected_points: []`. These are only used for collision avoidance.
 - Focus on providing accurate bounding box coordinates.
 - **Carefully match each bounding box to the correct label** by comparing the visual appearance of each detected object with your analysis from above. Do NOT swap labels between objects.
 - **Every label must be unique.** If multiple objects of the same type exist, append a numeric suffix to distinguish them (e.g., `"egg_1"`, `"egg_2"`, `"red plate_1"`, `"red plate_2"`).

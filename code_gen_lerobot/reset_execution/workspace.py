@@ -310,6 +310,10 @@ def classify_objects(
     for name, info in detections.items():
         if info is None:
             continue
+        # 명시적 obstacle 플래그 (Turn 1에서 needs_manipulation=false로 검출된 물체)
+        if info.get("is_obstacle"):
+            obstacles[name] = info
+            continue
         # Deformable 물체는 bbox 크기와 무관하게 grippable
         if any(kw in name.lower() for kw in DEFORMABLE_KEYWORDS):
             grippable[name] = info

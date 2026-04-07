@@ -116,8 +116,8 @@ RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original f
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=30
-NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=3
+NUM_RANDOM_SEEDS=1 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
@@ -141,7 +141,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
+RESUME_SESSION="./results/fold_towel"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

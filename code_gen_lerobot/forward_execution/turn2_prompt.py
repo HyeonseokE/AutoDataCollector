@@ -99,6 +99,7 @@ Return a JSON block:
 - **Deformable objects** (towel, cloth, paper): NEVER place grasp points at exact corners or extreme edges — the gripper will slip off. Instead, place grasp points **at least 75 pixels inward from the edge** (in the 0–1000 normalized coordinate space of the cropped image) so the gripper can firmly pinch the material with sufficient contact area.
 - **Unfolding a folded towel/cloth**: The fold edge (the edge to grasp for unfolding) is where the fabric doubles over. For a top-to-bottom fold, this is the **bottom edge** of the folded area (closest to the bottom of the image). Place left grasp near the left end of the bottom fold edge, and right grasp near the right end — each inset about 75 pixels from the **object's own edge** (not the crop boundary).
 - **Task awareness**: Consider what the robot needs to do with this object. If the object will be stacked, placed precisely, or inserted, choose a grasp point that allows stable holding during the entire manipulation sequence.
+- **Placement targets** (plates, bowls, containers — objects where OTHER objects will be placed ON): You MUST provide an interaction point labeled `"plate center"` or `"container center"` at the geometric center of the usable surface. This is where objects will be placed. Do NOT only detect handles or rims — the center is the most important point.
 """.strip()
 
     # manipulation_strategy가 있으면 전략 컨텍스트 추가

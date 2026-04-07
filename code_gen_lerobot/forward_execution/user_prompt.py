@@ -431,6 +431,7 @@ if __name__ == "__main__":
 1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
+   - **CRITICAL**: This is a SINGLE-ARM robot. Do NOT pass `arm=`, `left_arm=`, `right_arm=` to any skill function. All functions operate on the single connected arm automatically.
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
@@ -621,6 +622,38 @@ skills.execute_pick_object(c_pos, object_name="C", skill_description="Pick C", v
 skills.execute_place_object(b_pos, is_table=False, gripper_open_ratio=0.7, target_name="B", skill_description="Place C on B", verification_question="Is C on B?")
 skills.clear_subtask()
 
+# DISTRIBUTE PATTERN (place each object onto a different target — e.g., distribute pies to plates)
+# Key: every object and every target are in the positions dict from initial detection.
+# NO re-detection needed — nothing changes position until you move it, and targets (plates) never move.
+
+# Subtask 1
+skills.set_subtask("place A on plate_1")
+a_pos = positions["A"]["position"]
+plate1_pos = positions["plate_1"]["position"]
+skills.gripper_open(skill_description="Open gripper", verification_question="Is gripper open?")
+skills.move_to_position([a_pos[0], a_pos[1], approach_height], target_name="A", skill_description="Move above A", verification_question="Is gripper above A?")
+skills.execute_pick_object(a_pos, object_name="A", skill_description="Pick A", verification_question="Is A grasped?")
+skills.move_to_position([a_pos[0], a_pos[1], approach_height], target_name="A", skill_description="Lift A", verification_question="Is A lifted?")
+skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", skill_description="Move A above plate_1", verification_question="Is A above plate_1?")
+skills.execute_place_object(plate1_pos, is_table=True, gripper_open_ratio=0.7, target_name="plate_1", skill_description="Place A on plate_1", verification_question="Is A on plate_1?")
+skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", skill_description="Retract", verification_question="Is gripper clear?")
+skills.clear_subtask()
+
+# NO re-detection — B and plate_2 are untouched, use initial positions directly
+
+# Subtask 2
+skills.set_subtask("place B on plate_2")
+b_pos = positions["B"]["position"]
+plate2_pos = positions["plate_2"]["position"]
+skills.gripper_open(skill_description="Open gripper", verification_question="Is gripper open?")
+skills.move_to_position([b_pos[0], b_pos[1], approach_height], target_name="B", skill_description="Move above B", verification_question="Is gripper above B?")
+skills.execute_pick_object(b_pos, object_name="B", skill_description="Pick B", verification_question="Is B grasped?")
+skills.move_to_position([b_pos[0], b_pos[1], approach_height], target_name="B", skill_description="Lift B", verification_question="Is B lifted?")
+skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="plate_2", skill_description="Move B above plate_2", verification_question="Is B above plate_2?")
+skills.execute_place_object(plate2_pos, is_table=True, gripper_open_ratio=0.7, target_name="plate_2", skill_description="Place B on plate_2", verification_question="Is B on plate_2?")
+skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="plate_2", skill_description="Retract", verification_question="Is gripper clear?")
+skills.clear_subtask()
+
 # END — always last
 skills.move_to_initial_state()
 skills.move_to_free_state(skill_description="Move to safe position", verification_question="Is the robot at safe position?")
@@ -646,6 +679,7 @@ if __name__ == "__main__":
 1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
 2. `approach_height = 0.20` (20cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
+   - **CRITICAL**: This is a SINGLE-ARM robot. Do NOT pass `arm=`, `left_arm=`, `right_arm=` to any skill function. All functions operate on the single connected arm automatically.
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.

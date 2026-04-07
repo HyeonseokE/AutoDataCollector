@@ -807,9 +807,24 @@ class MultiArmSkills:
         left_desc = left_skill_description or "fold (left)"
         right_desc = right_skill_description or "fold (right)"
 
-        # Each arm interpolates independently in its own coordinate frame.
-        # Same t ratio guarantees synchronized progress.
-        # (Cannot mix coordinates — each arm has its own base_link frame.)
+        # Determine trajectory mode: pixel-based (maintains spacing) or independent fallback
+        left_p2r = getattr(self.left_arm, 'pix2robot', None)
+        right_p2r = getattr(self.right_arm, 'pix2robot', None)
+        use_pixel_trajectory = (left_p2r is not None and right_p2r is not None)
+
+        if use_pixel_trajectory:
+            # Convert start/end to pixel coordinates (shared overhead camera frame)
+            ls_px = np.array(left_p2r.robot_to_pixel(left_start[0], left_start[1]), dtype=np.float64)
+            rs_px = np.array(right_p2r.robot_to_pixel(right_start[0], right_start[1]), dtype=np.float64)
+            le_px = np.array(left_p2r.robot_to_pixel(left_end[0], left_end[1]), dtype=np.float64)
+            re_px = np.array(right_p2r.robot_to_pixel(right_end[0], right_end[1]), dtype=np.float64)
+
+            # Midpoint and offset in pixel space
+            mid_start_px = (ls_px + rs_px) / 2
+            mid_end_px = (le_px + re_px) / 2
+            offset_start = ls_px - mid_start_px  # left arm offset from midpoint
+            offset_end = le_px - mid_end_px
+            self._log(f"  Pixel trajectory: midpoint start={mid_start_px}, offset={offset_start}")
 
         last_result = {"left": True, "right": True}
         try:
@@ -817,16 +832,28 @@ class MultiArmSkills:
                 t = (i + 1) / num_points  # 0 → 1
                 theta = np.pi * t         # 0 → π
 
-                # x, y: linear interpolation per arm (each in own frame)
-                left_xy = left_start[:2] + (left_end[:2] - left_start[:2]) * t
-                right_xy = right_start[:2] + (right_end[:2] - right_start[:2]) * t
-
                 # z: sin arc, but floor at release_z (never descend below release height)
                 z_arc = base_z + arc_height * np.sin(theta)
                 z = max(z_arc, release_z)
 
-                left_wp = [float(left_xy[0]), float(left_xy[1]), float(z)]
-                right_wp = [float(right_xy[0]), float(right_xy[1]), float(z)]
+                if use_pixel_trajectory:
+                    # Interpolate midpoint + offset in pixel space (maintains arm spacing)
+                    mid_px = mid_start_px + (mid_end_px - mid_start_px) * t
+                    offset = offset_start + (offset_end - offset_start) * t
+                    left_wp_px = mid_px + offset
+                    right_wp_px = mid_px - offset
+
+                    # Convert pixel waypoints back to each arm's robot frame
+                    left_robot = left_p2r.pixel_to_robot(int(round(left_wp_px[0])), int(round(left_wp_px[1])))
+                    right_robot = right_p2r.pixel_to_robot(int(round(right_wp_px[0])), int(round(right_wp_px[1])))
+                    left_wp = [left_robot[0], left_robot[1], float(z)]
+                    right_wp = [right_robot[0], right_robot[1], float(z)]
+                else:
+                    # Fallback: independent linear interpolation per arm
+                    left_xy = left_start[:2] + (left_end[:2] - left_start[:2]) * t
+                    right_xy = right_start[:2] + (right_end[:2] - right_start[:2]) * t
+                    left_wp = [float(left_xy[0]), float(left_xy[1]), float(z)]
+                    right_wp = [float(right_xy[0]), float(right_xy[1]), float(z)]
 
                 step_desc = f"({i+1}/{num_points})"
                 last_result = self.bimanual_move(
@@ -835,7 +862,7 @@ class MultiArmSkills:
                     duration=self.FOLD_WAYPOINT_DURATION,
                     left_skill_description=f"{left_desc} {step_desc}",
                     right_skill_description=f"{right_desc} {step_desc}",
-                left_verification_question=left_verification_question,
+                    left_verification_question=left_verification_question,
                     right_verification_question=right_verification_question,
                 )
         finally:

@@ -256,7 +256,7 @@ class ForwardAndResetPipeline(BasePipeline):
 
     def _can_reuse_code(self, cached_code: Optional[str], cached_keys: List[str],
                         new_positions: Dict) -> bool:
-        """캐싱된 코드를 재사용할 수 있는지 확인 (key 일치 검사)
+        """캐싱된 코드를 재사용할 수 있는지 확인 (key + points 일치 검사)
 
         cached_keys가 비어있으면 코드가 positions를 참조하지 않는 것이므로
         (좌표 하드코딩 등) 무조건 재사용 가능.
@@ -265,7 +265,15 @@ class ForwardAndResetPipeline(BasePipeline):
             return False
         if not cached_keys:
             return True
-        return set(cached_keys) <= set(new_positions.keys())
+        if not set(cached_keys) <= set(new_positions.keys()):
+            return False
+        # 코드가 "points"를 참조하면, 해당 object에 points sub-dict가 있어야 함
+        if '["points"]' in cached_code or "['points']" in cached_code:
+            for key in cached_keys:
+                info = new_positions.get(key)
+                if isinstance(info, dict) and "points" not in info:
+                    return False
+        return True
 
     def _create_skills(self):
         """LeRobotSkills 인스턴스 생성 (exec_globals 주입용).

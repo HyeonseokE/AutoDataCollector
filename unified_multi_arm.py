@@ -1063,7 +1063,20 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 for arm_data in self.detected_positions.values():
                     if isinstance(arm_data, dict):
                         detected_keys.update(arm_data.keys())
-                if set(self.cached_forward_keys) <= detected_keys:
+                # keys 일치 + points sub-dict 존재 여부 확인
+                keys_ok = set(self.cached_forward_keys) <= detected_keys
+                points_ok = True
+                if keys_ok and self.cached_forward_code and '["points"]' in self.cached_forward_code:
+                    for arm_data in self.detected_positions.values():
+                        if isinstance(arm_data, dict):
+                            for key in self.cached_forward_keys:
+                                info = arm_data.get(key)
+                                if isinstance(info, dict) and "points" not in info:
+                                    points_ok = False
+                                    break
+                        if not points_ok:
+                            break
+                if keys_ok and points_ok:
                     code = self.cached_forward_code
                     print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET_COLOR}")
                 else:

@@ -80,6 +80,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
         skip_turn_test: bool = False,
         detect_model: str = None,
         resetspace_per_robot: Dict[int, str] = None,
+        recording_config: str = None,
     ):
         assert len(robot_ids) >= 2, f"Multi-arm requires >= 2 robots, got {robot_ids}"
         self.robot_ids = robot_ids
@@ -108,6 +109,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
         self.record_dataset = record_dataset
         self.dataset_repo_id = dataset_repo_id
         self.recording_fps = recording_fps
+        self.recording_config = recording_config
         self.resume_recording = resume_recording
 
         # State
@@ -222,12 +224,12 @@ class UnifiedMultiArmPipeline(BasePipeline):
 
             # 2. Camera manager (YAML에서 동적 로드)
             if self.camera_manager is None:
-                self.camera_manager = create_camera_manager_from_config(num_robots=len(self.robot_ids))
+                self.camera_manager = create_camera_manager_from_config(yaml_path=self.recording_config, num_robots=len(self.robot_ids))
                 self.camera_manager.connect_all()
                 print(f"[Recording] Cameras connected: {self.camera_manager.camera_names}")
 
             # 3. YAML에 enabled된 카메라가 모두 연결되었는지 검증
-            cameras = load_cameras_from_yaml(num_robots=len(self.robot_ids))
+            cameras = load_cameras_from_yaml(yaml_path=self.recording_config, num_robots=len(self.robot_ids))
             enabled_cameras = [cam for cam in cameras if cam.enabled]
             connected_names = set(self.camera_manager.camera_names)
             expected_names = {cam.feature_name for cam in enabled_cameras}

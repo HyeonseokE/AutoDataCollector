@@ -97,7 +97,7 @@ Return a JSON block:
 - Coordinates are normalized 0–1000 relative to this cropped image.
 - **Grasp stability**: Choose the grasp point that maximizes gripper contact and grip stability. Prefer the geometric center of the widest graspable surface. Avoid edges, corners, or thin protrusions where the gripper may slip.
 - **Deformable objects** (towel, cloth, paper): NEVER place grasp points at exact corners or extreme edges — the gripper will slip off. Instead, place grasp points **at least 75 pixels inward from the edge** (in the 0–1000 normalized coordinate space of the cropped image) so the gripper can firmly pinch the material with sufficient contact area.
-- **Unfolding a folded towel/cloth**: The fold edge (the edge to grasp for unfolding) is where the fabric doubles over. For a top-to-bottom fold, this is the **bottom edge** of the folded area (closest to the bottom of the image). Place grasp points along this bottom fold edge, inset from the corners.
+- **Unfolding a folded towel/cloth**: The fold edge (the edge to grasp for unfolding) is where the fabric doubles over. For a top-to-bottom fold, this is the **bottom edge** of the folded area (closest to the bottom of the image). Place left grasp near the left end of the bottom fold edge, and right grasp near the right end — each inset about 75 pixels from the **object's own edge** (not the crop boundary).
 - **Task awareness**: Consider what the robot needs to do with this object. If the object will be stacked, placed precisely, or inserted, choose a grasp point that allows stable holding during the entire manipulation sequence.
 """.strip()
 

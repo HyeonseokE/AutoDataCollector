@@ -735,7 +735,7 @@ class MultiArmSkills:
 
     # Duration per waypoint in bimanual_fold (shorter than BIMANUAL_MIN_DURATION
     # because each waypoint segment is a very short distance)
-    FOLD_WAYPOINT_DURATION = 2.0
+    FOLD_WAYPOINT_DURATION = 3.0
 
     # Torque limit for fold compliance (0-1000, lower = more compliant)
     FOLD_TORQUE_LIMIT = 400
@@ -787,6 +787,14 @@ class MultiArmSkills:
 
         self._log(f"[bimanual_fold] arc_height={arc_height:.2f}m, release_z={release_z:.3f}m, "
                   f"{num_points} waypoints, compliant={compliant}")
+
+        # Extra gripper squeeze for fold (overshoot close position to grip fabric tighter)
+        FOLD_GRIPPER_CLOSE_RATIO = 1.1
+        for arm in (self.left_arm, self.right_arm):
+            if arm.robot:
+                overshoot_pos = arm.gripper_open_pos + (arm.gripper_close_pos - arm.gripper_open_pos) * FOLD_GRIPPER_CLOSE_RATIO
+                arm._execute_move_gripper_pose(overshoot_pos, duration=0.5)
+        self._log(f"  Gripper extra squeeze: close ratio={FOLD_GRIPPER_CLOSE_RATIO}")
 
         # Lower torque for compliance during fold
         if compliant and self.left_arm.robot and self.right_arm.robot:

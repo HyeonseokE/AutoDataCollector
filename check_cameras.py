@@ -38,7 +38,7 @@ COLORS = [
 
 
 def open_opencv(device_path, width, height, fps, fourcc="MJPG"):
-    cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
+    cap = cv2.VideoCapture(device_path)
     if fourcc:
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)

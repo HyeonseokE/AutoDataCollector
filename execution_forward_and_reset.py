@@ -146,6 +146,7 @@ class ForwardAndResetPipeline(BasePipeline):
         skip_turn_test: bool = False,
         detect_model: str = None,
         resetspace: str = None,
+        recording_config: str = None,
     ):
         """
         초기화
@@ -162,6 +163,7 @@ class ForwardAndResetPipeline(BasePipeline):
             recording_fps: 레코딩 FPS (기본: 30)
             multi_turn: True면 crop-then-point 멀티턴 LLM 코드 생성 사용
             cad_image_dirs: CAD 참조 이미지 디렉토리 리스트 (옵션)
+            recording_config: recording config YAML 경로 (None이면 기본 recording_config.yaml)
         """
         self.robot_id = robot_id
         self.llm_model = llm_model
@@ -179,6 +181,7 @@ class ForwardAndResetPipeline(BasePipeline):
         self.skip_turn_test = skip_turn_test
         self.detect_model = detect_model
         self.resetspace = resetspace
+        self.recording_config = recording_config
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
 
@@ -284,6 +287,14 @@ class ForwardAndResetPipeline(BasePipeline):
         # 공유 카메라 주입 (detect_objects에서 사용)
         if self.camera:
             self._skills.camera = self.camera
+        elif self.camera_manager and self.camera_manager.is_connected:
+            # camera_manager에서 RealSense 가져오기
+            for cam_name in ["top", "realsense"]:
+                try:
+                    self._skills.camera = self.camera_manager.get_camera(cam_name)
+                    break
+                except KeyError:
+                    continue
 
         return self._skills
 
@@ -334,7 +345,7 @@ class ForwardAndResetPipeline(BasePipeline):
 
             # 1. 카메라 매니저 초기화 (YAML에서 동적 로드, 싱글암: left_arm만)
             print(f"[Recording] Loading camera configuration...")
-            self.camera_manager = create_camera_manager_from_config(num_robots=1)
+            self.camera_manager = create_camera_manager_from_config(yaml_path=self.recording_config, num_robots=1)
 
             # 2. 카메라 연결
             print(f"[Recording] Connecting cameras...")
@@ -342,7 +353,7 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Recording] Cameras connected: {self.camera_manager.camera_names}")
 
             # 3. 카메라 연결 검증
-            cameras = load_cameras_from_yaml(num_robots=1)
+            cameras = load_cameras_from_yaml(yaml_path=self.recording_config, num_robots=1)
             enabled_cameras = [cam for cam in cameras if cam.enabled]
             connected_names = set(self.camera_manager.camera_names)
             expected_names = {cam.feature_name for cam in enabled_cameras}
@@ -371,7 +382,7 @@ class ForwardAndResetPipeline(BasePipeline):
                 )
 
             # 4. Features 빌드 (연결된 카메라 기준, 멀티암과 동일 패턴)
-            features = build_features_from_yaml(num_robots=1)
+            features = build_features_from_yaml(yaml_path=self.recording_config, num_robots=1)
 
             # 5. 기존 dataset 존재 여부 미리 체크 (forward + reset)
             from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
@@ -426,7 +437,7 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Recording] Dataset recording will be disabled")
             self.record_dataset = False
             self.dataset_recorder = None
-            self.camera_manager = None
+            # camera_manager는 유지 — 카메라 연결은 성공했을 수 있음
         except AssertionError:
             # Dataset already exists - 파이프라인 완전 종료
             raise
@@ -1113,6 +1124,13 @@ class ForwardAndResetPipeline(BasePipeline):
                     if not self.initialize_camera():
                         print(f"{RED}[Error] Camera initialization failed{RESET}")
                         return result
+                # camera_manager 연결됐지만 self.camera가 None이면 꺼내서 설정
+                if not self.camera and self.camera_manager and self.camera_manager.is_connected:
+                    pc = self._get_pipeline_camera()
+                    pc.camera_manager = self.camera_manager
+                    cam = pc.get_realsense()
+                    if cam is not None:
+                        self.camera = cam
 
                 self.initial_image = self.capture_frame()
 
@@ -3410,6 +3428,14 @@ def main():
         help="Recording FPS for LeRobot dataset (default: 30)"
     )
 
+    parser.add_argument(
+        "--recording-config",
+        type=str,
+        default=None,
+        help="Path to recording config YAML (e.g., pipeline_config/recording_config_ws1.yaml). "
+             "If not specified, uses pipeline_config/recording_config.yaml"
+    )
+
     # Multi-turn 옵션
     parser.add_argument(
         "--multi-turn",
@@ -3510,6 +3536,7 @@ def main():
             skip_turn_test=args.skip_turn_test,
             detect_model=args.detect_model,
             resetspace=single_resetspace,
+            recording_config=args.recording_config,
         )
     else:
         # ── Multi-arm: UnifiedMultiArmPipeline ──
@@ -3540,6 +3567,7 @@ def main():
             skip_turn_test=args.skip_turn_test,
             detect_model=args.detect_model,
             resetspace_per_robot=resetspace_per_robot,
+            recording_config=args.recording_config,
         )
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기

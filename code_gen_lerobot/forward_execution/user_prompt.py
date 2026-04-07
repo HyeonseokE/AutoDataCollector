@@ -434,7 +434,8 @@ if __name__ == "__main__":
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
-6. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arm from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection (scene is unchanged).
+6. **Re-detection**: After each subtask, re-detect ONLY if the next subtask needs the **new position of an already-moved object** (e.g., stacking on top of it). If the next object to manipulate **hasn't been touched yet**, its initial `positions` value is still valid — skip re-detection and use it directly.
+   - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. Use the initial positions instead.
    - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.
@@ -592,12 +593,14 @@ skills.execute_pick_object(a_pos, object_name="A", skill_description="Pick A", v
 skills.execute_place_object(target_pos, is_table=True, gripper_open_ratio=0.7, target_name="target", skill_description="Place A", verification_question="Is A placed?")
 skills.clear_subtask()
 
-# Re-detection (MANDATORY between subtasks)
-# detect_objects may return None for an object if detection fails — always check before using.
+# Re-detection: B hasn't been touched yet, so its initial position is still valid.
+# Re-detect ONLY if the next subtask needs the NEW position of an already-moved object (e.g., stacking ON A).
+# For stacking: re-detect A to get its updated position after placement.
+# NOTE: detect_objects takes ONLY one argument (list of object names). Do NOT pass skill_description or other kwargs.
 skills.move_to_initial_state()  # clear arm from camera view
-updated = skills.detect_objects(["A", "B", "C"])
+updated = skills.detect_objects(["A"])  # re-detect only A (need its new position for stacking)
 if updated.get("A") and updated["A"].get("position"): a_pos = updated["A"]["position"]
-if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
+# b_pos is still valid from initial positions — no re-detection needed
 
 # Subtask 2: 2nd object — pick → place
 skills.set_subtask("pick B and place on A")
@@ -605,11 +608,12 @@ skills.execute_pick_object(b_pos, object_name="B", skill_description="Pick B", v
 skills.execute_place_object(a_pos, is_table=False, gripper_open_ratio=0.7, target_name="A", skill_description="Place B on A", verification_question="Is B on A?")
 skills.clear_subtask()
 
-# Re-detection (MANDATORY between subtasks)
-skills.move_to_initial_state()  # clear arm from camera view
-updated = skills.detect_objects(["A", "B", "C"])
-if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
-if updated.get("C") and updated["C"].get("position"): c_pos = updated["C"]["position"]
+# Re-detection: C hasn't been touched. Re-detect only objects whose NEW position is needed next.
+# NOTE: detect_objects takes ONLY one argument (list of object names). Do NOT pass skill_description or other kwargs.
+skills.move_to_initial_state()
+updated = skills.detect_objects(["A"])  # need A's latest position for stacking C on it
+if updated.get("A") and updated["A"].get("position"): a_pos = updated["A"]["position"]
+# c_pos is still valid from initial positions
 
 # Subtask 3: 3rd object — pick → place
 skills.set_subtask("pick C and place on B")
@@ -645,7 +649,8 @@ if __name__ == "__main__":
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
-6. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arm from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection (scene is unchanged).
+6. **Re-detection**: After each subtask, re-detect ONLY if the next subtask needs the **new position of an already-moved object** (e.g., stacking on top of it). If the next object to manipulate **hasn't been touched yet**, its initial `positions` value is still valid — skip re-detection and use it directly.
+   - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. Use the initial positions instead.
    - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
 6. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 7. Wrap with `try/finally` → `disconnect()`.

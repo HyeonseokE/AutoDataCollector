@@ -199,7 +199,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
             print(f"  Repo ID: {self.dataset_repo_id}")
 
             # 1. 기존 dataset 존재 여부 미리 체크 (forward + reset)
-            from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
+            from lerobot.utils.constants import HF_LEROBOT_HOME
             reset_repo_id = self.dataset_repo_id + "_reset"
             existing = []
             for rid in [self.dataset_repo_id, reset_repo_id]:

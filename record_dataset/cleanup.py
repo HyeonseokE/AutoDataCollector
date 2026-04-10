@@ -38,7 +38,8 @@ def cleanup_dataset_for_resume(
     2. dataset에 기록된 에피소드 수만큼 "TRUE 또는 삭제됨"에 dataset idx를 순서대로 할당
     3. 삭제된 에피소드에 할당된 dataset idx = 삭제 대상
     """
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset, HF_LEROBOT_HOME
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot.utils.constants import HF_LEROBOT_HOME
 
     session_path = Path(session_dir)
     dataset_path = Path(root) if root else HF_LEROBOT_HOME / repo_id

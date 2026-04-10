@@ -393,7 +393,7 @@ class ForwardAndResetPipeline(BasePipeline):
             features = build_features_from_yaml(yaml_path=self.recording_config, num_robots=1)
 
             # 5. 기존 dataset 존재 여부 미리 체크 (forward + reset)
-            from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
+            from lerobot.utils.constants import HF_LEROBOT_HOME
             reset_repo_id = self.dataset_repo_id + "_reset"
             existing = []
             for rid in [self.dataset_repo_id, reset_repo_id]:
@@ -416,12 +416,14 @@ class ForwardAndResetPipeline(BasePipeline):
                     f"========================================"
                 )
 
-            # 6. 레코더 초기화 (빌드된 features 전달, 멀티암과 동일 패턴)
+            # 6. 레코더 초기화 (빌드된 features + config_yaml 전달, 멀티암과 동일 패턴)
             self.dataset_recorder = DatasetRecorder(
                 repo_id=self.dataset_repo_id,
                 fps=self.recording_fps,
                 resume=self.resume_recording,
                 features=features,
+                config_yaml=self.recording_config,
+                num_robots=1,
             )
             print(f"[Recording] Recorder initialized successfully")
             print(f"[Recording] Features: {list(self.dataset_recorder.features.keys())}")
@@ -434,6 +436,8 @@ class ForwardAndResetPipeline(BasePipeline):
                 fps=self.recording_fps,
                 resume=self.resume_recording,
                 features=features,
+                config_yaml=self.recording_config,
+                num_robots=1,
             )
             print(f"[Recording] Reset recorder initialized")
 

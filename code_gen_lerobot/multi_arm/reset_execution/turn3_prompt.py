@@ -374,7 +374,8 @@ When a towel or cloth is folded and needs to be unfolded back to its original fl
 use the bimanual UNFOLD pattern — the reverse of FOLD.
 
 - **Grasp points** (`current_positions`): detected on the current folded state — where to grab the folded edge.
-- **Unfold targets** (`target_positions`): the original pre-fold positions from the forward task. The forward task's grasp points are exactly where the edge should return after unfolding. Access via `tgt_left["object"]["points"]` / `tgt_right["object"]["points"]`.
+- **Unfold targets** (`target_positions`): the original pre-fold positions from the forward task. The forward task's grasp points (the edge that was grabbed to fold) are exactly where the edge should return after unfolding.
+- **CRITICAL**: For a top-to-bottom fold, the forward task grabbed the **top** edge. To unfold, you grab the folded edge and move it back to where the **top** edge was — use `"top left corner"` and `"top right corner"` from `target_positions`, NOT "bottom". The unfold target is ALWAYS the edge that was originally folded (the one that moved during forward), not the edge that stayed in place.
 
 ```python
 # UNFOLD pattern: grasp the folded edge → arc trajectory to unfold → place flat
@@ -384,16 +385,12 @@ skills.set_subtask("unfold towel — grasp folded edge, pull back to flat")
 left_grasp = cur_left["towel"]["points"]["left fold edge grasp"]
 right_grasp = cur_right["towel"]["points"]["right fold edge grasp"]
 
-# Unfold targets: each arm goes to a DIFFERENT corner of the original towel.
-# left arm → first point (left side of towel in left arm's frame)
-# right arm → second point (right side of towel in right arm's frame)
-# CRITICAL: left arm and right arm must go to DIFFERENT physical corners.
-left_tgt_pts = tgt_left["towel"]["points"]
-right_tgt_pts = tgt_right["towel"]["points"]
-left_tgt_keys = list(left_tgt_pts.keys())
-right_tgt_keys = list(right_tgt_pts.keys())
-left_target = left_tgt_pts[left_tgt_keys[0]]    # left arm's target (e.g., "top left corner")
-right_target = right_tgt_pts[right_tgt_keys[1]]  # right arm's target (e.g., "top right corner")
+# Unfold targets: use the TOP corners from target_positions.
+# For top-to-bottom fold: the top edge was folded down → unfold back to top.
+# CRITICAL: ALWAYS use "top left corner" / "top right corner" for top-to-bottom unfold.
+# NEVER use "bottom" corners — those are where the edge already is (no movement).
+left_target = tgt_left["towel"]["points"]["top left corner"]
+right_target = tgt_right["towel"]["points"]["top right corner"]
 
 # 1. Open + approach
 skills.gripper_control(left_arm="open", right_arm="open",

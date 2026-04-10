@@ -308,9 +308,14 @@ class RecordingContext:
             cls._calibration_limits = calibration_limits
 
             # observation features 설정 로드
+            # 1순위: 이미 설정된 recorder의 _obs_enabled (config_yaml이 전달된 경우)
+            # 2순위: 기본 경로에서 yaml 로드 (fallback)
             try:
-                from .config import load_observation_features_from_yaml
-                cls._obs_features_enabled = load_observation_features_from_yaml()
+                if cls._recorder is not None and hasattr(cls._recorder, '_obs_enabled') and cls._recorder._obs_enabled:
+                    cls._obs_features_enabled = dict(cls._recorder._obs_enabled)
+                else:
+                    from .config import load_observation_features_from_yaml
+                    cls._obs_features_enabled = load_observation_features_from_yaml()
             except Exception:
                 cls._obs_features_enabled = {}
 

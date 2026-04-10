@@ -78,15 +78,15 @@ cd "$SCRIPT_DIR"
 # 예: (0)       → shared + left_arm
 #     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
-ROBOT_IDS=(2 3)
+ROBOT_IDS=(2)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
 
 ### [single arm task]
 ## pick and place
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# RESET_INSTRUCTION=""
+INSTRUCTION="pick up the red block and place it on the blue dish"
+RESET_INSTRUCTION=""
 
 ## stack red and yellow
 # INSTRUCTION="stack the blocks in the order of red and yellow"
@@ -102,8 +102,8 @@ ROBOT_IDS=(2 3)
 
 ### [dual arm task]
 ## towel folding
-INSTRUCTION="fold the towel in half from top to bottom."
-RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
+# INSTRUCTION="fold the towel in half from top to bottom."
+# RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
 
 ## move
 # INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
@@ -116,13 +116,13 @@ RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original f
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=3
-NUM_RANDOM_SEEDS=1 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=50
+NUM_RANDOM_SEEDS=25 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
 # all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(all all) 
+RESETSPACE_PER_ROBOT=(top-left) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -141,7 +141,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/fold_towel"
+RESUME_SESSION=""
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

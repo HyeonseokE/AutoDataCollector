@@ -137,7 +137,8 @@ class DatasetRecorder:
     def _init_dataset(self):
         """LeRobotDataset 초기화 (resume=True면 기존 데이터셋에 append)"""
         try:
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset, HF_LEROBOT_HOME
+            from lerobot.datasets.lerobot_dataset import LeRobotDataset
+            from lerobot.utils.constants import HF_LEROBOT_HOME
 
             dataset_path = self.root if self.root else HF_LEROBOT_HOME / self.repo_id
 

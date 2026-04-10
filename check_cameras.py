@@ -1,12 +1,21 @@
 """
-Camera Check - recording_config.yaml에 정의된 모든 카메라의
+Camera Check - recording_config YAML에 정의된 모든 카메라의
 라이브 스트리밍 및 실시간 FPS를 시각화합니다.
+
+Usage:
+    python check_cameras.py                                    # 기본: 모든 WS yaml 자동 탐색
+    python check_cameras.py pipeline_config/recording_config_ws1.yaml  # 특정 WS만
+    python check_cameras.py ws1                                # 축약형
+    python check_cameras.py ws1 ws2                            # 여러 WS
+
 Press 'q' to quit.
 """
 
+import argparse
 import sys
 import time
 import collections
+import threading
 from pathlib import Path
 
 import cv2
@@ -44,6 +53,7 @@ def open_opencv(device_path, width, height, fps, fourcc="MJPG"):
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     cap.set(cv2.CAP_PROP_FPS, fps)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
 
@@ -96,11 +106,66 @@ def draw_graph(cam_data_list):
     return graph
 
 
+def resolve_yaml_paths(args):
+    """인자를 YAML 경로 리스트로 변환.
+
+    - 인자 없음: pipeline_config/recording_config_ws*.yaml 자동 탐색
+    - "ws1", "ws2" 등 축약형 지원
+    - 전체 경로도 지원
+    """
+    config_dir = ROOT / "pipeline_config"
+
+    if not args:
+        paths = sorted(config_dir.glob("recording_config_ws*.yaml"))
+        if not paths:
+            print("Error: pipeline_config/recording_config_ws*.yaml 파일을 찾을 수 없습니다.")
+            sys.exit(1)
+        return paths
+
+    paths = []
+    for arg in args:
+        p = Path(arg)
+        if p.exists():
+            paths.append(p)
+        else:
+            # 축약형: "ws1" → "pipeline_config/recording_config_ws1.yaml"
+            expanded = config_dir / f"recording_config_{arg}.yaml"
+            if expanded.exists():
+                paths.append(expanded)
+            else:
+                print(f"Error: '{arg}' → '{expanded}' 파일을 찾을 수 없습니다.")
+                sys.exit(1)
+    return paths
+
+
 def main():
-    yaml_path = ROOT / "pipeline_config" / "recording_config.yaml"
-    camera_configs = load_cameras_from_yaml(str(yaml_path))
+    parser = argparse.ArgumentParser(description="WS별 카메라 연결 상태 확인")
+    parser.add_argument("configs", nargs="*", help="YAML 경로 또는 축약형 (ws1, ws2, ...)")
+    args = parser.parse_args()
+
+    yaml_paths = resolve_yaml_paths(args.configs)
+
+    camera_configs = []
+    for yp in yaml_paths:
+        ws_name = yp.stem.replace("recording_config_", "").upper()
+        print(f"\n{'='*60}")
+        print(f"  Loading: {yp.name}  ({ws_name})")
+        print(f"{'='*60}")
+        cams = load_cameras_from_yaml(str(yp))
+        for cam in cams:
+            cam._ws_label = ws_name  # 표시용 라벨 추가
+        camera_configs.extend(cams)
 
     cam_data_list = []
+
+    def opencv_reader_thread(cam):
+        """백그라운드 스레드: 카메라에서 계속 읽어 최신 프레임만 유지."""
+        while not cam["stop_event"].is_set():
+            ret, frame = cam["cap"].read()
+            if ret:
+                with cam["lock"]:
+                    cam["latest_frame"] = frame
+                    cam["frame_ready"] = True
 
     for idx, cam_cfg in enumerate(camera_configs):
         if not cam_cfg.enabled:
@@ -109,9 +174,12 @@ def main():
 
         color = COLORS[idx % len(COLORS)]
 
+        ws_label = getattr(cam_cfg, '_ws_label', '')
+        prefix = f"[{ws_label}] " if ws_label else ""
+
         if cam_cfg.type == "realsense":
             serial = cam_cfg.serial_number or ""
-            display_name = f"{cam_cfg.feature_name} (realsense serial={serial})"
+            display_name = f"{prefix}{cam_cfg.feature_name} (realsense serial={serial})"
             try:
                 pipeline = open_realsense(
                     serial, cam_cfg.width, cam_cfg.height, cam_cfg.fps)
@@ -130,13 +198,13 @@ def main():
 
         elif cam_cfg.type == "opencv":
             device = cam_cfg.get_device_path() or "/dev/video0"
-            display_name = f"{cam_cfg.feature_name} (opencv {device})"
+            display_name = f"{prefix}{cam_cfg.feature_name} (opencv {device})"
             cap = open_opencv(
                 device, cam_cfg.width, cam_cfg.height, cam_cfg.fps, cam_cfg.fourcc)
             if not cap.isOpened():
                 print(f"[FAIL] {display_name}: cannot open")
                 continue
-            cam_data_list.append({
+            cam_entry = {
                 "display_name": display_name,
                 "type": "opencv",
                 "color": color,
@@ -144,7 +212,15 @@ def main():
                 "timestamps": collections.deque(maxlen=FPS_WINDOW),
                 "fps_history": collections.deque(maxlen=HISTORY_LEN),
                 "current_fps": 0.0,
-            })
+                "latest_frame": None,
+                "frame_ready": False,
+                "lock": threading.Lock(),
+                "stop_event": threading.Event(),
+            }
+            t = threading.Thread(target=opencv_reader_thread, args=(cam_entry,), daemon=True)
+            t.start()
+            cam_entry["thread"] = t
+            cam_data_list.append(cam_entry)
             print(f"[OK] {display_name}")
 
     if not cam_data_list:
@@ -160,9 +236,11 @@ def main():
                 frame = None
 
                 if cam["type"] == "opencv":
-                    ret, frame = cam["cap"].read()
-                    if not ret:
-                        continue
+                    with cam["lock"]:
+                        if not cam["frame_ready"]:
+                            continue
+                        frame = cam["latest_frame"]
+                        cam["frame_ready"] = False
                 elif cam["type"] == "realsense":
                     try:
                         frames = cam["pipeline"].wait_for_frames(timeout_ms=1000)
@@ -172,6 +250,9 @@ def main():
                     if not color_frame:
                         continue
                     frame = np.asanyarray(color_frame.get_data())
+
+                if frame is None:
+                    continue
 
                 cam["timestamps"].append(time.time())
                 ts = cam["timestamps"]
@@ -196,6 +277,8 @@ def main():
     finally:
         for cam in cam_data_list:
             if cam["type"] == "opencv":
+                cam["stop_event"].set()
+                cam["thread"].join(timeout=1.0)
                 cam["cap"].release()
             elif cam["type"] == "realsense":
                 cam["pipeline"].stop()

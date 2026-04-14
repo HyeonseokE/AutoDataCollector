@@ -292,24 +292,34 @@ class MultiArmRecorder:
             gripper_binary = 1.0 if gripper_pos > 0 else 0.0
             frame[f"{prefix}_observation.gripper_binary"] = np.asarray([gripper_binary], dtype=np.float32)
 
-            # Radian state/action (5 arm joints)
+            # Hardware-independent radian (URDF 0° 기준) — arm 5D + gripper 1D, same formula
+            state_key = f"observation.state.{prefix}_radian_urdf0"
+            action_key = f"action.{prefix}_radian_urdf0"
             if arm.calibration_limits is not None:
                 try:
+                    g_half = getattr(arm, "gripper_half_range_rad", 0.0)
+                    g_offset = getattr(arm, "gripper_offset_norm", 0.0)
+
                     rad_state = arm.calibration_limits.normalized_to_radians(state[:5])
                     rad_action = arm.calibration_limits.normalized_to_radians(action[:5])
-                    # Pad to 6 (include gripper as-is)
-                    frame[f"observation.radian.{prefix}_state"] = np.append(
-                        rad_state, state[5]
-                    ).astype(np.float32)
-                    frame[f"observation.radian.{prefix}_action"] = np.append(
-                        rad_action, action[5]
-                    ).astype(np.float32)
+
+                    gripper_state_norm = float(state[5]) if len(state) > 5 else 0.0
+                    gripper_action_norm = float(action[5]) if len(action) > 5 else 0.0
+                    gripper_state_rad = (
+                        ((gripper_state_norm - g_offset) / 100.0) * g_half if g_half > 0.0 else 0.0
+                    )
+                    gripper_action_rad = (
+                        ((gripper_action_norm - g_offset) / 100.0) * g_half if g_half > 0.0 else 0.0
+                    )
+
+                    frame[state_key] = np.append(rad_state, gripper_state_rad).astype(np.float32)
+                    frame[action_key] = np.append(rad_action, gripper_action_rad).astype(np.float32)
                 except Exception:
-                    frame[f"observation.radian.{prefix}_state"] = np.zeros(NUM_JOINTS, dtype=np.float32)
-                    frame[f"observation.radian.{prefix}_action"] = np.zeros(NUM_JOINTS, dtype=np.float32)
+                    frame[state_key] = np.zeros(NUM_JOINTS, dtype=np.float32)
+                    frame[action_key] = np.zeros(NUM_JOINTS, dtype=np.float32)
             else:
-                frame[f"observation.radian.{prefix}_state"] = np.zeros(NUM_JOINTS, dtype=np.float32)
-                frame[f"observation.radian.{prefix}_action"] = np.zeros(NUM_JOINTS, dtype=np.float32)
+                frame[state_key] = np.zeros(NUM_JOINTS, dtype=np.float32)
+                frame[action_key] = np.zeros(NUM_JOINTS, dtype=np.float32)
 
     # ─────────────────────────────────────────────
     # Properties

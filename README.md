@@ -135,9 +135,9 @@ export OPENAI_API_KEY="your-openai-api-key"       # Optional: for GPT-based judg
 
 **`pipeline_config/paid_api_config.yaml`** — VLM/LLM models for each pipeline stage:
 ```yaml
-codegen_llm_model: "gemini-3.1-flash-lite-preview"      # Scene understanding & object detection (Turn 0~2)
-codegen_session2_model: "gemini-3.1-flash-lite-preview"  # Code generation from context summary (Turn 3)
-detect_objects_model: "gemini-3.1-flash-lite-preview"    # Runtime object re-detection during execution
+codegen_llm_model: "gemini-3-flash-preview"      # Scene understanding & object detection (Turn 0~2)
+codegen_session2_model: "gemini-3-flash-preview"  # Code generation from context summary (Turn 3)
+detect_objects_model: "gemini-3-flash-preview"    # Runtime object re-detection during execution
 judge_vlm_model: "gemini-2.5-flash"                      # Before/after image comparison for task success
 judge_timeout: 0.5                                       # Auto-judge delay (seconds), 0 = wait for manual input
 ```

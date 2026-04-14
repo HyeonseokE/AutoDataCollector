@@ -378,6 +378,9 @@ def run_realtime_detection(
     frame_callback=None,
     skip_workspace_filter: bool = False,
     early_exit: bool = False,
+    use_kalman: bool = True,
+    kalman_process_noise: float = 0.002,
+    kalman_measurement_noise: float = 0.02,
 ):
     """
     실시간 객체 검출 (시각화/비시각화 모드 통합)
@@ -399,6 +402,10 @@ def run_realtime_detection(
                        - Detection 중에도 Recording 가능하게 함
         skip_workspace_filter: True면 workspace 범위 필터링 건너뜀 (멀티 로봇용)
         early_exit: True면 모든 객체 검출 즉시 종료 (skill용), False면 timeout까지 대기 (파이프라인용)
+        use_kalman: True면 pix2robot 출력 좌표에 3D 칼만 필터 적용 (시계열 노이즈 감쇄).
+                   객체는 정적이라 가정. False면 raw 변환 결과 사용.
+        kalman_process_noise: 프로세스 노이즈 표준편차 (m). 정적 물체 기본값 0.002.
+        kalman_measurement_noise: 측정 노이즈 표준편차 (m). pix2robot 대략 오차 0.02.
 
     Note:
         Workspace overlay는 항상 표시됩니다.
@@ -478,6 +485,24 @@ def run_realtime_detection(
 
     if pix2robot is None:
         print("[Warning] No Pix2Robot calibration found! Robot coordinates will be unavailable.")
+
+    # Kalman filter 초기화 (pix2robot 출력 시계열 smoothing)
+    kalman_tracker = None
+    if use_kalman and pix2robot is not None:
+        try:
+            from pix2robot_calibrator import MultiObjectKalmanTracker
+            kalman_tracker = MultiObjectKalmanTracker(
+                process_noise=kalman_process_noise,
+                measurement_noise=kalman_measurement_noise,
+            )
+            print(
+                f"[System] Kalman filter enabled "
+                f"(process_noise={kalman_process_noise}m, "
+                f"measurement_noise={kalman_measurement_noise}m)"
+            )
+        except Exception as e:
+            print(f"[System] Kalman filter unavailable: {e}")
+            kalman_tracker = None
 
     # Workspace 로드
     print("[System] Loading workspace...")
@@ -582,11 +607,28 @@ def run_realtime_detection(
                         try:
                             obj_depth = camera.get_depth_at_pixel(cx, cy, depth) if depth is not None else None
                             pos = pix2robot.pixel_to_robot(cx, cy, depth_m=obj_depth)
-                            position_m = np.array(pos)
+                            position_m = np.array(pos, dtype=np.float64)
+
+                            # Kalman 필터 적용 (시계열 노이즈 감쇄, confidence 가중치)
+                            if kalman_tracker is not None:
+                                position_m = kalman_tracker.update(
+                                    matched_query,
+                                    position_m,
+                                    confidence=float(det.confidence),
+                                )
+
                             if unit == "m":
-                                robot_coords = tuple(pos)
+                                robot_coords = (
+                                    float(position_m[0]),
+                                    float(position_m[1]),
+                                    float(position_m[2]),
+                                )
                             else:
-                                robot_coords = (pos[0] * 100.0, pos[1] * 100.0, pos[2] * 100.0)
+                                robot_coords = (
+                                    float(position_m[0]) * 100.0,
+                                    float(position_m[1]) * 100.0,
+                                    float(position_m[2]) * 100.0,
+                                )
                         except Exception:
                             pass
 
@@ -722,6 +764,35 @@ def run_realtime_detection(
             print("[System] Cleanup complete (camera stopped)")
         else:
             print("[System] Cleanup complete (shared camera kept alive)")
+
+    # Kalman 최종 상태 반영: detection 루프 내에선 "best-confidence 프레임의 smoothed 값"만 저장됨.
+    # 루프 종료 시점의 최종 필터 상태가 모든 측정을 통합한 결과이므로 이것을 사용.
+    if kalman_tracker is not None:
+        update_counts = kalman_tracker.update_counts()
+        for q in queries:
+            final_state = kalman_tracker.get(q)
+            if final_state is None or last_positions.get(q) is None:
+                continue
+            n_updates = update_counts.get(q, 0)
+            if unit == "m":
+                smoothed = (
+                    float(final_state[0]),
+                    float(final_state[1]),
+                    float(final_state[2]),
+                )
+            else:
+                smoothed = (
+                    float(final_state[0]) * 100.0,
+                    float(final_state[1]) * 100.0,
+                    float(final_state[2]) * 100.0,
+                )
+            prev = last_positions[q]
+            last_positions[q] = smoothed
+            print(
+                f"[Kalman] {q}: {n_updates} updates, "
+                f"pre=[{prev[0]:.4f}, {prev[1]:.4f}, {prev[2]:.4f}] → "
+                f"post=[{smoothed[0]:.4f}, {smoothed[1]:.4f}, {smoothed[2]:.4f}] {unit}"
+            )
 
     # Z값 보정: z > 50cm인 경우 9cm로 하드코딩 (depth 센서 오류 보정)
     for q in queries:

@@ -779,7 +779,13 @@ class ForwardAndResetPipeline(BasePipeline):
             return False
 
     def _get_task_runner(self):
-        """TaskRunner 인스턴스 반환 (lazy init)."""
+        """TaskRunner 인스턴스 반환 (lazy init).
+
+        Note: 캐시된 runner가 있어도 recorder는 매 호출마다 현재 상태로 동기화함.
+              이유: _restore_to_seed 등에서 self.record_dataset을 일시적으로 False로
+                   바꾸는 케이스가 있어, 그 시점에 처음 캐싱되면 영구적으로
+                   recorder=None으로 굳어버리는 stale cache 버그가 발생.
+        """
         if not hasattr(self, '_task_runner') or self._task_runner is None:
             from pipeline.task_runner import SingleArmTaskRunner
             skills = self._create_skills()
@@ -790,6 +796,11 @@ class ForwardAndResetPipeline(BasePipeline):
                 camera=self.camera,
                 recording_fps=self.recording_fps,
             )
+        else:
+            # 매 호출마다 recorder 동기화 (stale cache 방지)
+            self._task_runner.recorder = self.dataset_recorder if self.record_dataset else None
+            self._task_runner.camera_manager = self.camera_manager
+            self._task_runner.camera = self.camera
         return self._task_runner
 
     def execute_code(self, code: str, positions: Dict, extra_globals: Dict = None) -> bool:
@@ -1532,21 +1543,24 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"  {YELLOW}Skipped (missing images){RESET}")
 
             # 레코딩 모드: Judge 결과에 따라 에피소드 저장/폐기
+            # - TRUE   : 명확히 성공 → 저장
+            # - UNCERTAIN: 판단 불가 (VLM 503/타임아웃 등 API 실패 포함) → 저장 (수동 검토)
+            # - FALSE  : 명확히 실패 → 폐기
+            # API 실패로 인한 데이터 손실 방지를 위해 UNCERTAIN은 보존.
             if self.record_dataset:
-                should_discard = judge_prediction != "TRUE"
-                self._end_episode_recording(discard=should_discard)
+                should_discard = judge_prediction == "FALSE"
+                # _end_episode_recording이 save_episode 전에 buffer snapshot을 떠서 반환
+                episode_df = self._end_episode_recording(discard=should_discard)
 
-                if not should_discard:
+                if not should_discard and episode_df is not None:
                     # Skill recording 시각화 저장 (성공한 에피소드만)
+                    # snapshot이 저장 직전 buffer에서 캡처되므로 parquet footer 미완성 문제 없음
                     try:
                         from record_dataset.visualize_skills import generate_skill_visualizations
-                        dataset = self.dataset_recorder._dataset
-                        dataset._ensure_hf_dataset_loaded()
-                        episode_df = dataset.hf_dataset.to_pandas()
                         saved_viz = generate_skill_visualizations(
                             dataframe=episode_df,
                             save_dir=forward_dir,
-                            episode_index=self.dataset_recorder.episode_count - 1,
+                            episode_index=None,  # snapshot은 단일 episode만 포함
                         )
                         if saved_viz:
                             print(f"  Skill visualizations saved: {len(saved_viz)} files")
@@ -3168,14 +3182,19 @@ class ForwardAndResetPipeline(BasePipeline):
                     print(f"{RED}  → run_forward_and_reset.sh의 NUM_EPISODES와 NUM_RANDOM_SEEDS를 원래 세션 설정으로 맞춰주세요.{RESET}")
             print(f"\n{GREEN}  All batches complete, nothing to resume{RESET}")
         else:
-            # seed 확보 + restore (Batch 0/seed 1은 initial positions이므로 restore 스킵)
-            if first_incomplete > 0:
-                if seed_positions[first_incomplete] is None:
-                    print(f"\n{MAGENTA}{BOLD}  Generating seed_{first_incomplete+1}...{RESET}")
-                    seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
-                if seed_positions[first_incomplete] is not None:
-                    print(f"\n{CYAN}{BOLD}  Restoring to seed_{first_incomplete+1}...{RESET}")
-                    self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
+            # Resume 모드에서는 워크스페이스 상태가 보장되지 않으므로,
+            # 첫 미완료 배치(batch 0 포함)의 seed 위치로 항상 물리적 restore 수행.
+            # - Batch 0의 seed_positions[0]은 _load_resume_state에서 first_episode_positions로 채워짐
+            # - Batch 1+ 의 seed가 누락되면 _generate_seed_positions로 새로 생성
+            if seed_positions[first_incomplete] is None and first_incomplete > 0:
+                print(f"\n{MAGENTA}{BOLD}  Generating seed_{first_incomplete+1}...{RESET}")
+                seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
+            if seed_positions[first_incomplete] is not None:
+                print(f"\n{CYAN}{BOLD}  Restoring to seed_{first_incomplete+1}...{RESET}")
+                self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
+            else:
+                print(f"\n{YELLOW}  [Resume] Warning: seed_{first_incomplete+1} positions unavailable, "
+                      f"skipping physical restore. Workspace must already be in correct state.{RESET}")
 
             # 에피소드 루프
             for episode_idx in range(num_episodes):
@@ -3474,7 +3493,7 @@ def main():
         "--detect-model",
         type=str,
         default=None,
-        help="VLM model for detect_objects skill (default: uses gemini-3.1-flash-lite-preview)"
+        help="VLM model for detect_objects skill (default: uses gemini-3-flash-preview)"
     )
 
     parser.add_argument(

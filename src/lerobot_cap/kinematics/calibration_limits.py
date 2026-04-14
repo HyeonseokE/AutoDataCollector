@@ -217,6 +217,44 @@ def load_calibration_limits(
     )
 
 
+def load_gripper_radian_params(calibration_file: str) -> Tuple[float, float]:
+    """
+    Gripper 전용 (half_range_radians, offset_normalized) 를 반환.
+
+    load_calibration_limits() 와 완전히 동일한 수식을 단일 관절 버전으로 재사용.
+    RecordingContext 의 6D radian 변환에서 사용.
+
+    Returns:
+        (half_range_rad, offset_normalized)
+        gripper 엔트리가 없으면 (0.0, 0.0) — 이 경우 변환은 비활성으로 처리.
+    """
+    with open(calibration_file, 'r') as f:
+        calib = json.load(f)
+
+    motor = calib.get("gripper")
+    if motor is None:
+        motor = calib.get("motor_6")
+    if motor is None:
+        return 0.0, 0.0
+
+    rmin = motor['range_min']
+    rmax = motor['range_max']
+    drive_mode = motor.get('drive_mode', 0)
+    encoder_range = rmax - rmin
+
+    if encoder_range <= 0:
+        return 0.0, 0.0
+
+    half_range_rad = float(np.radians(encoder_range * 360.0 / 4096.0) / 2.0)
+
+    HALF_TURN = 2048  # URDF 0° encoder value after homing
+    offset_normalized = ((HALF_TURN - rmin) / encoder_range) * 200 - 100
+    if drive_mode == 1:
+        offset_normalized = -offset_normalized
+
+    return half_range_rad, float(offset_normalized)
+
+
 def compare_limits(
     calibration_file: str,
     urdf_lower: np.ndarray,

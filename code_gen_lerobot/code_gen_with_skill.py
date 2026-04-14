@@ -958,7 +958,7 @@ def lerobot_code_gen_multi_turn(
         else:
             codegen_system_prompt = CODEGEN_SYSTEM_PROMPT
 
-        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=codegen_system_prompt, thinking_budget=10000)
+        codegen_chat, codegen_config = gemini_chat_start(session2_model, system_prompt=codegen_system_prompt, thinking_budget=3000)
 
         if robot_ids and len(robot_ids) >= 2:
             from .multi_arm.forward_execution.turn3_prompt import multi_arm_turn3_codegen_prompt

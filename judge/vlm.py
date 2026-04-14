@@ -229,7 +229,8 @@ def _call_gemini_vlm(
     start_time = time.time()
 
     try:
-        max_retries = 3
+        max_retries = 10
+        retry_delay = 10  # seconds (fixed)
         for attempt in range(max_retries + 1):
             try:
                 response = client.models.generate_content(
@@ -240,10 +241,13 @@ def _call_gemini_vlm(
                 break
             except (ClientError, ServerError) as e:
                 err_str = str(e)
-                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str) and attempt < max_retries:
-                    delay = 30 * (2 ** attempt)
-                    print(f"  [Gemini VLM] Rate limit, retrying in {delay}s...")
-                    time.sleep(delay)
+                is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                is_unavailable = "503" in err_str or "UNAVAILABLE" in err_str
+                if (is_rate_limit or is_unavailable) and attempt < max_retries:
+                    reason = "Rate limit (429)" if is_rate_limit else "503 Unavailable"
+                    print(f"  [Gemini VLM] {reason}, retrying in {retry_delay}s... "
+                          f"(attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
                 else:
                     raise
 

@@ -23,8 +23,7 @@ import draccus
 import torch
 from safetensors.torch import load_file, save_file
 
-from lerobot.datasets.io_utils import write_json
-from lerobot.datasets.utils import flatten_dict, unflatten_dict
+from lerobot.datasets.utils import flatten_dict, unflatten_dict, write_json
 from lerobot.utils.constants import (
     OPTIMIZER_PARAM_GROUPS,
     OPTIMIZER_STATE,

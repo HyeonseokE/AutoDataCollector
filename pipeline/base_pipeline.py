@@ -39,17 +39,60 @@ class BasePipeline:
             except Exception as e:
                 print(f"[Recording] Warning: Failed to start episode: {e}")
 
-    def _end_episode_recording(self, discard: bool = False) -> None:
-        """에피소드 레코딩 종료."""
-        if self.dataset_recorder and self.record_dataset:
-            try:
-                info = self.dataset_recorder.end_episode(discard=discard)
-                if not discard:
-                    print(f"[Recording] Episode saved: {info.get('num_frames', 0)} frames")
-                else:
-                    print(f"[Recording] Episode discarded")
-            except Exception as e:
-                print(f"[Recording] Warning: Failed to end episode: {e}")
+    def _end_episode_recording(self, discard: bool = False):
+        """에피소드 레코딩 종료.
+
+        Returns:
+            pd.DataFrame | None: discard=False일 때 직전 에피소드의 frame DataFrame.
+                                  visualization 등 후처리용. discard=True거나 실패 시 None.
+        """
+        if not (self.dataset_recorder and self.record_dataset):
+            return None
+        try:
+            # save_episode() 전에 buffer snapshot 캡처 (visualization 용)
+            buffer_df = None
+            if not discard:
+                buffer_df = self._snapshot_episode_buffer()
+
+            info = self.dataset_recorder.end_episode(discard=discard)
+            if not discard:
+                print(f"[Recording] Episode saved: {info.get('num_frames', 0)} frames")
+            else:
+                print(f"[Recording] Episode discarded")
+            return buffer_df
+        except Exception as e:
+            print(f"[Recording] Warning: Failed to end episode: {e}")
+            return None
+
+    def _snapshot_episode_buffer(self):
+        """현재 에피소드 buffer를 pandas DataFrame으로 변환 (save_episode 전 호출).
+
+        신 LeRobot 아키텍처는 save_episode() 후 parquet footer가 안 써져서
+        외부에서 다시 읽으면 ArrowInvalid가 발생함. 따라서 buffer가 살아있는
+        시점에 in-memory snapshot을 떠두는 것이 가장 안전.
+        """
+        try:
+            import pandas as pd
+            ds = self.dataset_recorder._dataset
+            writer = getattr(ds, "writer", None)
+            if writer is None or writer.episode_buffer is None:
+                return None
+            buf = writer.episode_buffer
+            n = buf.get("size", 0)
+            if n <= 0:
+                return None
+            # buf는 dict[key -> list], 모든 list가 길이 n인 컬럼들 + 메타키 (size, episode_index 등)
+            cols = {}
+            for k, v in buf.items():
+                if isinstance(v, list) and len(v) == n:
+                    cols[k] = v
+            # episode_index 컬럼 보정 (visualize_skills가 필터링에 사용)
+            if "episode_index" not in cols and "episode_index" in buf:
+                cols["episode_index"] = [buf["episode_index"]] * n
+            return pd.DataFrame(cols)
+        except Exception as e:
+            print(f"[Recording] Buffer snapshot failed: {e}")
+            return None
 
     def _install_recording_signal_handler(self) -> None:
         """Ctrl+C 시 데이터셋 finalize() 호출을 보장하는 signal handler 등록."""

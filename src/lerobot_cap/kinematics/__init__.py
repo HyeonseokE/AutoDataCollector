@@ -11,6 +11,7 @@ from lerobot_cap.kinematics.fk_solver import FKSolver
 from lerobot_cap.kinematics.calibration_limits import (
     CalibrationJointLimits,
     load_calibration_limits,
+    load_gripper_radian_params,
     compare_limits,
     print_limits_comparison,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "FKSolver",
     "CalibrationJointLimits",
     "load_calibration_limits",
+    "load_gripper_radian_params",
     "compare_limits",
     "print_limits_comparison",
 ]

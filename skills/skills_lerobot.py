@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from lerobot_cap.hardware import FeetechController
 from lerobot_cap.hardware.calibration import MotorCalibration
-from lerobot_cap.kinematics import KinematicsEngine, load_calibration_limits
+from lerobot_cap.kinematics import KinematicsEngine, load_calibration_limits, load_gripper_radian_params
 from lerobot_cap.planning import TrajectoryPlanner
 from lerobot_cap.compensation import AdaptiveCompensator, GravitySagCompensator
 from lerobot_cap.workspace import BaseWorkspace
@@ -104,7 +104,7 @@ class LeRobotSkills:
         pick_offset: float = 0.015,  # Pick/place offset from object top (meters, 1.5cm)
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
-        detect_model: str = "gemini-3.1-flash-lite-preview",  # VLM model for detect_objects
+        detect_model: str = "gemini-3-flash-preview",  # VLM model for detect_objects
     ):
         self.robot_config_path = Path(robot_config)
         self.frame = frame
@@ -255,10 +255,16 @@ class LeRobotSkills:
 
         # Load calibration limits
         calibration_file = self.config.get("calibration_file")
+        # Gripper radian params (half_range_rad, offset_normalized) — for 6D radian logging
+        self.gripper_half_range_rad: float = 0.0
+        self.gripper_offset_norm: float = 0.0
         if calibration_file and Path(calibration_file).exists():
             self.calibration_limits = load_calibration_limits(
                 calibration_file,
                 joint_names=ik_joint_names,
+            )
+            self.gripper_half_range_rad, self.gripper_offset_norm = load_gripper_radian_params(
+                calibration_file,
             )
             self._log(f"  Calibration limits loaded: {calibration_file}")
 
@@ -372,6 +378,8 @@ class LeRobotSkills:
             RecordingContext.set_kinematics(
                 kinematics=self.kinematics,
                 calibration_limits=self.calibration_limits,
+                gripper_half_range_rad=self.gripper_half_range_rad,
+                gripper_offset_norm=self.gripper_offset_norm,
             )
 
         self.is_connected = True

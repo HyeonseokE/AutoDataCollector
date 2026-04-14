@@ -88,13 +88,16 @@ ROBOT_IDS=(0)
 # INSTRUCTION="pick up the red block and place it on the blue dish"
 # RESET_INSTRUCTION=""
 
+INSTRUCTION="pick each colored block and place it on the dish of the same color"
+RESET_INSTRUCTION=""
+
 ## stack2
 # INSTRUCTION="stack the blocks in the order of red and yellow"
 # RESET_INSTRUCTION=""
 
 ## stack3
-INSTRUCTION="stack the blocks in the order of red and green, blue."
-RESET_INSTRUCTION=""
+# INSTRUCTION="stack the blocks in the order of red and green, blue."
+# RESET_INSTRUCTION=""
 
 ## distribute chocolatepies
 # INSTRUCTION="pick up the red block and place it on the blue dish."
@@ -142,7 +145,7 @@ RECORD_DATASET=true
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
 # RESUME_SESSION="./results/distribute_chocolatepies"
-RESUME_SESSION=""
+# RESUME_SESSION=""
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

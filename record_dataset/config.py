@@ -135,13 +135,13 @@ def get_enabled_cameras() -> List[CameraConfigRecord]:
 # =============================================================================
 
 # Observation feature keys (FK 기반 EE 자세 등)
+# NOTE: "action.radian_urdf0" 는 action 쪽 최상위 feature 이지만, 계산 & enable 토글을
+# observation_features 경로에서 함께 처리하기 위해 여기에 포함.
 OBSERVATION_FEATURE_KEYS = [
     "observation.ee_pos.robot_xyzrpy",
     "observation.gripper_binary",
-    "observation.radian.state",
-    "observation.radian.action",
-    "observation.radian.state_urdf0",
-    "observation.radian.action_urdf0",
+    "observation.state.radian_urdf0",
+    "action.radian_urdf0",
 ]
 
 
@@ -247,17 +247,15 @@ def load_observation_features_from_yaml(yaml_path: str = None) -> Dict[str, bool
         if isinstance(ep, bool):
             ep = {"robot_xyzrpy": ep}
 
-        rd = of.get("radian", {})
+        rd = of.get("radian_urdf0", {})
         if isinstance(rd, bool):
-            rd = {"state": rd, "action": rd, "state_urdf0": rd, "action_urdf0": rd}
+            rd = {"state": rd, "action": rd}
 
         return {
             "observation.ee_pos.robot_xyzrpy": ep.get("robot_xyzrpy", False),
             "observation.gripper_binary": of.get("gripper_binary", False),
-            "observation.radian.state": rd.get("state", False),
-            "observation.radian.action": rd.get("action", False),
-            "observation.radian.state_urdf0": rd.get("state_urdf0", False),
-            "observation.radian.action_urdf0": rd.get("action_urdf0", False),
+            "observation.state.radian_urdf0": rd.get("state", False),
+            "action.radian_urdf0": rd.get("action", False),
         }
     except Exception as e:
         print(f"[Config] Warning: Failed to load observation_features from {yaml_path}: {e}")
@@ -363,7 +361,8 @@ def build_dataset_features(
     for cam in cameras:
         features[cam.to_feature_key()] = cam.to_feature_schema()
 
-    # Observation features (FK 기반 EE 자세 등, enabled인 것만 추가)
+    # Observation & hardware-independent features (enabled인 것만 추가)
+    # NOTE: action.radian_urdf0 는 action 쪽 최상위 feature 이지만, obs_enabled 로 함께 토글.
     obs_schemas = {
         "observation.ee_pos.robot_xyzrpy": {
             "dtype": "float32", "shape": (6,),
@@ -373,19 +372,11 @@ def build_dataset_features(
             "dtype": "float32", "shape": (1,),
             "names": None,
         },
-        "observation.radian.state": {
+        "observation.state.radian_urdf0": {
             "dtype": "float32", "shape": (NUM_JOINTS,),
             "names": JOINT_NAMES,
         },
-        "observation.radian.action": {
-            "dtype": "float32", "shape": (NUM_JOINTS,),
-            "names": JOINT_NAMES,
-        },
-        "observation.radian.state_urdf0": {
-            "dtype": "float32", "shape": (NUM_JOINTS,),
-            "names": JOINT_NAMES,
-        },
-        "observation.radian.action_urdf0": {
+        "action.radian_urdf0": {
             "dtype": "float32", "shape": (NUM_JOINTS,),
             "names": JOINT_NAMES,
         },
@@ -510,11 +501,11 @@ def build_multi_arm_features(
                 "dtype": "float32", "shape": (1,),
                 "names": None,
             },
-            f"observation.radian.{prefix}_state": {
+            f"observation.state.{prefix}_radian_urdf0": {
                 "dtype": "float32", "shape": (NUM_JOINTS,),
                 "names": arm_joint_names,
             },
-            f"observation.radian.{prefix}_action": {
+            f"action.{prefix}_radian_urdf0": {
                 "dtype": "float32", "shape": (NUM_JOINTS,),
                 "names": arm_joint_names,
             },

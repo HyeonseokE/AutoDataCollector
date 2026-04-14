@@ -113,6 +113,11 @@ def main():
     print(f"\n[2/5] Configuring policy...")
     features = dataset_to_policy_features(metadata.features)
 
+    # Hardware-independent 학습: 정규화 단위의 legacy 키(observation.state, action)는
+    # 데이터셋에 남지만 policy 입출력에선 제외하고 radian_urdf0 버전만 사용.
+    _LEGACY_EXCLUDE = {"observation.state", "action"}
+    features = {k: f for k, f in features.items() if k not in _LEGACY_EXCLUDE}
+
     output_features = {k: f for k, f in features.items() if f.type is FeatureType.ACTION}
     input_features = {k: f for k, f in features.items() if k not in output_features}
 
@@ -126,10 +131,12 @@ def main():
     )
 
     # Setup delta_timestamps
+    # NOTE: state/action 을 URDF 0° radian 으로 사용 — 하드웨어 독립 학습 목적.
+    # 배포 시 target 로봇의 radians_to_normalized() 로 역변환 필요.
     delta_timestamps = {
         "observation.images.front": [i / metadata.fps for i in cfg.observation_delta_indices],
-        "observation.state": [i / metadata.fps for i in cfg.observation_delta_indices],
-        "action": [i / metadata.fps for i in cfg.action_delta_indices],
+        "observation.state.radian_urdf0": [i / metadata.fps for i in cfg.observation_delta_indices],
+        "action.radian_urdf0": [i / metadata.fps for i in cfg.action_delta_indices],
     }
 
     # Load dataset

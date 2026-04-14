@@ -82,7 +82,17 @@ class EagleBackbone(nn.Module):
             print(f"[GROOT] Warning: failed to prepare Eagle cache for backbone: {exc}")
 
         config = AutoConfig.from_pretrained(str(cache_dir), trust_remote_code=True)
-        self.eagle_model = AutoModel.from_config(config, trust_remote_code=True)
+        # Force eager attention everywhere (no flash_attn installed)
+        def _force_eager(cfg):
+            if hasattr(cfg, "_attn_implementation"):
+                cfg._attn_implementation = "eager"
+            if hasattr(cfg, "attn_implementation"):
+                cfg.attn_implementation = "eager"
+            for sub in ("vision_config", "text_config", "language_config"):
+                if hasattr(cfg, sub) and getattr(cfg, sub) is not None:
+                    _force_eager(getattr(cfg, sub))
+        _force_eager(config)
+        self.eagle_model = AutoModel.from_config(config, trust_remote_code=True, attn_implementation="eager")
 
         if project_to_dim is not None:
             self.eagle_linear = torch.nn.Linear(2048, project_to_dim)
@@ -176,13 +186,13 @@ N_COLOR_CHANNELS = 3
 @dataclass
 class GR00TN15Config(PretrainedConfig):
     model_type = "gr00t_n1_5"
-    backbone_cfg: dict = field(init=False, metadata={"help": "Backbone configuration."})
+    backbone_cfg: dict = field(default=None, init=False, metadata={"help": "Backbone configuration."})
 
-    action_head_cfg: dict = field(init=False, metadata={"help": "Action head configuration."})
+    action_head_cfg: dict = field(default=None, init=False, metadata={"help": "Action head configuration."})
 
-    action_horizon: int = field(init=False, metadata={"help": "Action horizon."})
+    action_horizon: int = field(default=None, init=False, metadata={"help": "Action horizon."})
 
-    action_dim: int = field(init=False, metadata={"help": "Action dimension."})
+    action_dim: int = field(default=None, init=False, metadata={"help": "Action dimension."})
     compute_dtype: str = field(default="float32", metadata={"help": "Compute dtype."})
 
     def __init__(self, **kwargs):
@@ -195,6 +205,7 @@ class GR00TN15Config(PretrainedConfig):
 class GR00TN15(PreTrainedModel):
     supports_gradient_checkpointing = True
     config_class = GR00TN15Config
+    all_tied_weights_keys = {}
     """
     we expect the backbone output to have a key 'backbone_features' with shape (batch_size, n, hidden_size)
     here n is variable and can be e.g. time, 1 or user specified

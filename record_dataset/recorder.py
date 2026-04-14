@@ -143,13 +143,15 @@ class DatasetRecorder:
             dataset_path = self.root if self.root else HF_LEROBOT_HOME / self.repo_id
 
             if self.resume and dataset_path.exists():
-                # Resume: 기존 데이터셋을 열어서 에피소드 append
+                # Resume: open existing dataset for append (upstream lerobot v0.5.1 API)
                 print(f"[DatasetRecorder] Resume mode: opening existing dataset")
                 print(f"  Path: {dataset_path}")
                 self._dataset = LeRobotDataset(
-                    repo_id=self.repo_id,
-                    root=self.root,
+                    self.repo_id,
+                    root=str(dataset_path),
                 )
+                if self.image_writer_threads:
+                    self._dataset.start_image_writer(num_threads=self.image_writer_threads)
                 self._episode_count = self._dataset.num_episodes
                 print(f"[DatasetRecorder] Resumed: {self._episode_count} existing episodes")
             elif dataset_path.exists():

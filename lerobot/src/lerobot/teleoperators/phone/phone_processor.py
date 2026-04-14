@@ -17,9 +17,8 @@
 from dataclasses import dataclass, field
 
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
-from lerobot.processor import ProcessorStepRegistry, RobotActionProcessorStep
+from lerobot.processor import ProcessorStepRegistry, RobotAction, RobotActionProcessorStep
 from lerobot.teleoperators.phone.config_phone import PhoneOS
-from lerobot.types import RobotAction
 
 
 @ProcessorStepRegistry.register("map_phone_action_to_robot_action")

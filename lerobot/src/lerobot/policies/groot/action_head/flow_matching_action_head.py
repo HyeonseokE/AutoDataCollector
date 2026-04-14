@@ -205,7 +205,11 @@ class FlowmatchingActionHead(nn.Module):
             self.position_embedding = nn.Embedding(config.max_seq_len, self.input_embedding_dim)
             nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
 
-        self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
+        with torch.device("cpu"):
+            self.beta_dist = Beta(
+                torch.tensor(float(config.noise_beta_alpha)),
+                torch.tensor(float(config.noise_beta_beta)),
+            )
         self.num_timestep_buckets = config.num_timestep_buckets
         self.config = config
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)

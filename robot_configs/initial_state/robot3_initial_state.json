@@ -6,7 +6,7 @@
     72.75862121582031,
     -0.21978022158145905
   ],
-  "gripper_normalized": -100.0,
+  "gripper_normalized": 0.0,
   "recorded_at": "2026-03-25T20:18:04.086632",
   "robot_id": "robot3",
   "config_file": "robot_configs/robot/so101_robot3.yaml",

@@ -6,11 +6,63 @@ Judge 결과를 시각화하는 UI 및 이미지 저장 기능
 
 import cv2
 import numpy as np
+import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from datetime import datetime
 import json
 import textwrap
+
+
+# Headless detection: disable GUI if no display or if cv2.imshow is unavailable.
+# Fails closed once per process so we don't retry and re-spam warnings.
+_HEADLESS: Optional[bool] = None
+
+
+def _gui_available() -> bool:
+    """Return True if cv2 GUI calls are usable in this environment.
+
+    Caches the result so we only probe once per process.
+    """
+    global _HEADLESS
+    if _HEADLESS is not None:
+        return not _HEADLESS
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        _HEADLESS = True
+        print("[Judge UI] No DISPLAY/WAYLAND_DISPLAY — running headless (skipping cv2 windows).")
+        return False
+    try:
+        # Probe: try creating and destroying a window. If OpenCV was built without
+        # GTK/Qt/Cocoa support, this raises cv2.error.
+        cv2.namedWindow("__judge_probe__", cv2.WINDOW_NORMAL)
+        cv2.destroyWindow("__judge_probe__")
+    except cv2.error as e:
+        _HEADLESS = True
+        print(f"[Judge UI] OpenCV GUI unavailable ({e.__class__.__name__}): skipping cv2 windows.")
+        return False
+    _HEADLESS = False
+    return True
+
+
+def _safe_show_and_wait(window_name: str, image: np.ndarray, wait_key: bool, timeout_ms: int, label: str) -> None:
+    """Show a cv2 window with timeout, silently no-op on headless/failed-GUI systems."""
+    if not _gui_available():
+        return
+    try:
+        cv2.imshow(window_name, image)
+        if wait_key:
+            if timeout_ms > 0:
+                print(f"\n[{label}] Window will close in {timeout_ms/1000:.1f}s (or press any key)...")
+                cv2.waitKey(timeout_ms)
+            else:
+                print(f"\n[{label}] Press any key to close the window...")
+                cv2.waitKey(0)
+            cv2.destroyWindow(window_name)
+    except cv2.error as e:
+        # If probe passed but imshow still fails (e.g., display lost mid-run), disable for rest of session.
+        global _HEADLESS
+        _HEADLESS = True
+        print(f"[{label}] cv2 window error ({e.__class__.__name__}); continuing headless.")
 
 
 def create_result_image(
@@ -170,16 +222,7 @@ def show_judge_result(
     )
 
     window_name = "Judge Result - Press any key to close"
-    cv2.imshow(window_name, result_image)
-
-    if wait_key:
-        if timeout_ms > 0:
-            print(f"\n[Judge UI] Window will close in {timeout_ms/1000:.1f}s (or press any key)...")
-            cv2.waitKey(timeout_ms)
-        else:
-            print("\n[Judge UI] Press any key to close the window...")
-            cv2.waitKey(0)
-        cv2.destroyWindow(window_name)
+    _safe_show_and_wait(window_name, result_image, wait_key, timeout_ms, label="Judge UI")
 
     return result_image
 
@@ -474,16 +517,7 @@ def show_reset_judge_result(
 
     mode_str = "Original" if reset_mode == "original" else "Random"
     window_name = f"Reset Judge ({mode_str}) - Press any key to close"
-    cv2.imshow(window_name, result_image)
-
-    if wait_key:
-        if timeout_ms > 0:
-            print(f"\n[Reset Judge UI] Window will close in {timeout_ms/1000:.1f}s (or press any key)...")
-            cv2.waitKey(timeout_ms)
-        else:
-            print("\n[Reset Judge UI] Press any key to close the window...")
-            cv2.waitKey(0)
-        cv2.destroyWindow(window_name)
+    _safe_show_and_wait(window_name, result_image, wait_key, timeout_ms, label="Reset Judge UI")
 
     return result_image
 

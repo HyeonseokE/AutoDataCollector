@@ -244,10 +244,14 @@ class FeetechController(BaseController):
         return positions
 
     def _normalize(self, positions_raw: np.ndarray) -> np.ndarray:
-        """Convert raw encoder values to normalized (-100 to +100).
+        """Convert raw encoder values to normalized values, matching upstream
+        LeRobot ``motors_bus.py:_normalize``.
 
-        Uses range_min/range_max from calibration to define the physical limits.
-        Maps: range_min → -100, range_max → +100, center → 0
+        Arm joints (motor_id != 6): RANGE_M100_100 → range_min maps to -100,
+        range_max maps to +100. drive_mode=1 flips the sign.
+
+        Gripper (motor_id == 6): RANGE_0_100 → range_min maps to 0, range_max
+        maps to 100. drive_mode=1 mirrors around 50 (``100 - norm``).
         """
         if not self.calibration:
             raise RuntimeError("Calibration not loaded")
@@ -265,18 +269,27 @@ class FeetechController(BaseController):
                 raise ValueError(f"Motor {motor_id}: min and max are identical")
 
             bounded_val = min(max_val, max(min_val, pos_raw))
-            normalized[i] = (((bounded_val - min_val) / (max_val - min_val)) * 200) - 100
 
-            if calib.drive_mode == 1:
-                normalized[i] = -normalized[i]
+            if motor_id == 6:
+                # Gripper: RANGE_0_100
+                n = ((bounded_val - min_val) / (max_val - min_val)) * 100
+                normalized[i] = (100 - n) if calib.drive_mode == 1 else n
+            else:
+                # Arm joints: RANGE_M100_100
+                n = (((bounded_val - min_val) / (max_val - min_val)) * 200) - 100
+                normalized[i] = (-n) if calib.drive_mode == 1 else n
 
         return normalized
 
     def _unnormalize(self, positions_norm: np.ndarray) -> np.ndarray:
-        """Convert normalized (-100 to +100) to raw encoder values.
+        """Convert normalized values back to raw encoder values, matching
+        upstream LeRobot ``motors_bus.py:_unnormalize``.
 
-        Inverse of _normalize():
-        Maps: -100 → range_min, 0 → center, +100 → range_max
+        Arm joints (motor_id != 6): expects input in [-100, +100], drive_mode=1
+        flips the sign before clamping.
+
+        Gripper (motor_id == 6): expects input in [0, 100], drive_mode=1
+        mirrors around 50 (``100 - val``) before clamping.
         """
         if not self.calibration:
             raise RuntimeError("Calibration not loaded")
@@ -290,11 +303,17 @@ class FeetechController(BaseController):
             calib = self.calibration[motor_id]
             min_val, max_val = calib.range_min, calib.range_max
 
-            bounded_norm = min(100.0, max(-100.0, pos_norm))
-            if calib.drive_mode == 1:
-                bounded_norm = -bounded_norm
+            if motor_id == 6:
+                # Gripper: RANGE_0_100
+                v = (100.0 - pos_norm) if calib.drive_mode == 1 else pos_norm
+                bounded = min(100.0, max(0.0, v))
+                raw_val = int((bounded / 100.0) * (max_val - min_val) + min_val)
+            else:
+                # Arm joints: RANGE_M100_100
+                v = (-pos_norm) if calib.drive_mode == 1 else pos_norm
+                bounded = min(100.0, max(-100.0, v))
+                raw_val = int(((bounded + 100) / 200) * (max_val - min_val) + min_val)
 
-            raw_val = int(((bounded_norm + 100) / 200) * (max_val - min_val) + min_val)
             raw[i] = max(min_val, min(max_val, raw_val))
 
         return raw

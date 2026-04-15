@@ -28,7 +28,10 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         """Disconnects from robot hardware. Must be called in a finally block for cleanup."""
 
     def gripper_open(self, duration: float = 1.5, ratio: float = 1.0):
-        """Opens the gripper to the specified ratio.
+        """Opens the gripper to the specified ratio. STANDALONE call (arm stays still).
+
+        Prefer integrated gripper motion via `move_to_position(..., gripper_action="open")`
+        for pick approaches. Use this standalone variant only when the arm must not move.
 
         Args:
             duration: Movement duration in seconds.
@@ -37,7 +40,11 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         """
 
     def gripper_close(self, duration: float = 1.5):
-        """Closes the gripper to grasp an object.
+        """Closes the gripper to grasp an object. STANDALONE call (arm stays still).
+
+        Prefer integrated gripper motion via `move_to_position(..., gripper_action="close")`
+        for place retreats. Use this standalone variant only when the arm must not move
+        (e.g., before execute_push / execute_press where arm is already in position).
         The gripper closes with sufficient force to hold objects up to ~500g.
 
         Args:
@@ -51,7 +58,11 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         """Moves the arm to a safe parking position. Call as the very last skill after task completion."""
 
     def move_to_position(self, position: list[float], duration: float = None,
-                         target_name: str = None) -> bool:
+                         target_name: str = None,
+                         gripper_action: str = None,
+                         gripper_start_fraction: float = 0.0,
+                         gripper_end_fraction: float = 1.0,
+                         gripper_open_ratio: float = 1.0) -> bool:
         """Moves the end-effector to the given XYZ position in world coordinates.
         Use this for approach movements (moving above an object before pick/place),
         retreat movements (lifting after pick/place), and transit movements between objects.
@@ -64,11 +75,31 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             Negative y: towards left
             Positive z: up, towards ceiling (z=0 is table surface)
 
+        INTEGRATED GRIPPER MOTION:
+            Use `gripper_action` to transition the gripper concurrently with the arm motion.
+            This produces ONE skill event (one dataset label) that captures both arm + gripper.
+
+            - gripper_action=None (default): gripper stays at current position (legacy behavior).
+            - gripper_action="open":  gripper opens during the motion.
+                For pick approach, use: gripper_action="open", gripper_start_fraction=0.3
+                (gripper opens during the last 70% of the approach).
+            - gripper_action="close": gripper closes during the motion.
+                For place retreat, use: gripper_action="close", gripper_start_fraction=0.2
+                (gripper closes during the last 80% of the retreat).
+
+            When gripper_action is used, write skill_description as a compound sentence:
+                "Approach <obj> and open gripper"
+                "Retreat from <target> and close gripper"
+
         Args:
             position: Target position [x, y, z] in meters in world frame.
             duration: Movement duration in seconds. Uses default if None.
             target_name: Name of the target object for subgoal labeling in dataset recording.
                 Example: "yellow dice", "blue dish".
+            gripper_action: Optional "open" or "close" for concurrent gripper motion. None = hold.
+            gripper_start_fraction: Fraction of motion duration at which gripper interpolation begins (0.0–1.0).
+            gripper_end_fraction:   Fraction of motion duration at which gripper interpolation ends (0.0–1.0).
+            gripper_open_ratio: Target open ratio when gripper_action="open" (default 1.0 = fully open).
 
         Returns:
             True if movement successful, False if position is outside reachable workspace.
@@ -256,6 +287,9 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                 purple_pos = updated["purple block"]["position"]
             if updated["yellow block"]:
                 target_pos = updated["yellow block"]["position"]
-            # 5. Now pick/place with accurate coordinates
-            skills.execute_pick_object(purple_pos, ...)
+            # 5. Approach with integrated gripper open, then pick
+            skills.move_to_position([purple_pos[0], purple_pos[1], 0.20],
+                                    target_name="purple block",
+                                    gripper_action="open", gripper_start_fraction=0.3)
+            skills.execute_pick_object(purple_pos, object_name="purple block")
         """'''

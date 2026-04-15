@@ -33,13 +33,16 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # -------- policy 설정 --------
-POLICY_PATH="${POLICY_PATH:-skkuprism/test_model_teleop}"   # HF model ID 또는 로컬 체크포인트 경로
+POLICY_PATH="${POLICY_PATH:-skkuprism/test_model_cap}"   # HF model ID 또는 로컬 체크포인트 경로
 POLICY_DEVICE="${POLICY_DEVICE:-cuda}"                # cuda / cpu / mps
 
 # -------- robot 설정 --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"            # so100_follower / so101_follower / koch_follower / ...
 ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM1}"              # 시리얼 포트
-ROBOT_ID="${ROBOT_ID:-so101_robot2}"                # 캘리브레이션 파일용 ID
+ROBOT_ID="${ROBOT_ID:-so101_robot2}"                  # 캘리브레이션 파일용 ID
+# 액션 단위: true=degrees(arm) + gripper 0~100 / false=-100~+100(arm) + gripper 0~100
+# 학습 데이터셋과 반드시 일치해야 함 (불일치 시 로봇 엉뚱한 동작)
+ROBOT_USE_DEGREES="${ROBOT_USE_DEGREES:-false}"
 
 # -------- 카메라 설정 --------
 # 키 이름 = 학습 데이터셋의 카메라 이름 (rename_map 의 source 쪽)
@@ -103,7 +106,7 @@ cat <<EOF
  lerobot : $REPO_DIR/src (PYTHONPATH)
  policy  : $POLICY_PATH
  device  : $POLICY_DEVICE
- robot   : $ROBOT_TYPE ($ROBOT_ID)  port=$ROBOT_PORT
+ robot   : $ROBOT_TYPE ($ROBOT_ID)  port=$ROBOT_PORT  use_degrees=$ROBOT_USE_DEGREES
  cameras : left_wrist($CAM_LEFT_WRIST_TYPE:$CAM_LEFT_WRIST_ID ${CAM_LEFT_WRIST_WIDTH}x${CAM_LEFT_WRIST_HEIGHT}@${CAM_LEFT_WRIST_FPS}fps)
            top($CAM_TOP_TYPE:$CAM_TOP_ID ${CAM_TOP_WIDTH}x${CAM_TOP_HEIGHT}@${CAM_TOP_FPS}fps)
  task    : $TASK
@@ -126,6 +129,7 @@ INFER_ARGS=(
     --robot.type="$ROBOT_TYPE"
     --robot.port="$ROBOT_PORT"
     --robot.id="$ROBOT_ID"
+    --robot.use_degrees="$ROBOT_USE_DEGREES"
     --robot.cameras="$CAMERAS"
     --task="$TASK"
     --duration="$DURATION"

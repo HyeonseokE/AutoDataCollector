@@ -150,25 +150,27 @@ Available object keys:
 
 ```python
 # BOTH ARMS (parallel operation)
+# Pattern order: approach → open → pick → retract → ... → place → retract + close
+# (gripper_control(open) comes AFTER the approach move; do NOT open right after move_to_initial_state)
 pos_left = positions["left_arm"]
 pos_right = positions["right_arm"]
 approach_height = 0.20
 
-# Open both grippers
-skills.gripper_control(left_arm="open", right_arm="open",
-    left_skill_description="Open left gripper", left_verification_question="Is left gripper open?",
-    right_skill_description="Open right gripper", right_verification_question="Is right gripper open?")
-
-# Move both arms to approach positions
+# Move both arms to approach positions FIRST
 left_pick = pos_left["left_object"]["position"]
 right_pick = pos_right["right_object"]["position"]
 skills.move_to_position(
     left_arm=[left_pick[0], left_pick[1], approach_height],
     right_arm=[right_pick[0], right_pick[1], approach_height],
-    left_skill_description="Move left arm above left_object",
+    left_skill_description="Approach left_object",
     left_verification_question="Is left gripper above left_object?",
-    right_skill_description="Move right arm above right_object",
+    right_skill_description="Approach right_object",
     right_verification_question="Is right gripper above right_object?")
+
+# Open both grippers AT the approach position (not before)
+skills.gripper_control(left_arm="open", right_arm="open",
+    left_skill_description="Open left gripper above left_object", left_verification_question="Is left gripper open?",
+    right_skill_description="Open right gripper above right_object", right_verification_question="Is right gripper open?")
 
 # Pick both (descend + grip)
 skills.pick_object(left_arm=left_pick, right_arm=right_pick,
@@ -185,13 +187,24 @@ skills.move_to_position(
     right_skill_description="Retract right arm after pick",
     right_verification_question="Is right arm lifted to approach height?")
 
+# PLACE retreat pattern: after place_object/place_at_pixel, retreat THEN close
+# skills.place_object(...)  # release object
+# skills.move_to_position(left_arm=[..approach..], right_arm=[..approach..], ...)  # retreat
+# skills.gripper_control(left_arm="close", right_arm="close",
+#     left_skill_description="Close left gripper after release", ...,
+#     right_skill_description="Close right gripper after release", ...)
+
 # ONE ARM ONLY (other arm holds position with "wait")
-# Pattern: open → approach → pick → retract → move → place → retract
+# Pattern: approach → open → pick → retract → move → place → retract → close
 skills.move_to_position(
     left_arm="wait",
     right_arm=[right_pick[0], right_pick[1], approach_height],
-    right_skill_description="Move right arm above object",
+    right_skill_description="Approach object with right arm",
     right_verification_question="Is right arm above object?")
+
+skills.gripper_control(left_arm="wait", right_arm="open",
+    right_skill_description="Open right gripper above object",
+    right_verification_question="Is right gripper open?")
 
 skills.pick_object(left_arm="wait", right_arm=right_pick,
     right_object_name="right_object",
@@ -238,15 +251,16 @@ skills.move_to_pixel(
 # Each pick-place of one object = one subtask.
 # After each subtask, re-detect all objects to update positions.
 
-# Subtask 1: pick → retract → move → place → retract
+# Subtask 1: approach → open → pick → retract → move → place → retract → close
 skills.set_subtask("pick A with left arm and place at center of workspace")
-skills.gripper_control(left_arm="open", right_arm="wait", ...)
-skills.move_to_position(left_arm=[...approach above object...], right_arm="wait", ...)  # approach
+skills.move_to_position(left_arm=[...approach above object...], right_arm="wait", ...)  # approach FIRST
+skills.gripper_control(left_arm="open", right_arm="wait", ...)                          # open AT approach
 skills.pick_object(left_arm=pos_left["A"]["position"], right_arm="wait", ...)           # descend + grip
 skills.move_to_position(left_arm=[...approach above object...], right_arm="wait", ...)  # retract (MANDATORY)
 skills.move_to_pixel(left_arm=target_pixel, right_arm="wait", ...)                      # move to target
 skills.place_at_pixel(left_arm=target_pixel, right_arm="wait", ...)                     # descend + release
 skills.move_to_pixel(left_arm=target_pixel, right_arm="wait", ...)                      # retract
+skills.gripper_control(left_arm="close", right_arm="wait", ...)                         # close after retract
 skills.clear_subtask()
 
 # Re-detection (MANDATORY between subtasks)
@@ -278,15 +292,15 @@ skills.clear_subtask()
 # open, approach, lift, retract are YOUR responsibility (same as independent pick/place pattern).
 skills.set_subtask("fold towel — pick top edge, fold to bottom edge")
 
-# 1. Open + approach (before contact — independent is fine)
-skills.gripper_control(left_arm="open", right_arm="open",
-    left_skill_description="Open left gripper", left_verification_question="Is left open?",
-    right_skill_description="Open right gripper", right_verification_question="Is right open?")
+# 1. Approach FIRST, then open grippers at the approach position
 skills.move_to_position(
     left_arm=[top_left[0], top_left[1], approach_height],
     right_arm=[top_right[0], top_right[1], approach_height],
     left_skill_description="Approach left grasp", left_verification_question="Is left above grasp?",
     right_skill_description="Approach right grasp", right_verification_question="Is right above grasp?")
+skills.gripper_control(left_arm="open", right_arm="open",
+    left_skill_description="Open left gripper above grasp", left_verification_question="Is left open?",
+    right_skill_description="Open right gripper above grasp", right_verification_question="Is right open?")
 
 # 2. Pick (descend + grip — contact starts, synchronized)
 skills.bimanual_pick_object(left_arm=top_left, right_arm=top_right, object_name="towel")
@@ -314,15 +328,15 @@ skills.clear_subtask()
 # CARRY pattern (straight-line — for carrying large/heavy objects)
 skills.set_subtask("carry large box to the right side")
 
-# Open + approach (before contact)
-skills.gripper_control(left_arm="open", right_arm="open",
-    left_skill_description="Open left", left_verification_question="Is left open?",
-    right_skill_description="Open right", right_verification_question="Is right open?")
+# Approach FIRST, then open grippers at the approach position
 skills.move_to_position(
     left_arm=[box_left[0], box_left[1], approach_height],
     right_arm=[box_right[0], box_right[1], approach_height],
     left_skill_description="Approach box left", left_verification_question="Is left above box?",
     right_skill_description="Approach box right", right_verification_question="Is right above box?")
+skills.gripper_control(left_arm="open", right_arm="open",
+    left_skill_description="Open left above box", left_verification_question="Is left open?",
+    right_skill_description="Open right above box", right_verification_question="Is right open?")
 
 # Pick (contact starts)
 skills.bimanual_pick_object(left_arm=box_left, right_arm=box_right, object_name="box")
@@ -389,8 +403,9 @@ if __name__ == "__main__":
      (a) Identify the executing arm. (b) Check THAT arm's workspace image (Image 1 = left, Image 2 = right).
      (c) Verify [y, x] is inside the BRIGHT area (cyan arc). (d) If in dark area → shift inward to nearest bright point.
      (e) Add a code comment with reasoning. NEVER use extreme values like [900, 900].
-   - **Pick pattern**: open → approach (move to approach_height above object) → pick_object (descend + grip) → **retract (move back to approach_height — MANDATORY)** → move to next target.
-   - **Place pattern**: move_to_pixel (approach above target) → place_at_pixel (descend + release) → move_to_pixel (retract).
+   - **Pick pattern**: approach (move to approach_height above object) → open (gripper_control at the approach position) → pick_object (descend + grip) → **retract (move back to approach_height — MANDATORY)** → move to next target.
+     - **DO NOT** call `gripper_control(open)` right after `move_to_initial_state()`. Always approach first, then open.
+   - **Place pattern**: move_to_pixel (approach above target) → place_at_pixel (descend + release) → move_to_pixel (retract) → `gripper_control(close)` after retreat.
    - NEVER skip the retract step after pick or place. Without retract, the arm drags the object across the table.
 3. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.

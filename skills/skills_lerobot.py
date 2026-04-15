@@ -79,8 +79,8 @@ class LeRobotSkills:
     Args:
         robot_config: Path to robot configuration YAML file
         frame: Coordinate frame for positions ('base_link' or 'world')
-        gripper_open_pos: Gripper position for open state (normalized, -100 to +100)
-        gripper_close_pos: Gripper position for closed state (normalized)
+        gripper_open_pos: Gripper position for open state (normalized 0 to 100; RANGE_0_100)
+        gripper_close_pos: Gripper position for closed state (normalized 0 to 100)
         movement_duration: Default duration for movements (seconds)
         use_compensation: Enable adaptive compensation
         use_deceleration: Enable end deceleration
@@ -96,7 +96,7 @@ class LeRobotSkills:
         robot_config: str = "robot_configs/robot/so101_robot3.yaml",
         frame: str = "base_link",
         gripper_open_pos: float = 100.0,
-        gripper_close_pos: float = -100.0,
+        gripper_close_pos: float = 0.0,
         movement_duration: float = 3.0,
         use_compensation: bool = True,
         use_deceleration: bool = True,
@@ -763,6 +763,10 @@ class LeRobotSkills:
         target_position: np.ndarray,
         description: str = "",
         kinematics: Optional['KinematicsEngine'] = None,
+        gripper_start_value: Optional[float] = None,
+        gripper_end_value: Optional[float] = None,
+        gripper_start_fraction: float = 0.0,
+        gripper_end_fraction: float = 1.0,
     ) -> bool:
         """Cartesian-space trajectory 실행 (IK 계산된 경로 추종).
 
@@ -774,6 +778,10 @@ class LeRobotSkills:
             target_position: 목표 위치 (base_link frame)
             description: 로그 설명
             kinematics: FK용 KinematicsEngine
+            gripper_start_value: Optional 시작 gripper 값 (normalized). None이면 current 고정 (기존 동작).
+            gripper_end_value:   Optional 목표 gripper 값 (normalized). None이면 gripper 스케줄 비활성.
+            gripper_start_fraction: duration 대비 gripper 보간 시작 시점 (0.0~1.0)
+            gripper_end_fraction:   duration 대비 gripper 보간 종료 시점 (0.0~1.0)
         """
         self._log(f"  {description}")
 
@@ -787,6 +795,21 @@ class LeRobotSkills:
 
         target_reached = False
         reach_time = None
+
+        # Gripper schedule 활성 조건: start/end 값이 모두 주어졌고 duration > 0
+        gripper_schedule_active = (
+            gripper_start_value is not None
+            and gripper_end_value is not None
+            and duration > 1e-6
+        )
+        if gripper_schedule_active:
+            # fraction 안전 정규화
+            gsf = float(np.clip(gripper_start_fraction, 0.0, 1.0))
+            gef = float(np.clip(gripper_end_fraction, 0.0, 1.0))
+            if gef <= gsf:
+                gef = min(1.0, gsf + 1e-6)
+        else:
+            gsf, gef = 0.0, 1.0
 
         while True:
             loop_start = time.perf_counter()
@@ -816,15 +839,28 @@ class LeRobotSkills:
             if self.use_compensation and self.compensator:
                 arm_normalized = self.compensator.compensate(actual_norm, arm_normalized)
 
+            # Gripper command: scheduled interpolation or hold current
+            if gripper_schedule_active:
+                frac = min(elapsed / duration, 1.0)
+                if frac <= gsf:
+                    gripper_cmd = gripper_start_value
+                elif frac >= gef:
+                    gripper_cmd = gripper_end_value
+                else:
+                    local = (frac - gsf) / (gef - gsf)
+                    gripper_cmd = gripper_start_value + local * (gripper_end_value - gripper_start_value)
+            else:
+                gripper_cmd = self.current_gripper_pos
+
             # Send command
             arm_normalized = np.clip(arm_normalized, -99.0, 99.0)
-            full_normalized = np.concatenate([arm_normalized, [self.current_gripper_pos]])
+            full_normalized = np.concatenate([arm_normalized, [gripper_cmd]])
             self.robot.write_positions(full_normalized, normalize=True)
 
             # Inline recording (every iteration = 1 frame at RECORDING_FPS)
             # Traj + Hold 모두 녹화: state=실제 서보, action=명령 목표
             if self.recording_callback is not None:
-                state_full = np.concatenate([actual_norm, [self.current_gripper_pos]])
+                state_full = np.concatenate([actual_norm, [gripper_cmd]])
                 self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
 
             # Progress display
@@ -862,6 +898,10 @@ class LeRobotSkills:
                 print(f"\r  [{'=' * 30}] Done (err: {position_error*1000:.1f}mm)    ")
             else:
                 print(f"\r  [{'=' * 30}] Timeout (err: {position_error*1000:.1f}mm)")
+
+        # Commit final gripper state if schedule was active
+        if gripper_schedule_active:
+            self.current_gripper_pos = gripper_end_value
 
         # Calculate and store final error (use specified kinematics for TCP mode)
         _, final_rad, final_ee = self._get_current_state(kinematics)
@@ -1337,6 +1377,10 @@ class LeRobotSkills:
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
         verification_question: Optional[str] = None,
+        gripper_action: Optional[str] = None,
+        gripper_start_fraction: float = 0.0,
+        gripper_end_fraction: float = 1.0,
+        gripper_open_ratio: float = 1.0,
     ) -> bool:
         """
         Move end-effector to target position with orientation constraints.
@@ -1357,6 +1401,14 @@ class LeRobotSkills:
             target_name: Name of the target object for subgoal labeling (optional).
                         예: "blue dish", "yellow dice"
                         Used for recording skill-level subgoal labels.
+            gripper_action: Optional concurrent gripper motion during this move.
+                           - None (default): gripper holds current position (legacy behavior)
+                           - "close": close gripper alongside arm motion
+                           - "open":  open gripper alongside arm motion (uses gripper_open_ratio)
+            gripper_start_fraction: Fraction of arm duration at which gripper interpolation starts (0.0–1.0).
+            gripper_end_fraction:   Fraction of arm duration at which gripper interpolation ends (0.0–1.0).
+                                    Example: start=0.2, end=1.0 → gripper transitions during last 80% of motion.
+            gripper_open_ratio: Target open ratio when gripper_action="open" (0.0–1.0, clamped by GRIPPER_MAX_RATIO).
 
         Returns:
             True if movement successful
@@ -1491,19 +1543,57 @@ class LeRobotSkills:
             if self.gravity_sag is not None:
                 self.compensator.gravity_sag = self.gravity_sag
 
+        # Compute gripper target + skill metadata based on gripper_action
+        # (Reuses same constants as gripper_open/gripper_close for consistency.)
+        gripper_start_value: Optional[float] = None
+        gripper_end_value: Optional[float] = None
+        goal_gripper_for_recording = self.current_gripper_pos
+
+        if gripper_action == "close":
+            GRIPPER_CLOSE_RATIO = 1.0  # same as gripper_close()
+            target_g = self.gripper_open_pos + (self.gripper_close_pos - self.gripper_open_pos) * GRIPPER_CLOSE_RATIO
+            gripper_start_value = self.current_gripper_pos
+            gripper_end_value = target_g
+            goal_gripper_for_recording = target_g
+            skill_type_val = "move_and_close"
+            default_suffix = "and close gripper"
+        elif gripper_action == "open":
+            GRIPPER_MAX_RATIO = 0.30  # same as gripper_open()
+            clamped_ratio = min(gripper_open_ratio, GRIPPER_MAX_RATIO)
+            target_g = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
+            gripper_start_value = self.current_gripper_pos
+            gripper_end_value = target_g
+            goal_gripper_for_recording = target_g
+            skill_type_val = "move_and_open"
+            default_suffix = "and open gripper"
+        elif gripper_action is None:
+            skill_type_val = "move"
+            default_suffix = ""
+        else:
+            raise ValueError(f"gripper_action must be None, 'close', or 'open' (got: {gripper_action!r})")
+
         # Set skill recording info (after trajectory planning)
-        label = skill_description or (f"move {target_name}" if target_name else "move to position")
+        if skill_description:
+            label = skill_description
+        else:
+            base = f"move {target_name}" if target_name else "move to position"
+            label = f"{base} {default_suffix}".strip() if default_suffix else base
+
         goal_joint_rad = trajectory.joint_positions[-1]
         self._set_skill_recording(
             label=label,
-            skill_type="move",
+            skill_type=skill_type_val,
             goal_joint_5=goal_joint_rad,
-            goal_gripper=self.current_gripper_pos,
+            goal_gripper=goal_gripper_for_recording,
             kinematics=active_planner.kinematics,
             target_name=target_name,
             position=position.tolist() if hasattr(position, 'tolist') else list(position),
             verification_question=verification_question,
         )
+
+        # Update gripper binary state flag BEFORE motion (matches gripper_open/close semantics)
+        if gripper_action in ("close", "open") and HAS_RECORDING_CONTEXT and RecordingContext.is_active():
+            RecordingContext.set_gripper_state(is_open=(gripper_action == "open"))
 
         # Execute trajectory with active kinematics for correct error measurement
         try:
@@ -1512,6 +1602,10 @@ class LeRobotSkills:
                 target_position=target_position,
                 description=f"Moving to [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}]",
                 kinematics=active_planner.kinematics,
+                gripper_start_value=gripper_start_value,
+                gripper_end_value=gripper_end_value,
+                gripper_start_fraction=gripper_start_fraction,
+                gripper_end_fraction=gripper_end_fraction,
             )
         finally:
             self._clear_skill_recording()

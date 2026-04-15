@@ -283,16 +283,15 @@ cur = current_positions["object_name"]["position"]
 tgt = target_positions["object_name"]["position"]
 skills.set_subtask("move object_name to target")
 
-# Step 1-1. Pick object_name from current position
-skills.gripper_open(skill_description="Open gripper for object_name", verification_question="Is the gripper open?")
-skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Move above object_name", verification_question="Is the gripper above object_name?")
+# Step 1-1. Pick object_name — approach opens gripper in-motion (start at 30%)
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach object_name and open gripper", verification_question="Is the gripper above object_name and open?")
 skills.execute_pick_object(cur, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped?")
 skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Lift object_name", verification_question="Is object_name lifted?")
 
-# Step 1-2. Place object_name at target position
+# Step 1-2. Place object_name at target — retreat closes gripper starting at 20%
 skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Move object_name above target position", verification_question="Is object_name above target position?")
 skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_name="object_name target", skill_description="Place object_name at target position", verification_question="Is object_name placed at target position?")
-skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Retract from object_name target", verification_question="Is the gripper clear of object_name?")
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from target and close gripper", verification_question="Is the gripper clear of target and closed?")
 
 # === STEP 2: Move 2nd object to target ===
 # No re-detection needed — next_object hasn't been touched, so current_positions is still valid.
@@ -348,7 +347,7 @@ if __name__ == "__main__":
 3. **Re-detection**: Re-detect ONLY if the next subtask needs the **new position of an already-moved object** (e.g., unstacking from a stack where heights changed). If the next object hasn't been touched, its `current_positions` value is still valid — skip re-detection.
    - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-moved objects. The VLM cannot distinguish them and will confuse labels. Use `current_positions` directly instead.
    - **CRITICAL**: After re-detection, you MUST **re-assign ALL local variables** (e.g., `cur`, `tgt`) from the updated dict. Previously extracted variables still reference OLD values.
-4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
+4. **Follow the Skill Composition Patterns above exactly** — pick approach uses `move_to_position(..., gripper_action="open", gripper_start_fraction=0.3)` (no standalone `gripper_open()`); place retreat uses `move_to_position(..., gripper_action="close", gripper_start_fraction=0.2)` (no standalone `gripper_close()`).
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
@@ -465,7 +464,8 @@ target_positions = {{
 |--------|-------------|----------------|
 | `connect()` | Connect to robot | - |
 | `disconnect()` | Disconnect from robot | - |
-| `gripper_open()` | Open gripper | - |
+| `gripper_open()` | Open gripper standalone (rare; prefer `move_to_position` with `gripper_action="open"`) | - |
+| `gripper_close()` | Close gripper standalone (rare; prefer `move_to_position` with `gripper_action="close"`) | - |
 | `move_to_initial_state()` | Move to initial/home position | - |
 | `move_to_free_state()` | Move to safe parking position | - |
 | `move_to_position(position, ...)` | Move end-effector to [x,y,z] | position, target_name |
@@ -487,16 +487,15 @@ cur = current_positions["object_name"]["position"]
 tgt = target_positions["object_name"]["position"]
 skills.set_subtask("move object_name to target")
 
-# Step 1-1. Pick object_name from current position
-skills.gripper_open(skill_description="Open gripper for object_name", verification_question="Is the gripper open?")
-skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Move above object_name", verification_question="Is the gripper above object_name?")
+# Step 1-1. Pick object_name — approach opens gripper in-motion (start at 30%)
+skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach object_name and open gripper", verification_question="Is the gripper above object_name and open?")
 skills.execute_pick_object(cur, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped?")
 skills.move_to_position([cur[0], cur[1], approach_height], target_name="object_name", skill_description="Lift object_name", verification_question="Is object_name lifted?")
 
-# Step 1-2. Place object_name at target position
+# Step 1-2. Place object_name at target — retreat closes gripper starting at 20%
 skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Move object_name above target position", verification_question="Is object_name above target position?")
 skills.execute_place_object(tgt, is_table=True, gripper_open_ratio=0.7, target_name="object_name target", skill_description="Place object_name at target position", verification_question="Is object_name placed at target position?")
-skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", skill_description="Retract from object_name target", verification_question="Is the gripper clear of object_name?")
+skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_name target", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from target and close gripper", verification_question="Is the gripper clear of target and closed?")
 
 # === STEP 2: Move 2nd object to target ===
 # No re-detection needed — next_object hasn't been touched, so current_positions is still valid.
@@ -570,34 +569,31 @@ When objects are stacked (one object sitting on top of another), you MUST unstac
 # Example: 3 blocks stacked — C(top, z=0.08), B(middle, z=0.06), A(bottom, z=0.02)
 
 # Step 1: Pick the TOP object C (highest z = 0.08)
-skills.gripper_open()
-skills.move_to_position([cx, cy, approach_height], target_name="C")
+skills.move_to_position([cx, cy, approach_height], target_name="C", gripper_action="open", gripper_start_fraction=0.3)
 skills.execute_pick_object([cx, cy, 0.08], object_name="C")
 skills.move_to_position([cx, cy, approach_height], target_name="C")
 
 skills.move_to_position([c_tx, c_ty, approach_height], target_name="original position")
 skills.execute_place_object([c_tx, c_ty, c_tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
-skills.move_to_position([c_tx, c_ty, approach_height], target_name="original position")
+skills.move_to_position([c_tx, c_ty, approach_height], target_name="original position", gripper_action="close", gripper_start_fraction=0.2)
 
 # Step 2: Pick the MIDDLE object B (z = 0.06) — safe because C is removed
-skills.gripper_open()
-skills.move_to_position([bx, by, approach_height], target_name="B")
+skills.move_to_position([bx, by, approach_height], target_name="B", gripper_action="open", gripper_start_fraction=0.3)
 skills.execute_pick_object([bx, by, 0.06], object_name="B")
 skills.move_to_position([bx, by, approach_height], target_name="B")
 
 skills.move_to_position([b_tx, b_ty, approach_height], target_name="original position")
 skills.execute_place_object([b_tx, b_ty, b_tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
-skills.move_to_position([b_tx, b_ty, approach_height], target_name="original position")
+skills.move_to_position([b_tx, b_ty, approach_height], target_name="original position", gripper_action="close", gripper_start_fraction=0.2)
 
 # Step 3: Pick the BOTTOM object A (z = 0.02) — safe because B and C are removed
-skills.gripper_open()
-skills.move_to_position([ax, ay, approach_height], target_name="A")
+skills.move_to_position([ax, ay, approach_height], target_name="A", gripper_action="open", gripper_start_fraction=0.3)
 skills.execute_pick_object([ax, ay, 0.02], object_name="A")
 skills.move_to_position([ax, ay, approach_height], target_name="A")
 
 skills.move_to_position([a_tx, a_ty, approach_height], target_name="original position")
 skills.execute_place_object([a_tx, a_ty, a_tz], is_table=True, gripper_open_ratio=0.7, target_name="original position")
-skills.move_to_position([a_tx, a_ty, approach_height], target_name="original position")
+skills.move_to_position([a_tx, a_ty, approach_height], target_name="original position", gripper_action="close", gripper_start_fraction=0.2)
 ```
 
 
@@ -609,7 +605,7 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 3. **Re-detection**: Re-detect ONLY if the next subtask needs the **new position of an already-moved object** (e.g., unstacking from a stack where heights changed). If the next object hasn't been touched, its `current_positions` value is still valid — skip re-detection.
    - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-moved objects. The VLM cannot distinguish them and will confuse labels. Use `current_positions` directly instead.
    - **CRITICAL**: After re-detection, you MUST **re-assign ALL local variables** (e.g., `cur`, `tgt`) from the updated dict. Previously extracted variables still reference OLD values.
-4. **Follow the Skill Composition Patterns above exactly** — especially `gripper_open()` BEFORE every pick approach
+4. **Follow the Skill Composition Patterns above exactly** — pick approach uses `move_to_position(..., gripper_action="open", gripper_start_fraction=0.3)` (no standalone `gripper_open()`); place retreat uses `move_to_position(..., gripper_action="close", gripper_start_fraction=0.2)` (no standalone `gripper_close()`).
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object

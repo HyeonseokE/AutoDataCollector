@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "skkuprism/cap_pnp_100ep"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
+dataset_repo_id: "skkuprism/cap_pnp_15ep"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
 recording_fps: 30
 robot_type: "so101"
 

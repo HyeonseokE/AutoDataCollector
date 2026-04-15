@@ -49,8 +49,8 @@ export PYTHONPATH="$REPO_DIR/src:$REPO_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}"
 URDF="${URDF:-$(cd "$REPO_DIR/.." && pwd)/assets/urdf/so101_robot2.urdf}"
 
 # -------- npz 파일 경로 (직접 수정) --------
-NPZ_FILE="${NPZ_FILE:-$REPO_DIR/outputs/action_chunks/chunks_20260412_155741.npz}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/outputs/plots}"
+NPZ_FILE="${NPZ_FILE:-$REPO_DIR/outputs/action_chunks/chunks_20260415_142634.npz}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/outputs/chunk_viz}"
 
 # npz 파일 이름(확장자 제외)을 서브디렉토리로 자동 생성
 NPZ_STEM="$(basename "$NPZ_FILE" .npz)"

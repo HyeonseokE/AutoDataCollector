@@ -222,6 +222,34 @@ class RTCDemoConfig(HubMixin):
         return ["policy"]
 
 
+def _flush_action_chunks(saved_chunks, robot, fps, save_path: str, reason: str = "max-reached", verbose: bool = True) -> None:
+    """Atomically persist collected action chunks to ``save_path``.
+
+    Writes to ``save_path + ".tmp"`` first then renames so a kill mid-write
+    never leaves a corrupt file. Called incrementally (after each chunk) and
+    on graceful shutdown.
+    """
+    import os
+    import numpy as np
+
+    # np.savez auto-appends ".npz" if absent, so the tmp name must already end
+    # in ".npz" to avoid creating "<tmp>.npz" instead of "<tmp>".
+    tmp_path = save_path[:-4] + ".tmp.npz" if save_path.endswith(".npz") else save_path + ".tmp.npz"
+    np.savez(
+        tmp_path,
+        **{f"chunk_{i}": c["actions"] for i, c in enumerate(saved_chunks)},
+        timestamps=np.array([c["timestamp"] for c in saved_chunks]),
+        inference_delays=np.array([c["inference_delay"] for c in saved_chunks]),
+        action_features=robot.action_features(),
+        fps=np.array(fps),
+    )
+    os.replace(tmp_path, save_path)
+    if verbose:
+        logger.info(
+            f"[GET_ACTIONS] Saved {len(saved_chunks)} chunks to {save_path} (reason={reason})"
+        )
+
+
 def is_image_key(k: str) -> bool:
     return k.startswith(OBS_IMAGES)
 
@@ -247,9 +275,19 @@ def get_actions(
     try:
         logger.info("[GET_ACTIONS] Starting get actions thread")
 
-        # Action chunk saving
+        # Action chunk saving: incremental write so we never lose collected
+        # chunks even on hard kill (process.py force-exits on 2nd Ctrl+C).
         saved_chunks = []
         chunk_save_done = False
+        chunk_save_path = None
+        if cfg.save_chunks:
+            import os as _os
+            _os.makedirs(cfg.save_chunks_dir, exist_ok=True)
+            chunk_save_path = _os.path.join(
+                cfg.save_chunks_dir,
+                f"chunks_{time.strftime('%Y%m%d_%H%M%S')}.npz",
+            )
+            logger.info(f"[GET_ACTIONS] Will incrementally save chunks to {chunk_save_path}")
 
         latency_tracker = LatencyTracker()  # Track latency of action chunks
         fps = cfg.fps
@@ -329,30 +367,24 @@ def get_actions(
 
                 postprocessed_actions = postprocessed_actions.squeeze(0)
 
-                # Save chunk for offline visualization
+                # Save chunk for offline visualization (incremental write)
                 if cfg.save_chunks and not chunk_save_done:
                     saved_chunks.append({
                         "actions": postprocessed_actions.cpu().numpy().copy(),
                         "timestamp": time.time(),
                         "inference_delay": inference_delay,
                     })
+                    # Overwrite snapshot after every new chunk so the file
+                    # always reflects the latest state — survives any kill.
+                    _flush_action_chunks(
+                        saved_chunks, robot, fps, chunk_save_path,
+                        reason="incremental", verbose=False,
+                    )
                     if len(saved_chunks) >= cfg.save_chunks_max:
-                        import os
-                        import numpy as np
-                        os.makedirs(cfg.save_chunks_dir, exist_ok=True)
-                        save_path = os.path.join(
-                            cfg.save_chunks_dir,
-                            f"chunks_{time.strftime('%Y%m%d_%H%M%S')}.npz",
+                        logger.info(
+                            f"[GET_ACTIONS] Reached save_chunks_max={cfg.save_chunks_max}, "
+                            f"final file at {chunk_save_path}"
                         )
-                        np.savez(
-                            save_path,
-                            **{f"chunk_{i}": c["actions"] for i, c in enumerate(saved_chunks)},
-                            timestamps=np.array([c["timestamp"] for c in saved_chunks]),
-                            inference_delays=np.array([c["inference_delay"] for c in saved_chunks]),
-                            action_features=robot.action_features(),
-                            fps=np.array(fps),
-                        )
-                        logger.info(f"[GET_ACTIONS] Saved {len(saved_chunks)} chunks to {save_path}")
                         chunk_save_done = True
 
                 new_latency = time.perf_counter() - current_time
@@ -371,8 +403,21 @@ def get_actions(
                 # Small sleep to prevent busy waiting
                 time.sleep(0.1)
 
+        # Final summary on graceful shutdown (file is already up-to-date due
+        # to incremental writes — this is just for logging).
+        if cfg.save_chunks and saved_chunks:
+            logger.info(
+                f"[GET_ACTIONS] Final: {len(saved_chunks)} chunks saved to {chunk_save_path}"
+            )
+
         logger.info("[GET_ACTIONS] get actions thread shutting down")
     except Exception as e:
+        # On crash the incremental file already has the latest snapshot —
+        # log so the user knows where to find it.
+        if cfg.save_chunks and saved_chunks:
+            logger.error(
+                f"[GET_ACTIONS] Crash mid-collection. Last snapshot ({len(saved_chunks)} chunks) at {chunk_save_path}"
+            )
         logger.error(f"[GET_ACTIONS] Fatal exception in get_actions thread: {e}")
         logger.error(traceback.format_exc())
         sys.exit(1)

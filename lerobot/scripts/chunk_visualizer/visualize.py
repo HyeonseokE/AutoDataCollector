@@ -232,7 +232,7 @@ def plot_ee_trajectory_3d_html(
                 x=traj[:, 0], y=traj[:, 1], z=traj[:, 2],
                 mode="lines+markers+text",
                 line=dict(color=color, width=3),
-                marker=dict(size=3, color=color),
+                marker=dict(size=2, color=color),
                 text=text_labels,
                 textfont=dict(color=color, size=9),
                 textposition="top center",

@@ -6,7 +6,7 @@
     78.02574920654297,
     -0.02442002482712269
   ],
-  "gripper_normalized": -99.00497436523438,
+  "gripper_normalized": 0.4975128173828125,
   "recorded_at": "2026-04-09T23:02:29.106469",
   "robot_id": "robot1",
   "config_file": "/home/lerobot/AutoDataCollector/robot_configs/robot/so101_robot1.yaml",

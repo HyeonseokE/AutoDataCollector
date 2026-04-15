@@ -234,14 +234,14 @@ skills.set_subtask("move object_name to target with left arm")
 cur = cur_left["object_name"]["position"]
 tgt = tgt_left["object_name"]["position"]
 
-# Pick: open gripper → approach → pick → lift
-skills.gripper_control(left_arm="open", right_arm="wait",
-    left_skill_description="Open left gripper for object_name",
-    left_verification_question="Is left gripper open?")
+# Pick: approach → open (at approach) → pick → lift
 skills.move_to_position(
     left_arm=[cur[0], cur[1], approach_height], right_arm="wait",
-    left_skill_description="Move left arm above object_name",
+    left_skill_description="Approach object_name",
     left_verification_question="Is left arm above object_name?")
+skills.gripper_control(left_arm="open", right_arm="wait",
+    left_skill_description="Open left gripper above object_name",
+    left_verification_question="Is left gripper open?")
 skills.pick_object(left_arm=cur, right_arm="wait",
     left_object_name="object_name",
     left_skill_description="Pick up object_name",
@@ -251,7 +251,7 @@ skills.move_to_position(
     left_skill_description="Lift object_name",
     left_verification_question="Is object_name lifted?")
 
-# Place: approach target → place → retract
+# Place: approach target → place → retract → close
 skills.move_to_position(
     left_arm=[tgt[0], tgt[1], approach_height], right_arm="wait",
     left_skill_description="Move object_name above target",
@@ -262,8 +262,11 @@ skills.place_object(left_arm=tgt, right_arm="wait",
     left_verification_question="Is object_name placed at target?")
 skills.move_to_position(
     left_arm=[tgt[0], tgt[1], approach_height], right_arm="wait",
-    left_skill_description="Retract from object_name target",
-    left_verification_question="Is left arm clear of object_name?")
+    left_skill_description="Retract from target",
+    left_verification_question="Is left arm clear of target?")
+skills.gripper_control(left_arm="close", right_arm="wait",
+    left_skill_description="Close left gripper after release",
+    left_verification_question="Is left gripper closed?")
 
 skills.clear_subtask()
 
@@ -281,19 +284,19 @@ if "right_arm" in updated:
 cur = cur_right["next_object"]["position"]
 tgt = tgt_right["next_object"]["position"]
 
-# Pick with right arm (same pattern, swap left_arm="wait" / right_arm=...)
-skills.gripper_control(left_arm="wait", right_arm="open",
-    right_skill_description="Open right gripper for next_object",
-    right_verification_question="Is right gripper open?")
+# Pick with right arm (same pattern: approach → open → pick → lift)
 skills.move_to_position(
     left_arm="wait", right_arm=[cur[0], cur[1], approach_height],
-    right_skill_description="Move right arm above next_object",
+    right_skill_description="Approach next_object",
     right_verification_question="Is right arm above next_object?")
+skills.gripper_control(left_arm="wait", right_arm="open",
+    right_skill_description="Open right gripper above next_object",
+    right_verification_question="Is right gripper open?")
 skills.pick_object(left_arm="wait", right_arm=cur,
     right_object_name="next_object",
     right_skill_description="Pick up next_object",
     right_verification_question="Is next_object grasped?")
-# ... (same place pattern with right_arm) ...
+# ... (same place pattern with right_arm, ending with gripper_control(close) after retreat) ...
 
 skills.clear_subtask()
 
@@ -316,10 +319,10 @@ handover_pixel = [500, 500]  # center of table — verified: inside bright area 
 skills.set_subtask("right arm picks object and places at center for handover")
 cur = cur_right["object_name"]["points"]["grasp center"]
 
-skills.gripper_control(left_arm="wait", right_arm="open",
-    right_skill_description="Open right gripper", right_verification_question="Is right open?")
 skills.move_to_position(left_arm="wait", right_arm=[cur[0], cur[1], approach_height],
     right_skill_description="Approach object", right_verification_question="Is right above object?")
+skills.gripper_control(left_arm="wait", right_arm="open",
+    right_skill_description="Open right gripper above object", right_verification_question="Is right open?")
 skills.pick_object(left_arm="wait", right_arm=cur, right_object_name="object_name",
     right_skill_description="Pick object", right_verification_question="Is object grasped?")
 skills.move_to_position(left_arm="wait", right_arm=[cur[0], cur[1], approach_height],
@@ -330,6 +333,8 @@ skills.place_at_pixel(left_arm="wait", right_arm=handover_pixel, right_is_table=
     right_skill_description="Place at handover", right_verification_question="Is object at center?")
 skills.move_to_pixel(left_arm="wait", right_arm=handover_pixel,
     right_skill_description="Retract after place", right_verification_question="Is right clear?")
+skills.gripper_control(left_arm="wait", right_arm="close",
+    right_skill_description="Close right gripper after release", right_verification_question="Is right gripper closed?")
 skills.clear_subtask()
 
 # Re-detect after handover
@@ -345,10 +350,10 @@ skills.set_subtask("left arm picks object from center and places at target")
 cur_updated = cur_left["object_name"]["points"]["grasp center"]
 tgt = tgt_left["object_name"]["points"]["grasp center"]
 
-skills.gripper_control(left_arm="open", right_arm="wait",
-    left_skill_description="Open left gripper", left_verification_question="Is left open?")
 skills.move_to_position(left_arm=[cur_updated[0], cur_updated[1], approach_height], right_arm="wait",
     left_skill_description="Approach object at center", left_verification_question="Is left above object?")
+skills.gripper_control(left_arm="open", right_arm="wait",
+    left_skill_description="Open left gripper above object", left_verification_question="Is left open?")
 skills.pick_object(left_arm=cur_updated, right_arm="wait", left_object_name="object_name",
     left_skill_description="Pick object from center", left_verification_question="Is object grasped?")
 skills.move_to_position(left_arm=[cur_updated[0], cur_updated[1], approach_height], right_arm="wait",
@@ -359,6 +364,8 @@ skills.place_object(left_arm=tgt, right_arm="wait", left_is_table=True,
     left_skill_description="Place at target", left_verification_question="Is object at target?")
 skills.move_to_position(left_arm=[tgt[0], tgt[1], approach_height], right_arm="wait",
     left_skill_description="Retract after place", left_verification_question="Is left clear?")
+skills.gripper_control(left_arm="close", right_arm="wait",
+    left_skill_description="Close left gripper after release", left_verification_question="Is left gripper closed?")
 skills.clear_subtask()
 ```
 
@@ -392,15 +399,15 @@ right_grasp = cur_right["towel"]["points"]["right fold edge grasp"]
 left_target = tgt_left["towel"]["points"]["top left corner"]
 right_target = tgt_right["towel"]["points"]["top right corner"]
 
-# 1. Open + approach
-skills.gripper_control(left_arm="open", right_arm="open",
-    left_skill_description="Open left gripper", left_verification_question="Is left open?",
-    right_skill_description="Open right gripper", right_verification_question="Is right open?")
+# 1. Approach FIRST, then open grippers at the approach position
 skills.move_to_position(
     left_arm=[left_grasp[0], left_grasp[1], approach_height],
     right_arm=[right_grasp[0], right_grasp[1], approach_height],
     left_skill_description="Approach left grasp", left_verification_question="Is left above grasp?",
     right_skill_description="Approach right grasp", right_verification_question="Is right above grasp?")
+skills.gripper_control(left_arm="open", right_arm="open",
+    left_skill_description="Open left gripper above grasp", left_verification_question="Is left open?",
+    right_skill_description="Open right gripper above grasp", right_verification_question="Is right open?")
 
 # 2. Pick (descend + grip — synchronized)
 skills.bimanual_pick_object(left_arm=left_grasp, right_arm=right_grasp, object_name="towel")
@@ -467,7 +474,9 @@ if __name__ == "__main__":
      (d) If in dark area → shift inward to nearest bright point. (e) Add a code comment with reasoning.
      NEVER use extreme values like [900, 900].
 2. Use `skills.move_to_position()` / `skills.pick_object()` / `skills.place_object()` / `skills.gripper_control()` for ALL operations. Pass `left_arm="wait"` or `right_arm="wait"` for the arm that should hold position.
-   - **Pick pattern**: open → approach (move to approach_height above object) → pick_object (descend + grip) → **retract (move back to approach_height — MANDATORY)** → move to next target.
+   - **Pick pattern**: approach (move to approach_height above object) → open (gripper_control at approach position) → pick_object (descend + grip) → **retract (move back to approach_height — MANDATORY)** → move to next target.
+     - **DO NOT** call `gripper_control(open)` right after `move_to_initial_state()`. Approach first, then open.
+   - **Place pattern**: approach → place_object (descend + release) → retract → `gripper_control(close)` after retreat.
    - **Place pattern**: move_to_position (approach above target) → place_object (descend + release) → retract (move back to approach_height).
    - NEVER skip the retract step after pick or place.
 3. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.

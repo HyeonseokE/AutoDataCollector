@@ -247,10 +247,11 @@ def load_gripper_radian_params(calibration_file: str) -> Tuple[float, float]:
 
     half_range_rad = float(np.radians(encoder_range * 360.0 / 4096.0) / 2.0)
 
+    # Gripper uses RANGE_0_100 (0~100 scale), matching upstream LeRobot.
     HALF_TURN = 2048  # URDF 0° encoder value after homing
-    offset_normalized = ((HALF_TURN - rmin) / encoder_range) * 200 - 100
+    offset_normalized = ((HALF_TURN - rmin) / encoder_range) * 100
     if drive_mode == 1:
-        offset_normalized = -offset_normalized
+        offset_normalized = 100 - offset_normalized
 
     return half_range_rad, float(offset_normalized)
 

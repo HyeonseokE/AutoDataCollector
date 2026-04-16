@@ -398,7 +398,7 @@ class RecordingContext:
                     )
                     gripper_norm = float(state[5]) if len(state) > 5 else 0.0
                     gripper_rad = (
-                        ((gripper_norm - g_offset) / 100.0) * g_half if g_half > 0.0 else 0.0
+                        ((gripper_norm - g_offset) / 50.0) * g_half if g_half > 0.0 else 0.0
                     )
                     extras["observation.state.radian_urdf0"] = np.concatenate(
                         [arm_rad, [gripper_rad]]
@@ -410,7 +410,7 @@ class RecordingContext:
                     )
                     act_gripper_norm = float(action[5]) if len(action) > 5 else 0.0
                     act_gripper_rad = (
-                        ((act_gripper_norm - g_offset) / 100.0) * g_half if g_half > 0.0 else 0.0
+                        ((act_gripper_norm - g_offset) / 50.0) * g_half if g_half > 0.0 else 0.0
                     )
                     extras["action.radian_urdf0"] = np.concatenate(
                         [act_arm_rad, [act_gripper_rad]]

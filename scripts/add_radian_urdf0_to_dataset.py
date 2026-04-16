@@ -64,12 +64,12 @@ def convert_to_rad_urdf0(
 ) -> np.ndarray:
     """Normalized 6D → URDF 0° radian 6D.
 
-    Arm 5D: calibration 객체의 정식 변환 함수 사용.
-    Gripper 1D: 동일 공식 인라인 적용.
+    Arm 5D: calibration 객체의 정식 변환 함수 사용 (input -100~+100).
+    Gripper 1D: RANGE_0_100 (input 0~100), g_offset도 0~100 스케일.
     """
     arm_rad = calib.normalized_to_radians(norm_6d[:5])
     if g_half > 0.0:
-        gripper_rad = ((float(norm_6d[5]) - g_offset) / 100.0) * g_half
+        gripper_rad = ((float(norm_6d[5]) - g_offset) / 50.0) * g_half
     else:
         gripper_rad = 0.0
     return np.concatenate([arm_rad, [gripper_rad]]).astype(np.float32)

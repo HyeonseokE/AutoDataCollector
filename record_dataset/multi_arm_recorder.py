@@ -306,10 +306,10 @@ class MultiArmRecorder:
                     gripper_state_norm = float(state[5]) if len(state) > 5 else 0.0
                     gripper_action_norm = float(action[5]) if len(action) > 5 else 0.0
                     gripper_state_rad = (
-                        ((gripper_state_norm - g_offset) / 100.0) * g_half if g_half > 0.0 else 0.0
+                        ((gripper_state_norm - g_offset) / 50.0) * g_half if g_half > 0.0 else 0.0
                     )
                     gripper_action_rad = (
-                        ((gripper_action_norm - g_offset) / 100.0) * g_half if g_half > 0.0 else 0.0
+                        ((gripper_action_norm - g_offset) / 50.0) * g_half if g_half > 0.0 else 0.0
                     )
 
                     frame[state_key] = np.append(rad_state, gripper_state_rad).astype(np.float32)

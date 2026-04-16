@@ -81,6 +81,10 @@ class DryRunSkills:
         target_name=None,
         skill_description=None,
         verification_question=None,
+        gripper_action=None,
+        gripper_start_fraction=0.0,
+        gripper_end_fraction=1.0,
+        gripper_open_ratio=1.0,
     ) -> bool:
         if self.kinematics is None:
             return True

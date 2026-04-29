@@ -1,0 +1,15 @@
+{
+  "initial_state_normalized": [
+    -4.89871072769165,
+    -91.73344421386719,
+    93.1880111694336,
+    70.98844909667969,
+    -2.710622787475586
+  ],
+  "gripper_normalized": 0.8381689190864563,
+  "recorded_at": "2026-04-23T14:37:48.030712",
+  "robot_id": "robot6",
+  "config_file": "/home/lerobot3/workspace/AutoDataCollector/robot_configs/robot/so101_robot6.yaml",
+  "state_type": "free_state",
+  "description": "Safe free/parking state. Robot moves here when idle to clear workspace."
+}

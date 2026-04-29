@@ -4,7 +4,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "local/ttttest"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
+dataset_repo_id: "local/stack_red_and_blue"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
 recording_fps: 30
 robot_type: "so101"
 
@@ -22,7 +22,7 @@ cameras:
   shared:
     - name: "top"
       type: "realsense"
-      serial_number: "254622075836"  # WS2 전용 RealSense
+      serial_number: "254622079503"  # WS2 전용 RealSense
       enabled: true
       enable_depth: true
       width: 640
@@ -34,22 +34,22 @@ cameras:
     - name: "wrist"
       type: "opencv"
       enabled: true
-      index_or_path: "/dev/video6"
+      index_or_path: "/dev/video14"
       width: 640
       height: 480
       fps: 30
       fourcc: "MJPG"
 
   ## Right arm 카메라 (ROBOT_IDS[1]에 매핑) — WS2: single arm이므로 비활성화
-  right_arm:
-    - name: "wrist"
-      type: "opencv"
-      enabled: true
-      index_or_path: "/dev/video14"
-      width: 640
-      height: 480
-      fps: 30
-      fourcc: "MJPG"
+  # right_arm:
+  #   - name: "wrist"
+  #     type: "opencv"
+  #     enabled: true
+  #     index_or_path: "/dev/video14"
+  #     width: 640
+  #     height: 480
+  #     fps: 30
+  #     fourcc: "MJPG"
 
 # =============================================================================
 # Skill Features Configuration

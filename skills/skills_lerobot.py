@@ -167,10 +167,50 @@ class LeRobotSkills:
         # VLM-specified pixel positions log (for visualization)
         self.pixel_move_log: List[dict] = []
 
+        # Subgoal-level perturbation (set externally via set_perturbation /
+        # set_perturbation_rng). When both are set and the current move is a
+        # pure transit (skill_type="move"), an offset is sampled and added to
+        # the target xyz inside move_to_position. See perturbation/subgoal_level.
+        self._perturbation = None      # SubgoalPerturbation or None
+        self._perturbation_rng = None  # np.random.Generator or None
+
     def _log(self, message: str):
         """Print message if verbose mode is enabled."""
         if self.verbose:
             print(message)
+
+    # ─────────────────────────────────────────────
+    # Subgoal-level perturbation hooks
+    # ─────────────────────────────────────────────
+    def set_perturbation(self, perturbation) -> None:
+        """Attach a SubgoalPerturbation. Pass None to detach."""
+        self._perturbation = perturbation
+
+    def set_perturbation_rng(self, seed: int) -> None:
+        """(Re)seed the per-episode RNG for perturbation sampling."""
+        self._perturbation_rng = np.random.default_rng(int(seed))
+
+    def perturbation_disabled(self):
+        """Context manager that temporarily detaches perturbation.
+
+        Used by the pipeline to skip perturbation during reset execution
+        while keeping forward execution perturbed::
+
+            with skills.perturbation_disabled():
+                self.execute_code(reset_code, ...)
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            saved = self._perturbation
+            self._perturbation = None
+            try:
+                yield
+            finally:
+                self._perturbation = saved
+
+        return _ctx()
 
     def _get_recording_callback_from_context(self):
         """
@@ -1381,6 +1421,7 @@ class LeRobotSkills:
         gripper_start_fraction: float = 0.0,
         gripper_end_fraction: float = 1.0,
         gripper_open_ratio: float = 1.0,
+        is_transit: bool = True,
     ) -> bool:
         """
         Move end-effector to target position with orientation constraints.
@@ -1423,6 +1464,41 @@ class LeRobotSkills:
 
         # Transform to robot_base_link frame
         target_position = self._transform_pos_world2robot(position)
+
+        # Subgoal-level perturbation. Two conditions:
+        #   (1) is_transit=True             — caller declares transit intent.
+        #       Internal contact descents (execute_pick_object,
+        #       execute_place_object) pass is_transit=False to opt out.
+        #       gripper_action ("open"/"close") is allowed because in this
+        #       codebase those flows mean "approach + gripper prep" (transit),
+        #       NOT "final descent + gripper" — final descents are handled by
+        #       the dedicated execute_*_object functions.
+        #   (2) perturbation + RNG attached — set up by execution pipeline.
+        # is_transit is the single source of truth (skill_type is too coarse).
+        #
+        # Reachability fallback: if the perturbed target falls outside the arm
+        # workspace, drop the offset and use the original target. Otherwise
+        # the move would fail silently (return False before any motion / before
+        # gripper_action), causing downstream skills (pick/place) to act on a
+        # stale gripper state.
+        if (is_transit
+                and self._perturbation is not None
+                and self._perturbation_rng is not None):
+            _offset = self._perturbation.sample(rng=self._perturbation_rng)
+            if _offset is not None:
+                _candidate = target_position + _offset
+                if active_planner.kinematics.is_position_reachable(_candidate):
+                    target_position = _candidate
+                    self._log(
+                        f"  [Perturbation] offset=[{_offset[0]*1000:+.1f}, "
+                        f"{_offset[1]*1000:+.1f}, {_offset[2]*1000:+.1f}]mm"
+                    )
+                else:
+                    self._log(
+                        f"  [Perturbation] dropped — perturbed target "
+                        f"[{_candidate[0]:.3f}, {_candidate[1]:.3f}, {_candidate[2]:.3f}] "
+                        f"out of workspace; falling back to unperturbed target"
+                    )
 
         self._log(f"\nMoving to position: [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}] ({self.frame})")
         if self.frame != "base_link":
@@ -1974,7 +2050,9 @@ class LeRobotSkills:
             self._log(f"  [Pick Z-Fix] {(object_height - self.pick_offset)*100:.1f}cm < min {MIN_PICK_Z*100:.1f}cm, clamping to {MIN_PICK_Z*100:.1f}cm")
         self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.1f}cm from top)")
 
-        # Pitch 보상: approach→pick 하강 시 pitch 변화로 인한 그리퍼 끝점 XY 드리프트 보정
+        # Pitch 보상: approach→pick 하강 시 pitch 변화로 인한 그리퍼 끝점 XY 드리프트 보정.
+        # 순수 회전 성분만 사용 (FRAME 변위 제외) — perturbation으로 approach가 옆으로
+        # 빗나가도 옆 이동을 drift로 오인하지 않도록 한다.
         GRIPPER_TIP_LENGTH = 0.05  # gripper_frame_link → 실제 접촉점 거리 (m)
         _, approach_joints, _ = self._get_current_state()
         pick_joints, ik_ok = self.kinematics.inverse_kinematics_position_only(
@@ -1982,11 +2060,12 @@ class LeRobotSkills:
         )
         if ik_ok:
             tip_local = np.array([0, 0, GRIPPER_TIP_LENGTH])  # gripper Z-axis 방향
-            approach_pos, approach_rot = self.kinematics.forward_kinematics(approach_joints)
-            pick_pos_fk, pick_rot = self.kinematics.forward_kinematics(pick_joints)
-            approach_tip = approach_pos + approach_rot @ tip_local
-            pick_tip = pick_pos_fk + pick_rot @ tip_local
-            tip_drift = pick_tip[:2] - approach_tip[:2]  # XY 밀림량
+            _, approach_rot = self.kinematics.forward_kinematics(approach_joints)
+            _, pick_rot = self.kinematics.forward_kinematics(pick_joints)
+            # FRAME→TIP 오프셋의 회전-기인 변화량 (FRAME 위치 변위 제외)
+            approach_tip_offset = approach_rot @ tip_local
+            pick_tip_offset = pick_rot @ tip_local
+            tip_drift = (pick_tip_offset - approach_tip_offset)[:2]
 
             if np.linalg.norm(tip_drift) > 0.002:  # 2mm 이상 밀림 시만 보상
                 pick_position = [
@@ -2001,7 +2080,10 @@ class LeRobotSkills:
         # pick_z를 명목값으로 먼저 저장 (place에서 참조, pick 실패 시에도 crash 방지)
         self._pick_z = pick_z
 
-        if not self.move_to_position(pick_position, target_name=pick_label, skill_description=skill_description):
+        # Descent to object contact — interaction subgoal, MUST NOT be perturbed.
+        if not self.move_to_position(pick_position, target_name=pick_label,
+                                     skill_description=skill_description,
+                                     is_transit=False):
             print("Error: Failed to reach pick position")
             return False
 
@@ -2075,10 +2157,12 @@ class LeRobotSkills:
 
         # Move to place position (skill recording handled inside)
         place_label = f"place on {target_name}" if target_name else None
+        # Descent to place contact — interaction subgoal, MUST NOT be perturbed.
         if not self.move_to_position(final_position,
                                      target_pitch=saved_pitch,
                                      target_name=place_label,
-                                     skill_description=skill_description):
+                                     skill_description=skill_description,
+                                     is_transit=False):
             print("Error: Failed to reach place position")
             return False
 

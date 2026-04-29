@@ -5,7 +5,7 @@ robot_type: so101
 motor_type: feetech
 
 # Serial connection
-port: /dev/ttyACM1
+port: /dev/ttyACM0
 baudrate: 1000000
 
 # Motor configuration (6 joints)

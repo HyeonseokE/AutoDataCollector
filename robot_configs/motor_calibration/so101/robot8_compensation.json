@@ -1,6 +1,6 @@
 {
-  "robot_id": "robot3",
-  "description": "Adaptive compensation parameters for SO-101 Robot 3",
+  "robot_id": "robot8",
+  "description": "Adaptive compensation parameters for SO-101 Robot 8",
   "calibration_date": "2025-12-18",
   "deadband": {
     "shoulder_pan": 0.0,

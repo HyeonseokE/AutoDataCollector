@@ -33,12 +33,12 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # -------- policy 설정 --------
-POLICY_PATH="${POLICY_PATH:-skkuprism/test_model_cap}"   # HF model ID 또는 로컬 체크포인트 경로
+POLICY_PATH="${POLICY_PATH:-CoRL2026-CSI/smol_pnp_subgoal_10fps}"   # HF model ID 또는 로컬 체크포인트 경로
 POLICY_DEVICE="${POLICY_DEVICE:-cuda}"                # cuda / cpu / mps
 
 # -------- robot 설정 --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"            # so100_follower / so101_follower / koch_follower / ...
-ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM1}"              # 시리얼 포트
+ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM0}"              # 시리얼 포트
 ROBOT_ID="${ROBOT_ID:-so101_robot2}"                  # 캘리브레이션 파일용 ID
 # 액션 단위: true=degrees(arm) + gripper 0~100 / false=-100~+100(arm) + gripper 0~100
 # 학습 데이터셋과 반드시 일치해야 함 (불일치 시 로봇 엉뚱한 동작)
@@ -53,7 +53,7 @@ ROBOT_USE_DEGREES="${ROBOT_USE_DEGREES:-false}"
 #   CAM_xxx_ID   = opencv일 때 경로/인덱스 ("/dev/video18", 0)
 #                  realsense일 때 시리얼 번호 ("335622072328")
 CAM_LEFT_WRIST_TYPE="${CAM_LEFT_WRIST_TYPE:-opencv}"
-CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video18}"
+CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video0}"
 CAM_LEFT_WRIST_WIDTH="${CAM_LEFT_WRIST_WIDTH:-640}"
 CAM_LEFT_WRIST_HEIGHT="${CAM_LEFT_WRIST_HEIGHT:-480}"
 CAM_LEFT_WRIST_FPS="${CAM_LEFT_WRIST_FPS:-30}"
@@ -85,7 +85,7 @@ unset -f _cam_entry
 # -------- task / 실행 설정 --------
 TASK="${TASK:-pick up the red block and place it on the blue dish.}"                     # language instruction
 DURATION="${DURATION:-120}"                           # 실행 시간 (초)
-FPS="${FPS:-30}"                                      # action 실행 주파수 (Hz)
+FPS="${FPS:-20}"                                      # action 실행 주파수 (Hz)
 
 # -------- RTC (Real-Time Chunking) 설정 --------
 RTC_ENABLED="${RTC_ENABLED:-false}"                    # true / false

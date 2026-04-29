@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-PORT="/dev/ttyACM1"
-ID="so101_robot2"
+PORT="/dev/ttyACM0"
+ID="so101_robot8"
 
 echo "========================================="
 echo "  SO-101 Robot1 Calibration"

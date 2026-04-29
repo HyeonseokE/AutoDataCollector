@@ -78,14 +78,14 @@ cd "$SCRIPT_DIR"
 # 예: (0)       → shared + left_arm
 #     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
-ROBOT_IDS=(2)
+ROBOT_IDS=(8)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
 
 ### [single arm task]
 ## pick and place
-INSTRUCTION="pick up the red block and place it on the blue dish"
+INSTRUCTION="pick up the blue block and place it on the red dish"
 RESET_INSTRUCTION=""
 
 ## stack red and yellow
@@ -105,6 +105,28 @@ RESET_INSTRUCTION=""
 # INSTRUCTION="fold the towel in half from top to bottom."
 # RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
++--
 ## move
 # INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
 # RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left area"
@@ -117,12 +139,12 @@ RESET_INSTRUCTION=""
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=100
-NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_RANDOM_SEEDS=10 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
 # all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(top-left) 
+RESETSPACE_PER_ROBOT=(all) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -200,7 +222,7 @@ load_free_api_config() {
     fi
 }
 
-RECORDING_CONFIG_FILE="$CONFIG_DIR/recording_config_ws1.yaml"
+RECORDING_CONFIG_FILE="$CONFIG_DIR/recording_config_ws8.yaml"
 
 load_recording_config() {
     local config_file="$RECORDING_CONFIG_FILE"

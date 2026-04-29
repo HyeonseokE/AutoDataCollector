@@ -304,7 +304,67 @@ class ForwardAndResetPipeline(BasePipeline):
                 except KeyError:
                     continue
 
+        # Subgoal-level perturbation: read recording_config and attach if enabled.
+        # Per-episode RNG is seeded later via _seed_episode_perturbation().
+        self._setup_perturbation_on_skills()
+
         return self._skills
+
+    def _setup_perturbation_on_skills(self) -> None:
+        """Read perturbation.subgoal from recording_config.yaml and wire to skills.
+
+        Silent no-op when recording_config is absent or perturbation is disabled.
+        """
+        if not self.recording_config:
+            return
+        cfg_path = Path(self.recording_config)
+        if not cfg_path.exists():
+            return
+        try:
+            import yaml as _yaml
+            with open(cfg_path, "r") as f:
+                full_cfg = _yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[Perturbation] Failed to read recording_config: {e}")
+            return
+        pert_raw = (full_cfg.get("perturbation") or {}).get("subgoal") or {}
+        if not pert_raw.get("enabled", False):
+            return
+        try:
+            from perturbation.subgoal_level import (
+                SubgoalPerturbation, SubgoalPerturbationConfig,
+            )
+            pert = SubgoalPerturbation(SubgoalPerturbationConfig(
+                enabled=True,
+                sigma=float(pert_raw.get("sigma", 0.05)),
+                clip_factor=float(pert_raw.get("clip_factor", 2.0)),
+            ))
+            self._skills.set_perturbation(pert)
+            print(
+                f"[Perturbation] Subgoal-level ENABLED "
+                f"(sigma={pert.cfg.sigma}m, clip_radius={pert.cfg.clip_radius:.3f}m)"
+            )
+            # Apply any seed that was scheduled before skills existed.
+            pending = getattr(self, "_pending_perturbation_seed", None)
+            if pending is not None:
+                self._skills.set_perturbation_rng(pending)
+        except Exception as e:
+            print(f"[Perturbation] Failed to construct perturbation: {e}")
+
+    def _seed_episode_perturbation(self, batch_index: int, slot_in_batch: int) -> None:
+        """Seed per-episode RNG for subgoal perturbation. No-op if disabled.
+
+        Mirrors robotwin's seeding pattern: ``batch_index * 10000 + slot``.
+        Same (batch_index, slot) → same offset sequence (reproducible).
+
+        Safe to call before skills are lazily created — the seed is held until
+        ``_create_skills`` runs, then applied via ``_setup_perturbation_on_skills``.
+        """
+        ep_seed = int(batch_index) * 10000 + int(slot_in_batch)
+        self._pending_perturbation_seed = ep_seed
+        if (hasattr(self, "_skills") and self._skills is not None
+                and getattr(self._skills, "_perturbation", None) is not None):
+            self._skills.set_perturbation_rng(ep_seed)
 
     def _get_pipeline_camera(self):
         """PipelineCamera lazy init."""
@@ -372,12 +432,13 @@ class ForwardAndResetPipeline(BasePipeline):
                     if cam.feature_name in missing:
                         device = cam.get_device_path() or cam.serial_number or "unknown"
                         missing_details.append(f"  - {cam.feature_name} ({cam.type}, device={device})")
+                config_path = self.recording_config or "pipeline_config/recording_config.yaml"
                 raise AssertionError(
                     f"\n"
                     f"========================================\n"
                     f"Camera connection failed!\n"
                     f"========================================\n"
-                    f"The following cameras are enabled in recording_config.yaml\n"
+                    f"The following cameras are enabled in {config_path}\n"
                     f"but failed to connect:\n"
                     + "\n".join(missing_details) + "\n"
                     f"\n"
@@ -385,7 +446,7 @@ class ForwardAndResetPipeline(BasePipeline):
                     f"  1. Connect the camera hardware and verify device path\n"
                     f"     (run: v4l2-ctl --list-devices)\n"
                     f"  2. Set 'enabled: false' for unavailable cameras in\n"
-                    f"     pipeline_config/recording_config.yaml\n"
+                    f"     {config_path}\n"
                     f"========================================"
                 )
 
@@ -1814,10 +1875,12 @@ class ForwardAndResetPipeline(BasePipeline):
                     reset_mt = getattr(self, 'reset_multi_turn_info', None)
                     builtins._scene_summary = reset_mt.get("turn0_response", "") if reset_mt else ""
 
-                    reset_success = self.execute_code(reset_code, current_positions, extra_globals={
-                        "current_positions": current_positions,
-                        "target_positions": target_positions,
-                    })
+                    # Subgoal perturbation is forward-only; suspend during reset.
+                    with self._skills.perturbation_disabled():
+                        reset_success = self.execute_code(reset_code, current_positions, extra_globals={
+                            "current_positions": current_positions,
+                            "target_positions": target_positions,
+                        })
                     result['reset']['execution_success'] = reset_success
 
                     # Reset recording 종료
@@ -2792,15 +2855,20 @@ class ForwardAndResetPipeline(BasePipeline):
                     current_state_image_path=tmp_path,
                 )
 
-            # Reset 코드 실행 (레코딩 임시 비활성화)
+            # Reset 코드 실행 (레코딩 임시 비활성화 + perturbation 비활성화)
             self.shutdown_camera()
             saved_record = self.record_dataset
             self.record_dataset = False
             try:
-                success = self.execute_code(reset_code, {}, extra_globals={
-                    "current_positions": current_pos,
-                    "target_positions": target_positions,
-                })
+                # Subgoal perturbation is forward-only; suspend during reset.
+                # Trigger lazy skill creation first so the context manager has
+                # a real object to act on.
+                self._get_task_runner()
+                with self._skills.perturbation_disabled():
+                    success = self.execute_code(reset_code, {}, extra_globals={
+                        "current_positions": current_pos,
+                        "target_positions": target_positions,
+                    })
             finally:
                 self.record_dataset = saved_record
 
@@ -3006,6 +3074,9 @@ class ForwardAndResetPipeline(BasePipeline):
             self._current_batch_index = batch_index
             self._current_slot = episode_idx % episodes_per_seed
 
+            # Per-episode perturbation RNG seed (no-op if perturbation disabled).
+            self._seed_episode_perturbation(batch_index, self._current_slot)
+
             print("\n" + CYAN + "=" * 70 + RESET)
             print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1})  ".center(70) + RESET)
             print(CYAN + "=" * 70 + RESET)
@@ -3209,6 +3280,9 @@ class ForwardAndResetPipeline(BasePipeline):
                 self.current_episode = episode_num
                 self._current_batch_index = batch_index
                 self._current_slot = slot
+
+                # Per-episode perturbation RNG seed (no-op if perturbation disabled).
+                self._seed_episode_perturbation(batch_index, slot)
 
                 print("\n" + CYAN + "=" * 70 + RESET)
                 print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1}, Slot {slot})  ".center(70) + RESET)

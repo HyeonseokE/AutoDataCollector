@@ -1,0 +1,54 @@
+# Charuco 보드 사양 — A3 기본 preset
+#
+# A3 용지: 297 × 420 mm
+# 권장 조합: 5×7 squares × 55mm = 275 × 385 mm (양옆 11mm, 위아래 17mm 여백)
+#
+# 사용된 보드가 다르면 직접 측정하여 아래 값을 수정하거나,
+# main.py 실행 시 --board-config 로 다른 yaml 지정 가능.
+# 첫 실행 시 자동 탐지로 dictionary와 squares를 추정할 수도 있음.
+
+camera:
+  serial: "254622079503"
+
+board:
+  # ArUco 사전 종류
+  #   DICT_NxN_M  (NxN 비트, M개 마커)
+  #   미상이면 main.py 시작 시 자동 탐지 옵션 사용 권장
+  dictionary: DICT_4X4_50
+
+  # 보드의 사각형 격자 (가로 × 세로)
+  # A3 (420×297mm) 위에 7×10 보드 → 긴 변(420mm)이 squares_x=10
+  squares_x: 10
+  squares_y: 7
+
+  # 각 사각형 한 변 길이 (m) — 자로 측정한 실제 인쇄 크기
+  square_length_m: 0.03883
+
+  # ArUco 마커 한 변 길이 (m) — 사각형의 ~75%
+  marker_length_m: 0.0291
+
+# 카메라 선택 (RealSense)
+#   serial: 사용할 RealSense 일련번호. null이면 단일 기기 자동 선택.
+#           CLI --camera-serial 이 이 값보다 우선.
+#           --list-cameras 로 연결된 기기 목록 확인 가능.
+
+# 캘리브 옵션
+calibration:
+  # Phase 2 (Intrinsics)
+  intrinsics:
+    target_num_images: 25         # 권장 캡처 매수
+    min_num_images: 15            # 최소
+    min_corners_per_image: 8      # 한 장당 최소 검출 코너
+    target_rms_px: 0.5            # 통과 기준
+
+  # Phase 3 (Extrinsics) — Affine 3D (12 DoF) 사용
+  extrinsics:
+    target_num_pairs: 6           # 권장 (12 DoF 12 식 + 6 여유 = robust)
+    min_num_pairs: 4              # 절대 최소 (12 DoF / 점당 3 식)
+    target_rmse_mm: 5.0           # 통과 기준 (SO-101 hobby-grade FK 한계)
+    safe_z_m: 0.10                # EE 이동 시 안전 높이
+
+  # Phase 4 (Verification)
+  verification:
+    num_test_corners: 5           # 검증할 새 코너 수
+    target_avg_error_mm: 5.0      # 통과 기준 (SO-101 hobby-grade FK 한계)

@@ -1,0 +1,22 @@
+camera:
+  serial: '254622079503'
+board:
+  dictionary: DICT_4X4_50
+  squares_x: 10
+  squares_y: 7
+  square_length_m: 0.03883
+  marker_length_m: 0.0291
+calibration:
+  intrinsics:
+    target_num_images: 25
+    min_num_images: 15
+    min_corners_per_image: 8
+    target_rms_px: 0.5
+  extrinsics:
+    target_num_pairs: 6
+    min_num_pairs: 4
+    target_rmse_mm: 3.0
+    safe_z_m: 0.1
+  verification:
+    num_test_corners: 5
+    target_avg_error_mm: 3.0

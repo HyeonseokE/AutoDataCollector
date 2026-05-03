@@ -105,6 +105,7 @@ class LeRobotSkills:
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
         detect_model: str = "gemini-3-flash-preview",  # VLM model for detect_objects
+        recording_fps: int = 30,  # Single control+recording loop rate (Hz)
     ):
         self.robot_config_path = Path(robot_config)
         self.frame = frame
@@ -116,6 +117,7 @@ class LeRobotSkills:
         self.use_deceleration = use_deceleration
         self.verbose = verbose
         self.pick_offset = pick_offset  # Fixed offset from object top for pick/place
+        self.RECORDING_FPS = int(recording_fps)  # instance attr shadows class default
         self.skill_sequence = []  # 실행된 스킬 시퀀스 기록 (후처리 라벨링용)
         LeRobotSkills._last_instance = self  # 후처리에서 접근 가능하도록
 
@@ -393,15 +395,32 @@ class LeRobotSkills:
                     self._log(f"  Gravity sag compensation: gain={self.gravity_sag.gain}, "
                               f"reach_power={self.gravity_sag.reach_power}")
 
-        # Load Pix2Robot calibrator (if available)
+        # Load Pix2Robot calibrator
+        # 우선: 새 Charuco 캘리브 (factory K + depth + Affine 12 DoF, 시차 보정)
+        # 폴백: 기존 pix2robot homography (호환성)
         robot_id_int = int(robot_id_match.group(1)) if robot_id_match else 3
-        pix2robot_path = Path(f"robot_configs/pix2robot_matrices/{robot_id}_pix2robot_data.npz")
-        if pix2robot_path.exists():
+        charuco_extr_path = Path(
+            f"robot_configs/charuco_calibration/robot{robot_id_int}_cam2robot.npz"
+        )
+        legacy_pix2robot_path = Path(
+            f"robot_configs/pix2robot_matrices/{robot_id}_pix2robot_data.npz"
+        )
+
+        if charuco_extr_path.exists():
+            try:
+                from pix2robot_charuco_calibrator import Pix2RobotCharuco
+                self.pix2robot = Pix2RobotCharuco(robot_id=robot_id_int)
+                self._log(f"  Charuco calibrator loaded: {charuco_extr_path}")
+                self._log(f"    {self.pix2robot}")
+            except Exception as e:
+                self._log(f"  Warning: Failed to load Charuco calibrator: {e}")
+                self.pix2robot = None
+        elif legacy_pix2robot_path.exists():
             try:
                 from pix2robot_calibrator.calibrator import Pix2RobotCalibrator
                 self.pix2robot = Pix2RobotCalibrator(robot_id=robot_id_int)
-                self.pix2robot.load(str(pix2robot_path))
-                self._log(f"  Pix2Robot calibrator loaded: {pix2robot_path}")
+                self.pix2robot.load(str(legacy_pix2robot_path))
+                self._log(f"  Legacy Pix2Robot calibrator loaded: {legacy_pix2robot_path}")
             except Exception as e:
                 self._log(f"  Warning: Failed to load Pix2Robot calibrator: {e}")
                 self.pix2robot = None
@@ -2050,30 +2069,9 @@ class LeRobotSkills:
             self._log(f"  [Pick Z-Fix] {(object_height - self.pick_offset)*100:.1f}cm < min {MIN_PICK_Z*100:.1f}cm, clamping to {MIN_PICK_Z*100:.1f}cm")
         self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.1f}cm from top)")
 
-        # Pitch 보상: approach→pick 하강 시 pitch 변화로 인한 그리퍼 끝점 XY 드리프트 보정.
-        # 순수 회전 성분만 사용 (FRAME 변위 제외) — perturbation으로 approach가 옆으로
-        # 빗나가도 옆 이동을 drift로 오인하지 않도록 한다.
-        GRIPPER_TIP_LENGTH = 0.05  # gripper_frame_link → 실제 접촉점 거리 (m)
-        _, approach_joints, _ = self._get_current_state()
-        pick_joints, ik_ok = self.kinematics.inverse_kinematics_position_only(
-            np.array(pick_position), initial_guess=approach_joints,
-        )
-        if ik_ok:
-            tip_local = np.array([0, 0, GRIPPER_TIP_LENGTH])  # gripper Z-axis 방향
-            _, approach_rot = self.kinematics.forward_kinematics(approach_joints)
-            _, pick_rot = self.kinematics.forward_kinematics(pick_joints)
-            # FRAME→TIP 오프셋의 회전-기인 변화량 (FRAME 위치 변위 제외)
-            approach_tip_offset = approach_rot @ tip_local
-            pick_tip_offset = pick_rot @ tip_local
-            tip_drift = (pick_tip_offset - approach_tip_offset)[:2]
-
-            if np.linalg.norm(tip_drift) > 0.002:  # 2mm 이상 밀림 시만 보상
-                pick_position = [
-                    pick_position[0] - tip_drift[0],
-                    pick_position[1] - tip_drift[1],
-                    pick_position[2],
-                ]
-                self._log(f"  [Pitch Compensation] tip_drift=({tip_drift[0]*1000:.1f}, {tip_drift[1]*1000:.1f})mm")
+        # NOTE: gripper_frame_link 위치를 URDF 에서 fingertip 자체로 옮겼으므로
+        # (gripper_frame_joint origin: 98mm → 85mm 앞) tip offset 수동 보정 불필요.
+        # FK/IK 가 자동으로 fingertip 기준 동작.
 
         # Move to pick position (skill recording handled inside)
         pick_label = f"pick {object_name}" if object_name else None
@@ -2154,6 +2152,9 @@ class LeRobotSkills:
         self._log(f"  Place point: z={place_z*100:.1f}cm (pick_z={pick_z*100:.1f}cm, min={MIN_PLACE_Z*100:.0f}cm)")
         if saved_pitch is not None:
             self._log(f"  Restoring pitch: {np.degrees(saved_pitch):.1f}°")
+
+        # NOTE: tip offset 수동 보정 제거 — URDF 의 gripper_frame_link 가 이미
+        # fingertip 위치로 정의돼 있어서 IK 가 자동으로 fingertip 기준 동작.
 
         # Move to place position (skill recording handled inside)
         place_label = f"place on {target_name}" if target_name else None

@@ -300,7 +300,7 @@
   </link>
 
   <joint name="gripper_frame_joint" type="fixed">
-    <origin xyz="-0.0079 -0.000218121 -0.0981274" rpy="0 3.14159 0"/>
+    <origin xyz="-0.006824 -0.000189 -0.084754" rpy="0 3.14159 0"/>
     <parent link="gripper_link"/>
     <child link="gripper_frame_link"/>
     <axis xyz="0 0 0"/>

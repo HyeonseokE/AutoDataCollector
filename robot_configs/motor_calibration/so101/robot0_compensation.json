@@ -1,6 +1,6 @@
 {
-  "robot_id": "robot2",
-  "description": "Adaptive compensation parameters for SO-101 Robot 2",
+  "robot_id": "robot0",
+  "description": "Adaptive compensation parameters for SO-101 Robot 0",
   "calibration_date": "2025-12-18",
 
   "deadband": {
@@ -43,6 +43,16 @@
     "low_z_factor": 2.0,
     "mid_z_factor": 1.75,
     "high_z_factor": 1.5
+  },
+
+  "gravity_sag": {
+    "enabled": true,
+    "base_sag": 0.13,
+    "gain": 0.24,
+    "reach_power": 2.0,
+    "z_deadzone": 0.05,
+    "max_offset": 0.05,
+    "_comment": "sag = base_sag*reach^p + gain*reach^p*max(0,z-deadzone). base_sag tuned to ~8mm at reach=0.25 (low z), gain=0.24 keeps total ~10mm at z=200mm."
   },
 
   "gravity_lut": {

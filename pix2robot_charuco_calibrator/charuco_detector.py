@@ -46,6 +46,7 @@ class CharucoBoardSpec:
     squares_y: int         # 세로 사각형 개수
     square_length_m: float # 사각형 한 변 (m)
     marker_length_m: float # 사각형 안 ArUco 한 변 (m)
+    thickness_m: float = 0.0  # 보드 두께 (m). EE가 보드 상면을 터치하므로 affine fit 시 robot z에서 차감.
 
     def aruco_dict(self) -> cv2.aruco.Dictionary:
         if self.dictionary not in STANDARD_DICTIONARIES:
@@ -70,6 +71,7 @@ class CharucoBoardSpec:
             "squares_y": self.squares_y,
             "square_length_m": self.square_length_m,
             "marker_length_m": self.marker_length_m,
+            "thickness_m": self.thickness_m,
         }
 
     @classmethod
@@ -80,6 +82,7 @@ class CharucoBoardSpec:
             squares_y=int(d["squares_y"]),
             square_length_m=float(d["square_length_m"]),
             marker_length_m=float(d["marker_length_m"]),
+            thickness_m=float(d.get("thickness_m", 0.0)),
         )
 
 
@@ -263,14 +266,18 @@ class CharucoDetector:
             dtype=np.float32,
         )
 
-        if len(obj_pts_subset) < 4:
+        # solvePnP DLT requires >= 6 points; 그 미만이면 fallback 또는 빈 리스트
+        if len(obj_pts_subset) < 6:
             return []
 
         dist = self.dist if self.dist is not None else np.zeros(5, dtype=np.float64)
-        ok, rvec, tvec = cv2.solvePnP(
-            obj_pts_subset, image_pts, self.K, dist,
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
+        try:
+            ok, rvec, tvec = cv2.solvePnP(
+                obj_pts_subset, image_pts, self.K, dist,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+        except cv2.error:
+            return []  # PnP 실패 시 안전하게 빈 결과
         if not ok:
             return []
 

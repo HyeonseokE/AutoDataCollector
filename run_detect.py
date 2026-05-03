@@ -468,20 +468,29 @@ def run_realtime_detection(
     )
     detector.load_model()
 
-    # Pix2Robot 캘리브레이션 로드 (pixel → robot 직접 변환)
+    # Pix2Robot 캘리브레이션 로드: Charuco rigid 우선 → 옛날 pix2robot fallback
     print("[System] Loading calibration...")
     pix2robot = None
-    try:
-        from pix2robot_calibrator import Pix2RobotCalibrator
-        pix2robot_path = PROJECT_ROOT / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
-        if pix2robot_path.exists():
+    charuco_path = PROJECT_ROOT / "robot_configs" / "charuco_calibration" / f"robot{robot_id}_cam2robot.npz"
+    legacy_path = PROJECT_ROOT / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
+    if charuco_path.exists():
+        try:
+            from pix2robot_charuco_calibrator import Pix2RobotCharuco
+            pix2robot = Pix2RobotCharuco(robot_id=robot_id)
+            print(f"[System] Pix2RobotCharuco loaded (rmse={pix2robot.rmse_mm:.2f}mm)")
+        except Exception as e:
+            print(f"[System] Charuco load failed, falling back: {e}")
+            pix2robot = None
+    if pix2robot is None and legacy_path.exists():
+        try:
+            from pix2robot_calibrator import Pix2RobotCalibrator
             pix2robot = Pix2RobotCalibrator(robot_id=robot_id)
-            if pix2robot.load(str(pix2robot_path)):
-                print(f"[System] Pix2Robot calibration loaded ({len(pix2robot.pixel_points)} points)")
+            if pix2robot.load(str(legacy_path)):
+                print(f"[System] Legacy Pix2Robot loaded ({len(pix2robot.pixel_points)} points)")
             else:
                 pix2robot = None
-    except Exception as e:
-        print(f"[System] Pix2Robot not available: {e}")
+        except Exception as e:
+            print(f"[System] Pix2Robot not available: {e}")
 
     if pix2robot is None:
         print("[Warning] No Pix2Robot calibration found! Robot coordinates will be unavailable.")

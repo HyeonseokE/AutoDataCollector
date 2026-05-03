@@ -36,10 +36,23 @@ export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 POLICY_PATH="${POLICY_PATH:-CoRL2026-CSI/smol_pnp_subgoal_10fps}"   # HF model ID 또는 로컬 체크포인트 경로
 POLICY_DEVICE="${POLICY_DEVICE:-cuda}"                # cuda / cpu / mps
 
+# -------- task / 실행 설정 --------
+TASK="${TASK:-pick up the red block and place it on the blue dish}"                     # language instruction
+DURATION="${DURATION:-200}"                           # 실행 시간 (초)
+FPS="${FPS:-30}"                                      # action 실행 주파수 (Hz)
+
+# -------- action chunk 저장 (시각화용) --------
+SAVE_CHUNKS="${SAVE_CHUNKS:-true}"                   # true / false
+SAVE_CHUNKS_DIR="${SAVE_CHUNKS_DIR:-$REPO_DIR/outputs/action_chunks}"
+SAVE_CHUNKS_MAX="${SAVE_CHUNKS_MAX:-15}"              # 저장할 chunk 수
+
 # -------- robot 설정 --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"            # so100_follower / so101_follower / koch_follower / ...
 ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM0}"              # 시리얼 포트
 ROBOT_ID="${ROBOT_ID:-so101_robot2}"                  # 캘리브레이션 파일용 ID
+# AutoDataCollector 자체 캘리브레이션 폴더 (lerobot 은 ${ROBOT_ID}.json 형식의 파일을 찾음;
+# robotN_calibration.json 원본은 so101_robotN.json 심볼릭 링크로 매핑되어 있음)
+ROBOT_CALIBRATION_DIR="${ROBOT_CALIBRATION_DIR:-$(cd "$REPO_DIR/.." && pwd)/robot_configs/motor_calibration/so101}"
 # 액션 단위: true=degrees(arm) + gripper 0~100 / false=-100~+100(arm) + gripper 0~100
 # 학습 데이터셋과 반드시 일치해야 함 (불일치 시 로봇 엉뚱한 동작)
 ROBOT_USE_DEGREES="${ROBOT_USE_DEGREES:-false}"
@@ -53,10 +66,11 @@ ROBOT_USE_DEGREES="${ROBOT_USE_DEGREES:-false}"
 #   CAM_xxx_ID   = opencv일 때 경로/인덱스 ("/dev/video18", 0)
 #                  realsense일 때 시리얼 번호 ("335622072328")
 CAM_LEFT_WRIST_TYPE="${CAM_LEFT_WRIST_TYPE:-opencv}"
-CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video0}"
+CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video6}"
 CAM_LEFT_WRIST_WIDTH="${CAM_LEFT_WRIST_WIDTH:-640}"
 CAM_LEFT_WRIST_HEIGHT="${CAM_LEFT_WRIST_HEIGHT:-480}"
 CAM_LEFT_WRIST_FPS="${CAM_LEFT_WRIST_FPS:-30}"
+CAM_LEFT_WRIST_FOURCC="${CAM_LEFT_WRIST_FOURCC:-MJPG}"
 
 CAM_TOP_TYPE="${CAM_TOP_TYPE:-intelrealsense}"
 CAM_TOP_ID="${CAM_TOP_ID:-335622072328}"
@@ -66,26 +80,25 @@ CAM_TOP_FPS="${CAM_TOP_FPS:-30}"
 
 # 타입에 따라 카메라 dict 항목 조립
 _cam_entry() {
-    local type="$1" id="$2" w="$3" h="$4" fps="$5"
+    local type="$1" id="$2" w="$3" h="$4" fps="$5" fourcc="${6:-}"
     if [ "$type" = "opencv" ]; then
-        echo "{type: opencv, index_or_path: $id, width: $w, height: $h, fps: $fps}"
+        if [ -n "$fourcc" ]; then
+            echo "{type: opencv, index_or_path: $id, width: $w, height: $h, fps: $fps, fourcc: $fourcc}"
+        else
+            echo "{type: opencv, index_or_path: $id, width: $w, height: $h, fps: $fps}"
+        fi
     else
         echo "{type: intelrealsense, serial_number_or_name: '$id', width: $w, height: $h, fps: $fps}"
     fi
 }
 
 if [ -z "${CAMERAS+x}" ]; then
-    _lw=$(_cam_entry "$CAM_LEFT_WRIST_TYPE" "$CAM_LEFT_WRIST_ID" "$CAM_LEFT_WRIST_WIDTH" "$CAM_LEFT_WRIST_HEIGHT" "$CAM_LEFT_WRIST_FPS")
+    _lw=$(_cam_entry "$CAM_LEFT_WRIST_TYPE" "$CAM_LEFT_WRIST_ID" "$CAM_LEFT_WRIST_WIDTH" "$CAM_LEFT_WRIST_HEIGHT" "$CAM_LEFT_WRIST_FPS" "$CAM_LEFT_WRIST_FOURCC")
     _top=$(_cam_entry "$CAM_TOP_TYPE" "$CAM_TOP_ID" "$CAM_TOP_WIDTH" "$CAM_TOP_HEIGHT" "$CAM_TOP_FPS")
     CAMERAS="{ left_wrist: $_lw, top: $_top }"
     unset _lw _top
 fi
 unset -f _cam_entry
-
-# -------- task / 실행 설정 --------
-TASK="${TASK:-pick up the red block and place it on the blue dish.}"                     # language instruction
-DURATION="${DURATION:-120}"                           # 실행 시간 (초)
-FPS="${FPS:-20}"                                      # action 실행 주파수 (Hz)
 
 # -------- RTC (Real-Time Chunking) 설정 --------
 RTC_ENABLED="${RTC_ENABLED:-false}"                    # true / false
@@ -93,11 +106,6 @@ RTC_EXECUTION_HORIZON="${RTC_EXECUTION_HORIZON:-20}"  # chunk 당 실행 스텝 
 
 # -------- torch compile (선택) --------
 USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-false}"       # true / false
-
-# -------- action chunk 저장 (시각화용) --------
-SAVE_CHUNKS="${SAVE_CHUNKS:-true}"                   # true / false
-SAVE_CHUNKS_DIR="${SAVE_CHUNKS_DIR:-$REPO_DIR/outputs/action_chunks}"
-SAVE_CHUNKS_MAX="${SAVE_CHUNKS_MAX:-15}"              # 저장할 chunk 수
 
 # -------- 요약 출력 --------
 cat <<EOF
@@ -107,7 +115,8 @@ cat <<EOF
  policy  : $POLICY_PATH
  device  : $POLICY_DEVICE
  robot   : $ROBOT_TYPE ($ROBOT_ID)  port=$ROBOT_PORT  use_degrees=$ROBOT_USE_DEGREES
- cameras : left_wrist($CAM_LEFT_WRIST_TYPE:$CAM_LEFT_WRIST_ID ${CAM_LEFT_WRIST_WIDTH}x${CAM_LEFT_WRIST_HEIGHT}@${CAM_LEFT_WRIST_FPS}fps)
+ calib   : $ROBOT_CALIBRATION_DIR
+ cameras : left_wrist($CAM_LEFT_WRIST_TYPE:$CAM_LEFT_WRIST_ID ${CAM_LEFT_WRIST_WIDTH}x${CAM_LEFT_WRIST_HEIGHT}@${CAM_LEFT_WRIST_FPS}fps fourcc=${CAM_LEFT_WRIST_FOURCC})
            top($CAM_TOP_TYPE:$CAM_TOP_ID ${CAM_TOP_WIDTH}x${CAM_TOP_HEIGHT}@${CAM_TOP_FPS}fps)
  task    : $TASK
  rtc     : enabled=$RTC_ENABLED  horizon=$RTC_EXECUTION_HORIZON
@@ -129,6 +138,7 @@ INFER_ARGS=(
     --robot.type="$ROBOT_TYPE"
     --robot.port="$ROBOT_PORT"
     --robot.id="$ROBOT_ID"
+    --robot.calibration_dir="$ROBOT_CALIBRATION_DIR"
     --robot.use_degrees="$ROBOT_USE_DEGREES"
     --robot.cameras="$CAMERAS"
     --task="$TASK"

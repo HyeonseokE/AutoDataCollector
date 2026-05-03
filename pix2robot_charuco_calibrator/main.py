@@ -88,6 +88,7 @@ def phase1_board_setup(
     print(f"    squares:         {board_dict['squares_x']} × {board_dict['squares_y']}")
     print(f"    square_length:   {board_dict['square_length_m']*1000:.1f} mm")
     print(f"    marker_length:   {board_dict['marker_length_m']*1000:.1f} mm")
+    print(f"    thickness:       {float(board_dict.get('thickness_m', 0.0))*1000:.1f} mm")
     print()
 
     if not interactive:

@@ -286,6 +286,7 @@ class ForwardAndResetPipeline(BasePipeline):
         kwargs = {
             "robot_config": robot_config,
             "frame": "base_link",
+            "recording_fps": self.recording_fps,
         }
         if self.detect_model:
             kwargs["detect_model"] = self.detect_model
@@ -2333,17 +2334,30 @@ class ForwardAndResetPipeline(BasePipeline):
 
         grippable, obstacles = classify_objects(self.first_episode_positions)
 
-        # pix2robot 로드
+        # pix2robot 로드 — 새 Charuco 우선, 폴백으로 기존 homography
         pix2robot = None
-        try:
-            from pix2robot_calibrator import Pix2RobotCalibrator
-            calib_path = Path(__file__).parent / "robot_configs" / "pix2robot_matrices" / f"robot{self.robot_id}_pix2robot_data.npz"
-            if calib_path.exists():
+        charuco_path = (
+            Path(__file__).parent / "robot_configs" / "charuco_calibration"
+            / f"robot{self.robot_id}_cam2robot.npz"
+        )
+        legacy_path = (
+            Path(__file__).parent / "robot_configs" / "pix2robot_matrices"
+            / f"robot{self.robot_id}_pix2robot_data.npz"
+        )
+        if charuco_path.exists():
+            try:
+                from pix2robot_charuco_calibrator import Pix2RobotCharuco
+                pix2robot = Pix2RobotCharuco(robot_id=self.robot_id)
+            except Exception:
+                pix2robot = None
+        if pix2robot is None and legacy_path.exists():
+            try:
+                from pix2robot_calibrator import Pix2RobotCalibrator
                 pix2robot = Pix2RobotCalibrator(robot_id=self.robot_id)
-                if not pix2robot.load(str(calib_path)):
+                if not pix2robot.load(str(legacy_path)):
                     pix2robot = None
-        except Exception:
-            pass
+            except Exception:
+                pix2robot = None
 
         # Workspace
         kin_engine = None
@@ -2984,12 +2998,25 @@ class ForwardAndResetPipeline(BasePipeline):
         # 최종 시드 시각화 (new_seed 없이 — 모든 시드 분포 확인용)
         if self._all_previous_seed_positions and self.num_random_seeds > 1:
             try:
-                from pix2robot_calibrator import Pix2RobotCalibrator
                 pix2robot = None
-                calib_path = Path(__file__).parent / "robot_configs" / "pix2robot_matrices" / f"robot{self.robot_id}_pix2robot_data.npz"
-                if calib_path.exists():
+                charuco_path = (
+                    Path(__file__).parent / "robot_configs" / "charuco_calibration"
+                    / f"robot{self.robot_id}_cam2robot.npz"
+                )
+                legacy_path = (
+                    Path(__file__).parent / "robot_configs" / "pix2robot_matrices"
+                    / f"robot{self.robot_id}_pix2robot_data.npz"
+                )
+                if charuco_path.exists():
+                    try:
+                        from pix2robot_charuco_calibrator import Pix2RobotCharuco
+                        pix2robot = Pix2RobotCharuco(robot_id=self.robot_id)
+                    except Exception:
+                        pix2robot = None
+                if pix2robot is None and legacy_path.exists():
+                    from pix2robot_calibrator import Pix2RobotCalibrator
                     pix2robot = Pix2RobotCalibrator(robot_id=self.robot_id)
-                    if not pix2robot.load(str(calib_path)):
+                    if not pix2robot.load(str(legacy_path)):
                         pix2robot = None
 
                 last_seed_idx = len(self._all_previous_seed_positions) - 1

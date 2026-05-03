@@ -34,6 +34,7 @@ from .config import (
     load_cameras_from_yaml,
     load_skill_features_from_yaml,
     load_observation_features_from_yaml,
+    load_vcodec_from_yaml,
     build_features_from_yaml,
     CameraConfigRecord,
 )
@@ -77,6 +78,7 @@ class DatasetRecorder:
         features: Optional[Dict] = None,
         resume: bool = False,
         num_robots: int = None,
+        vcodec: Optional[str] = None,
     ):
         self.repo_id = repo_id
         self.fps = fps
@@ -86,6 +88,7 @@ class DatasetRecorder:
         self.image_writer_threads = image_writer_threads
         self.config_yaml = config_yaml
         self.resume = resume
+        self.vcodec = vcodec if vcodec is not None else load_vcodec_from_yaml(config_yaml)
 
         # Features & 카메라 설정: features가 전달되면 그 기준으로, 아니면 YAML에서 동적 생성
         if features is not None:
@@ -175,7 +178,7 @@ class DatasetRecorder:
                 print(f"  Robot type: {self.robot_type}")
                 print(f"  Features: {list(self.features.keys())}")
 
-                self._dataset = LeRobotDataset.create(
+                create_kwargs = dict(
                     repo_id=self.repo_id,
                     fps=self.fps,
                     robot_type=self.robot_type,
@@ -184,6 +187,10 @@ class DatasetRecorder:
                     use_videos=self.use_videos,
                     image_writer_threads=self.image_writer_threads,
                 )
+                if self.vcodec is not None:
+                    create_kwargs["vcodec"] = self.vcodec
+                    print(f"  Video codec: {self.vcodec}")
+                self._dataset = LeRobotDataset.create(**create_kwargs)
 
             print(f"[DatasetRecorder] Dataset at: {self._dataset.root}")
 

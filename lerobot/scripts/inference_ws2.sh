@@ -40,6 +40,9 @@ POLICY_DEVICE="${POLICY_DEVICE:-cuda}"                # cuda / cpu / mps
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"            # so100_follower / so101_follower / koch_follower / ...
 ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM0}"              # 시리얼 포트
 ROBOT_ID="${ROBOT_ID:-so101_robot0}"                  # 캘리브레이션 파일용 ID
+# AutoDataCollector 자체 캘리브레이션 폴더 (lerobot 은 ${ROBOT_ID}.json 형식의 파일을 찾음;
+# robotN_calibration.json 원본은 so101_robotN.json 심볼릭 링크로 매핑되어 있음)
+ROBOT_CALIBRATION_DIR="${ROBOT_CALIBRATION_DIR:-$(cd "$REPO_DIR/.." && pwd)/robot_configs/motor_calibration/so101}"
 # 액션 단위: true=degrees(arm) + gripper 0~100 / false=-100~+100(arm) + gripper 0~100
 # 학습 데이터셋과 반드시 일치해야 함 (불일치 시 로봇 엉뚱한 동작)
 ROBOT_USE_DEGREES="${ROBOT_USE_DEGREES:-false}"
@@ -107,6 +110,7 @@ cat <<EOF
  policy  : $POLICY_PATH
  device  : $POLICY_DEVICE
  robot   : $ROBOT_TYPE ($ROBOT_ID)  port=$ROBOT_PORT  use_degrees=$ROBOT_USE_DEGREES
+ calib   : $ROBOT_CALIBRATION_DIR
  cameras : left_wrist($CAM_LEFT_WRIST_TYPE:$CAM_LEFT_WRIST_ID ${CAM_LEFT_WRIST_WIDTH}x${CAM_LEFT_WRIST_HEIGHT}@${CAM_LEFT_WRIST_FPS}fps)
            top($CAM_TOP_TYPE:$CAM_TOP_ID ${CAM_TOP_WIDTH}x${CAM_TOP_HEIGHT}@${CAM_TOP_FPS}fps)
  task    : $TASK
@@ -129,6 +133,7 @@ INFER_ARGS=(
     --robot.type="$ROBOT_TYPE"
     --robot.port="$ROBOT_PORT"
     --robot.id="$ROBOT_ID"
+    --robot.calibration_dir="$ROBOT_CALIBRATION_DIR"
     --robot.use_degrees="$ROBOT_USE_DEGREES"
     --robot.cameras="$CAMERAS"
     --task="$TASK"

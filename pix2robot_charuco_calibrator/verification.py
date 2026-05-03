@@ -295,13 +295,17 @@ class Verifier:
         self._controller.disable_torque()
         print("  >> 토크 OFF")
 
+        thickness = float(getattr(self.spec, "thickness_m", 0.0) or 0.0)
+
         try:
             cancelled = False
             while True:
                 tcp = get_tcp_position(
                     self._controller, self._kinematics, self._calibration_limits,
                 )
-                err = tcp - predicted
+                tcp_corrected = tcp.copy()
+                tcp_corrected[2] -= thickness
+                err = tcp_corrected - predicted
                 err_mm = np.linalg.norm(err) * 1000
                 sys.stdout.write(
                     f"\r  TCP: x={tcp[0]:+.4f} y={tcp[1]:+.4f} z={tcp[2]:+.4f}  "
@@ -320,6 +324,8 @@ class Verifier:
             measured = get_tcp_position(
                 self._controller, self._kinematics, self._calibration_limits,
             )
+            measured = measured.copy()
+            measured[2] -= thickness
         finally:
             self._controller.enable_torque()
             print("\n  >> 토크 ON")

@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pix2robot_charuco_calibrator.geometry import (
     pixel_to_camera_3d,
-    affine_align_3d,
     rigid_align_kabsch,
     apply_transform,
     reprojection_residuals,
@@ -101,70 +100,6 @@ def test_rigid_align_with_noise():
         0.0001 < rmse < 0.003,
         f"rmse={rmse*1000:.2f} mm",
     )
-
-
-def test_affine_align_recovers_rigid():
-    """Affine은 rigid의 superset — 데이터가 진짜 rigid면 affine도 같은 해."""
-    np.random.seed(123)
-    R_true, _ = cv2.Rodrigues(np.array([0.2, -0.3, 0.1]))
-    t_true = np.array([0.5, 0.3, 0.1])
-    P_cam = np.random.uniform(-0.15, 0.15, (10, 3))
-    P_rob = (R_true @ P_cam.T).T + t_true
-
-    M, t, stats = affine_align_3d(P_cam, P_rob)
-    return (
-        _ok("affine on rigid: M ≈ R_true",
-            np.allclose(M, R_true, atol=1e-9),
-            f"max |ΔM|={np.abs(M-R_true).max():.2e}")
-        and _ok("affine on rigid: t 복원",
-                np.allclose(t, t_true, atol=1e-9))
-        and _ok("affine on rigid: rmse≈0", stats["rmse_m"] < 1e-9)
-    )
-
-
-def test_affine_align_anisotropic_scale():
-    """비등방 스케일 데이터 — affine은 fit, rigid는 잔차 큼."""
-    np.random.seed(456)
-    # 카메라 → 로봇이 비등방 스케일 (FK 비등방 오차 모사)
-    M_true = np.array([
-        [0.92, 0.03, 0.0],     # x 방향 8% 줄어듦
-        [-0.02, 0.88, 0.0],    # y 방향 12% 줄어듦
-        [0.0, 0.0, 0.95],      # z 방향 5% 줄어듦
-    ])
-    t_true = np.array([0.4, 0.1, 0.05])
-    P_cam = np.random.uniform(-0.15, 0.15, (12, 3))
-    P_rob = (M_true @ P_cam.T).T + t_true
-
-    M, t, stats_aff = affine_align_3d(P_cam, P_rob)
-    R, t_r, stats_rig = rigid_align_kabsch(P_cam, P_rob)
-
-    ok1 = _ok(
-        "affine on anisotropic: rmse < 0.1mm",
-        stats_aff["rmse_m"] < 1e-4,
-        f"affine rmse = {stats_aff['rmse_m']*1000:.4f} mm",
-    )
-    ok2 = _ok(
-        "rigid on anisotropic: rmse > 1mm (예상대로 큼)",
-        stats_rig["rmse_m"] > 0.001,
-        f"rigid rmse = {stats_rig['rmse_m']*1000:.2f} mm",
-    )
-    ok3 = _ok(
-        "affine 우월성 입증",
-        stats_aff["rmse_m"] < stats_rig["rmse_m"] / 10,
-        f"affine {stats_aff['rmse_m']*1000:.4f} vs rigid {stats_rig['rmse_m']*1000:.2f} mm",
-    )
-    return ok1 and ok2 and ok3
-
-
-def test_affine_align_min_points():
-    """4점 미만이면 ValueError."""
-    P_cam = np.random.randn(3, 3)
-    P_rob = np.random.randn(3, 3)
-    try:
-        affine_align_3d(P_cam, P_rob)
-        return _ok("affine 3점 → ValueError", False)
-    except ValueError:
-        return _ok("affine 3점 → ValueError", True)
 
 
 def test_rigid_align_no_reflection():
@@ -520,9 +455,6 @@ TESTS = [
     ("rigid known transform",           test_rigid_align_known_transform),
     ("rigid with 1mm noise",            test_rigid_align_with_noise),
     ("rigid no reflection",             test_rigid_align_no_reflection),
-    ("affine recovers rigid",           test_affine_align_recovers_rigid),
-    ("affine on anisotropic scale",     test_affine_align_anisotropic_scale),
-    ("affine min points",               test_affine_align_min_points),
     ("pixel→camera 3D analytic",        test_pixel_to_camera_3d),
     ("pixel→camera 3D w/ distortion",   test_pixel_to_3d_with_distortion),
     ("apply_transform consistency",     test_apply_transform_consistency),

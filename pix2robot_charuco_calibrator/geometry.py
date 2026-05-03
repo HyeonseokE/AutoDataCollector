@@ -61,7 +61,7 @@ def affine_align_3d(
     매칭점_robot ≈ M · 매칭점_camera + t
         M: (3, 3) 일반 선형 변환 (회전 + 비등방 스케일 + 전단 모두 허용)
         → SO-101 FK의 비등방 오차를 흡수해 RMSE ↓
-        → 단점: 거리 보존 강제 안 함 (rigid보다 물리적 의미 약함)
+        → 단점: 거리 보존 강제 안 함, 12 DoF 다 학습하려면 z 분산 필요
 
     LSQ 풀이:
         [P_cam | 1] · [M.T; t.T] = P_rob
@@ -116,8 +116,9 @@ def rigid_align_kabsch(
     매칭점_robot ≈ R · 매칭점_camera + t  (R은 회전, 거리 보존)
 
     Note:
-        FK가 정확한 시스템에서는 이게 물리적으로 맞음.
-        SO-101처럼 FK에 비등방 오차가 있으면 affine_align_3d 가 RMSE 낮음.
+        평면 데이터로도 풀림 (Affine 12-DoF와 달리 z 분산 불필요).
+        직교성 제약(R^T R = I, det=+1)이 z축 방향을 자동 결정.
+        단, FK 비등방 오차는 흡수 안 함 → RMSE에 그대로 드러남.
 
     Returns:
         R: (3,3) 회전 행렬 (det=+1 보장)

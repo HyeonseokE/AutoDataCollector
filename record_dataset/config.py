@@ -305,6 +305,53 @@ def load_subtask_features_from_yaml(yaml_path: str = None) -> Dict[str, bool]:
         return defaults
 
 
+VALID_VCODECS = {
+    "h264", "hevc", "libsvtav1", "auto",
+    "h264_nvenc", "hevc_nvenc",
+    "h264_videotoolbox", "hevc_videotoolbox",
+    "h264_vaapi", "hevc_vaapi",
+    "h264_qsv", "hevc_qsv",
+}
+
+
+def load_vcodec_from_yaml(yaml_path: str = None) -> Optional[str]:
+    """
+    YAML에서 video codec 설정 로드.
+
+    Returns:
+        str | None: vcodec 문자열 ("h264", "libsvtav1" 등). 없으면 None
+                    (None이면 LeRobotDataset.create의 기본값 사용)
+    """
+    import yaml
+    from pathlib import Path
+
+    if yaml_path is None:
+        yaml_path = Path(__file__).parent.parent / "pipeline_config" / "recording_config.yaml"
+    else:
+        yaml_path = Path(yaml_path)
+
+    if not yaml_path.exists():
+        return None
+
+    try:
+        with open(yaml_path, 'r') as f:
+            data = yaml.safe_load(f)
+
+        vcodec = data.get("vcodec")
+        if vcodec is None:
+            return None
+
+        if vcodec not in VALID_VCODECS:
+            print(
+                f"[Config] Warning: vcodec '{vcodec}' not in known list "
+                f"{sorted(VALID_VCODECS)}; passing through to lerobot for validation."
+            )
+        return vcodec
+    except Exception as e:
+        print(f"[Config] Warning: Failed to load vcodec from {yaml_path}: {e}")
+        return None
+
+
 def get_camera_feature_keys() -> List[str]:
     """활성화된 카메라 feature 키 목록"""
     return [cam.to_feature_key() for cam in get_enabled_cameras()]

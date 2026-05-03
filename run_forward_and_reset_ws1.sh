@@ -85,8 +85,8 @@ ROBOT_IDS=(2)
 
 ### [single arm task]
 ## pick and place
-INSTRUCTION="pick up the red block and place it on the blue dish"
-RESET_INSTRUCTION=""
+# INSTRUCTION="stack the blocks in the order of red and blue"
+# RESET_INSTRUCTION=""
 
 ## stack red and yellow
 # INSTRUCTION="stack the blocks in the order of red and yellow"
@@ -97,8 +97,8 @@ RESET_INSTRUCTION=""
 # RESET_INSTRUCTION=""
 
 ## distribute chocolate pies to each plate
-# INSTRUCTION="distribute chocolate pies to each plate."
-# RESET_INSTRUCTION=""
+INSTRUCTION="distribute chocolate pies to each plate."
+RESET_INSTRUCTION=""
 
 ### [dual arm task]
 ## towel folding
@@ -141,7 +141,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
+RESUME_SESSION="./results/session_20260502_090649"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

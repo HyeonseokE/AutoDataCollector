@@ -663,18 +663,32 @@ def lerobot_reset_code_gen_multi_turn(
 
     print(f"  Workspace: {workspace}")
 
-    # Pix2Robot 캘리브레이션 로드 (우선) → fallback: CoordinateTransformer
+    # Pix2Robot 캘리브레이션 로드: Charuco rigid 우선 → 옛날 pix2robot fallback
     if coord_transformer is None:
-        try:
-            from pix2robot_calibrator import Pix2RobotCalibrator
-            pix2robot_path = Path(__file__).parent.parent.parent / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
-            if pix2robot_path.exists():
+        charuco_path = (
+            Path(__file__).parent.parent.parent / "robot_configs" / "charuco_calibration"
+            / f"robot{robot_id}_cam2robot.npz"
+        )
+        legacy_path = (
+            Path(__file__).parent.parent.parent / "robot_configs" / "pix2robot_matrices"
+            / f"robot{robot_id}_pix2robot_data.npz"
+        )
+        if charuco_path.exists():
+            try:
+                from pix2robot_charuco_calibrator import Pix2RobotCharuco
+                coord_transformer = Pix2RobotCharuco(robot_id=robot_id)
+                print(f"  Pix2RobotCharuco loaded (rmse={coord_transformer.rmse_mm:.2f}mm)")
+            except Exception:
+                coord_transformer = None
+        if coord_transformer is None and legacy_path.exists():
+            try:
+                from pix2robot_calibrator import Pix2RobotCalibrator
                 _p2r = Pix2RobotCalibrator(robot_id=robot_id)
-                if _p2r.load(str(pix2robot_path)):
+                if _p2r.load(str(legacy_path)):
                     coord_transformer = _p2r
-                    print(f"  Pix2Robot calibration loaded ({len(_p2r.pixel_points)} points)")
-        except Exception:
-            pass
+                    print(f"  Legacy Pix2Robot loaded ({len(_p2r.pixel_points)} points)")
+            except Exception:
+                pass
 
     # Workspace 시각화 이미지 생성 (pix2robot 기반)
     reset_dir = Path(current_state_image_path).parent

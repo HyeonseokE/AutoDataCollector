@@ -44,8 +44,13 @@ def load_config(config_path: str) -> dict:
 
 
 def extract_robot_id(config_path: str) -> str:
-    """Extract robot ID from config path (e.g., 'so101_robot2.yaml' -> 'robot2')."""
-    match = re.search(r'robot(\d+)', str(config_path))
+    """Extract robot ID from config filename (e.g., 'so101_robot2.yaml' -> 'robot2').
+
+    파일명에서만 매칭 — 경로 상위(예: '/home/lerobot3/...')에 'robot\\d+' 패턴이
+    있어도 영향받지 않도록 basename + 'so101_' 접두 강제.
+    """
+    basename = Path(config_path).name
+    match = re.search(r'so101_robot(\d+)', basename)
     return f"robot{match.group(1)}" if match else "robot3"
 
 

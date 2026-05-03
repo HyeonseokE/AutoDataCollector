@@ -307,18 +307,34 @@ def _points_to_positions(
         return {}
 
     # Pix2Robot 캘리브레이션 로드 (pixel → robot 직접 변환)
+    # 우선순위: Charuco rigid (depth 기반 3D 복원 + cam_to_base) → 옛날 pix2robot fallback
     pix2robot = None
-    try:
-        from pix2robot_calibrator import Pix2RobotCalibrator
-        calib_path = Path(__file__).parent.parent / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
-        if calib_path.exists():
+    charuco_path = (
+        Path(__file__).parent.parent / "robot_configs" / "charuco_calibration"
+        / f"robot{robot_id}_cam2robot.npz"
+    )
+    legacy_path = (
+        Path(__file__).parent.parent / "robot_configs" / "pix2robot_matrices"
+        / f"robot{robot_id}_pix2robot_data.npz"
+    )
+    if charuco_path.exists():
+        try:
+            from pix2robot_charuco_calibrator import Pix2RobotCharuco
+            pix2robot = Pix2RobotCharuco(robot_id=robot_id)
+            print(f"  [CropPoint] Pix2RobotCharuco loaded (rmse={pix2robot.rmse_mm:.2f}mm)")
+        except Exception as e:
+            print(f"  [CropPoint] Charuco not available, falling back: {e}")
+            pix2robot = None
+    if pix2robot is None and legacy_path.exists():
+        try:
+            from pix2robot_calibrator import Pix2RobotCalibrator
             pix2robot = Pix2RobotCalibrator(robot_id=robot_id)
-            if pix2robot.load(str(calib_path)):
-                print(f"  [CropPoint] Pix2Robot calibration loaded ({len(pix2robot.pixel_points)} points)")
+            if pix2robot.load(str(legacy_path)):
+                print(f"  [CropPoint] Legacy Pix2Robot loaded ({len(pix2robot.pixel_points)} points)")
             else:
                 pix2robot = None
-    except Exception as e:
-        print(f"  [CropPoint] Pix2Robot not available: {e}")
+        except Exception as e:
+            print(f"  [CropPoint] Pix2Robot not available: {e}")
 
     # Depth 프레임 (pix2robot 높이 추정용)
     depth_frame = None

@@ -319,7 +319,12 @@ class GravitySagCompensator:
     desired position after gravity pulls it down.
 
     Model:
-        sag = gain * reach^reach_power * max(0, z - z_deadzone)
+        base = base_sag * reach^reach_power            (z 와 무관, 항상 적용)
+        z_extra = gain * reach^reach_power * max(0, z - z_deadzone)  (높은 z 추가 보정)
+        sag = min(base + z_extra, max_offset)
+
+    base_sag 가 0이면 기존 z-비례 공식과 동일.
+    낮은 z (pick) 에서도 sag 보정이 필요한 경우 base_sag > 0 설정.
 
     The parameters can be tuned per-robot via the compensation config JSON
     under the ``gravity_sag`` key.
@@ -332,12 +337,14 @@ class GravitySagCompensator:
         z_deadzone: float = 0.05,
         max_offset: float = 0.05,
         enabled: bool = True,
+        base_sag: float = 0.0,
     ):
         self.gain = gain
         self.reach_power = reach_power
         self.z_deadzone = z_deadzone
         self.max_offset = max_offset
         self.enabled = enabled
+        self.base_sag = base_sag
 
     @classmethod
     def from_config(cls, config: dict) -> "GravitySagCompensator":
@@ -348,6 +355,7 @@ class GravitySagCompensator:
             z_deadzone=config.get("z_deadzone", 0.05),
             max_offset=config.get("max_offset", 0.05),
             enabled=config.get("enabled", True),
+            base_sag=config.get("base_sag", 0.0),
         )
 
     def compute_offset(self, target_position: np.ndarray) -> float:
@@ -364,12 +372,16 @@ class GravitySagCompensator:
 
         x, y, z = float(target_position[0]), float(target_position[1]), float(target_position[2])
         reach = np.sqrt(x ** 2 + y ** 2)
+        reach_term = reach ** self.reach_power
 
+        # Base sag — always present (gripper weight pulls arm down at any z)
+        base = self.base_sag * reach_term
+
+        # Z-dependent additional sag — more droop at higher z above deadzone
         z_factor = max(0.0, z - self.z_deadzone)
-        if z_factor <= 0.0:
-            return 0.0
+        z_extra = self.gain * reach_term * z_factor
 
-        offset = self.gain * (reach ** self.reach_power) * z_factor
+        offset = base + z_extra
         return min(offset, self.max_offset)
 
     def get_info(self) -> dict:
@@ -379,6 +391,7 @@ class GravitySagCompensator:
             "reach_power": self.reach_power,
             "z_deadzone": self.z_deadzone,
             "max_offset": self.max_offset,
+            "base_sag": self.base_sag,
         }
 
 

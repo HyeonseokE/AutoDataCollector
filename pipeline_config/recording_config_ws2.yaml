@@ -7,6 +7,7 @@
 dataset_repo_id: "local/stack_red_and_blue"  # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
 recording_fps: 30
 robot_type: "so101"
+vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv
 
 # =============================================================================
 # Camera Configuration

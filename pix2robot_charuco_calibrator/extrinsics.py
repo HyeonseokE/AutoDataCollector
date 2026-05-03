@@ -267,6 +267,20 @@ class ExtrinsicsCalibrator:
 
             elif key == ord('r'):
                 cv2.destroyWindow(self._window_name)
+                # ── 보드 위치 변경 전 정리 ──
+                # 직전 EE 터치 후 토크 ON 상태일 가능성 높음 → EE가 시야 가림
+                # 토크 OFF 후 사용자가 EE를 직접 비키게 안내
+                try:
+                    self._controller.disable_torque()
+                    print()
+                    print("  ──── 보드 위치 변경 모드 ────")
+                    print("  토크 OFF 됐습니다. 다음을 순서대로 진행:")
+                    print("    1) EE를 카메라 시야 밖으로 손으로 비키기")
+                    print("    2) 보드를 새 위치(예: 다른 높이)에 평평하게 놓기")
+                    print("    3) 카메라 미리보기 창에서 's' 키로 캡처")
+                    print()
+                except Exception as e:
+                    print(f"  Warning: torque disable 실패: {e}")
                 if not self._capture_board(camera, increment_session=True):
                     return False
                 cv2.namedWindow(self._window_name)
@@ -431,9 +445,15 @@ class ExtrinsicsCalibrator:
         if cancelled:
             return
 
+        # 보드 두께 보정: EE는 보드 상면에 터치되지만, 캘리브 결과는 테이블 표면을
+        # z=0 으로 정렬해야 함 → robot z에서 보드 두께 차감.
+        thickness = float(self.spec.thickness_m or 0.0)
+        robot_xyz_corrected = np.array(tcp_final, dtype=np.float64)
+        robot_xyz_corrected[2] -= thickness
+
         pair = MatchedPair(
             camera_xyz=det.camera_xyz,
-            robot_xyz=tcp_final,
+            robot_xyz=robot_xyz_corrected,
             pixel_uv=det.pixel_uv,
             corner_id=det.corner_id,
             board_session=self.current_session,
@@ -442,8 +462,13 @@ class ExtrinsicsCalibrator:
         print(f"\n  매칭점 #{len(self.pairs)} 저장:")
         print(f"    매칭점_camera: ({pair.camera_xyz[0]:.4f}, "
               f"{pair.camera_xyz[1]:.4f}, {pair.camera_xyz[2]:.4f})")
-        print(f"    매칭점_robot:  ({pair.robot_xyz[0]:.4f}, "
-              f"{pair.robot_xyz[1]:.4f}, {pair.robot_xyz[2]:.4f})")
+        if thickness > 0:
+            print(f"    매칭점_robot:  ({pair.robot_xyz[0]:.4f}, "
+                  f"{pair.robot_xyz[1]:.4f}, {pair.robot_xyz[2]:.4f})  "
+                  f"(EE z={tcp_final[2]:.4f} - 두께 {thickness*1000:.1f}mm)")
+        else:
+            print(f"    매칭점_robot:  ({pair.robot_xyz[0]:.4f}, "
+                  f"{pair.robot_xyz[1]:.4f}, {pair.robot_xyz[2]:.4f})")
         if len(self.pairs) >= self.min_num_pairs and self.cam_to_base is None:
             print(f"  -> {len(self.pairs)} 쌍 모임. 'c'로 변환행렬 계산 가능.")
 
@@ -524,6 +549,7 @@ class ExtrinsicsCalibrator:
             "pixel_points": np.array([p.pixel_uv for p in self.pairs]),
             "corner_ids": np.array([p.corner_id for p in self.pairs]),
             "board_sessions": np.array([p.board_session for p in self.pairs]),
+            "board_thickness_m": np.array([float(self.spec.thickness_m or 0.0)]),
         }
         np.savez(save_path, **save_dict)
 

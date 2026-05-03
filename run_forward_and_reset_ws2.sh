@@ -88,19 +88,19 @@ ROBOT_IDS=(0)
 # INSTRUCTION="pick up the red block and place it on the blue dish"
 # RESET_INSTRUCTION=""
 
-INSTRUCTION="stack the blocks in the order of red and blue"
-RESET_INSTRUCTION=""
-
-## stack2
 # INSTRUCTION="stack the blocks in the order of red and blue"
 # RESET_INSTRUCTION=""
+
+## stack2
+INSTRUCTION="stack the blocks in the order of red and blue"
+RESET_INSTRUCTION=""
 
 ## stack3
 # INSTRUCTION="stack the blocks in the order of red and green, blue."
 # RESET_INSTRUCTION=""
 
 ## distribute chocolatepies
-# INSTRUCTION="pick up the red block and place it on the blue dish."
+# INSTRUCTION="distribute chocolate pies to each plate."
 # RESET_INSTRUCTION=""
 
 ### ==================== [dual arm task] ==================
@@ -119,8 +119,8 @@ RESET_INSTRUCTION=""
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=1
-NUM_RANDOM_SEEDS=1 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=5
+NUM_RANDOM_SEEDS=5 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)

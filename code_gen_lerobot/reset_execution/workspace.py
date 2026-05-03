@@ -399,21 +399,34 @@ def generate_random_positions(
     if seed is not None:
         np.random.seed(seed)
 
-    # pix2robot 자동 로드
+    # pix2robot 자동 로드 (Charuco rigid 우선 → 옛 pix2robot fallback)
     if pix2robot is None:
-        try:
-            from pix2robot_calibrator import Pix2RobotCalibrator
-            from pathlib import Path
-            for rid in [2, 3]:
-                p = Path(__file__).parent.parent.parent / "robot_configs" / "pix2robot_matrices" / f"robot{rid}_pix2robot_data.npz"
-                if p.exists():
+        from pathlib import Path
+        for rid in [2, 3]:
+            charuco_p = (
+                Path(__file__).parent.parent.parent / "robot_configs" / "charuco_calibration"
+                / f"robot{rid}_cam2robot.npz"
+            )
+            legacy_p = (
+                Path(__file__).parent.parent.parent / "robot_configs" / "pix2robot_matrices"
+                / f"robot{rid}_pix2robot_data.npz"
+            )
+            if charuco_p.exists():
+                try:
+                    from pix2robot_charuco_calibrator import Pix2RobotCharuco
+                    pix2robot = Pix2RobotCharuco(robot_id=rid)
+                    break
+                except Exception:
+                    pix2robot = None
+            if legacy_p.exists():
+                try:
+                    from pix2robot_calibrator import Pix2RobotCalibrator
                     pix2robot = Pix2RobotCalibrator(robot_id=rid)
-                    if not pix2robot.load(str(p)):
-                        pix2robot = None
-                    else:
+                    if pix2robot.load(str(legacy_p)):
                         break
-        except Exception:
-            pass
+                    pix2robot = None
+                except Exception:
+                    pix2robot = None
 
     # 장애물 리스트 (픽셀 bbox 기반)
     # allow_overlap: True → IoU ≤ 0.5 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
@@ -612,21 +625,31 @@ def draw_workspace_on_image(
     img_h, img_w = image.shape[:2]
     result = image.copy()
 
-    # ── Pix2Robot 로드 (없으면 자동 로드 시도) ──
+    # ── Pix2Robot 로드 (Charuco rigid 우선 → 옛 pix2robot fallback) ──
     p2r = pix2robot_calibrator
     if p2r is None:
-        try:
-            from pix2robot_calibrator import Pix2RobotCalibrator
-            calib_path = (
-                Path(__file__).parent.parent.parent
-                / "robot_configs" / "pix2robot_matrices" / f"robot{robot_id}_pix2robot_data.npz"
-            )
-            if calib_path.exists():
+        charuco_path = (
+            Path(__file__).parent.parent.parent / "robot_configs" / "charuco_calibration"
+            / f"robot{robot_id}_cam2robot.npz"
+        )
+        legacy_path = (
+            Path(__file__).parent.parent.parent / "robot_configs" / "pix2robot_matrices"
+            / f"robot{robot_id}_pix2robot_data.npz"
+        )
+        if charuco_path.exists():
+            try:
+                from pix2robot_charuco_calibrator import Pix2RobotCharuco
+                p2r = Pix2RobotCharuco(robot_id=robot_id)
+            except Exception:
+                p2r = None
+        if p2r is None and legacy_path.exists():
+            try:
+                from pix2robot_calibrator import Pix2RobotCalibrator
                 p2r = Pix2RobotCalibrator(robot_id=robot_id)
-                if not p2r.load(str(calib_path)):
+                if not p2r.load(str(legacy_path)):
                     p2r = None
-        except Exception:
-            pass
+            except Exception:
+                p2r = None
 
     if p2r is None:
         return result

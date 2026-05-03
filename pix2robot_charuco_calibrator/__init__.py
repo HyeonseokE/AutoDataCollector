@@ -17,6 +17,7 @@ from .charuco_detector import (
     group_compatible_dictionaries,
     STANDARD_DICTIONARIES,
 )
+from .runtime import Pix2RobotCharuco
 
 __all__ = [
     "pixel_to_camera_3d",
@@ -32,4 +33,5 @@ __all__ = [
     "auto_detect_dictionary",
     "group_compatible_dictionaries",
     "STANDARD_DICTIONARIES",
+    "Pix2RobotCharuco",
 ]

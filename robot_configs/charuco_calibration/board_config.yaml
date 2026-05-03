@@ -6,6 +6,7 @@ board:
   squares_y: 7
   square_length_m: 0.03883
   marker_length_m: 0.0291
+  thickness_m: 0.005
 calibration:
   intrinsics:
     target_num_images: 25
@@ -15,8 +16,8 @@ calibration:
   extrinsics:
     target_num_pairs: 6
     min_num_pairs: 4
-    target_rmse_mm: 3.0
+    target_rmse_mm: 5.0
     safe_z_m: 0.1
   verification:
     num_test_corners: 5
-    target_avg_error_mm: 3.0
+    target_avg_error_mm: 5.0

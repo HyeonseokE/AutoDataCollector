@@ -27,6 +27,11 @@ board:
   # ArUco 마커 한 변 길이 (m) — 사각형의 ~75%
   marker_length_m: 0.0291
 
+  # 보드 두께 (m) — 종이/플라스틱 인쇄물 두께. EE가 보드 상면에 터치되므로
+  # affine fit 시 robot z에서 이 값을 빼서 "테이블 표면 = z=0"으로 정렬.
+  # 자로 측정 권장. 일반 코팅종이 ≈ 0.0002, 폼보드 ≈ 0.003~0.005.
+  thickness_m: 0.005
+
 # 카메라 선택 (RealSense)
 #   serial: 사용할 RealSense 일련번호. null이면 단일 기기 자동 선택.
 #           CLI --camera-serial 이 이 값보다 우선.

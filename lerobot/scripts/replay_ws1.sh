@@ -43,6 +43,9 @@ export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"
 ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM1}"
 ROBOT_ID="${ROBOT_ID:-so101_robot2}"
+# AutoDataCollector 자체 캘리브레이션 폴더 (lerobot 은 ${ROBOT_ID}.json 형식의 파일을 찾음;
+# robotN_calibration.json 원본은 so101_robotN.json 심볼릭 링크로 매핑되어 있음)
+ROBOT_CALIBRATION_DIR="${ROBOT_CALIBRATION_DIR:-$(cd "$REPO_DIR/.." && pwd)/robot_configs/motor_calibration/so101}"
 
 # -------- 카메라 설정 (replay 에서는 미사용, 로그 출력용) --------
 CAM_LEFT_WRIST_TYPE="${CAM_LEFT_WRIST_TYPE:-opencv}"
@@ -70,6 +73,7 @@ cat <<EOF
  env     : $CONDA_ENV ($(python --version 2>&1))
  lerobot : $REPO_DIR/src (PYTHONPATH)
  robot   : $ROBOT_TYPE ($ROBOT_ID)  port=$ROBOT_PORT
+ calib   : $ROBOT_CALIBRATION_DIR
  cameras : (not used in replay — for reference only)
            left_wrist($CAM_LEFT_WRIST_TYPE:$CAM_LEFT_WRIST_ID ${CAM_LEFT_WRIST_WIDTH}x${CAM_LEFT_WRIST_HEIGHT}@${CAM_LEFT_WRIST_FPS}fps)
            top($CAM_TOP_TYPE:$CAM_TOP_ID ${CAM_TOP_WIDTH}x${CAM_TOP_HEIGHT}@${CAM_TOP_FPS}fps)
@@ -88,6 +92,7 @@ REPLAY_ARGS=(
     --robot.type="$ROBOT_TYPE"
     --robot.port="$ROBOT_PORT"
     --robot.id="$ROBOT_ID"
+    --robot.calibration_dir="$ROBOT_CALIBRATION_DIR"
     --dataset.repo_id="$DATASET_REPO_ID"
     --dataset.episode="$EPISODE"
     --dataset.fps="$FPS"

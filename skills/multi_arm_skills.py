@@ -60,6 +60,7 @@ class MultiArmSkills:
         recording_callback=None,
         camera=None,
         detect_model: str = None,
+        recording_fps: int = 30,
     ):
         """
         Args:
@@ -86,6 +87,7 @@ class MultiArmSkills:
             pick_offset=pick_offset,
             recording_callback=recording_callback,
             camera=camera,
+            recording_fps=recording_fps,
             **detect_kwargs,
         )
 
@@ -99,6 +101,7 @@ class MultiArmSkills:
             pick_offset=pick_offset,
             recording_callback=recording_callback,
             camera=camera,
+            recording_fps=recording_fps,
             **detect_kwargs,
         )
 

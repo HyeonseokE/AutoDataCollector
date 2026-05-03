@@ -163,6 +163,7 @@ class UnifiedMultiArmPipeline(BasePipeline):
             right_config=right_config,
             frame="base_link",
             verbose=self.verbose,
+            recording_fps=self.recording_fps,
             **detect_kwargs,
         )
         return True  # connect()는 LLM 코드에서 호출
@@ -446,18 +447,32 @@ class UnifiedMultiArmPipeline(BasePipeline):
         save_dir = str(Path(session_dir) / f"seed_{seed_index+1:02d}_setup")
         Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-        # ── per-arm pix2robot 로드 ──
-        pix2robot_map = {}  # {robot_id: Pix2RobotCalibrator}
-        try:
-            from pix2robot_calibrator import Pix2RobotCalibrator
-            for rid in self.robot_ids:
-                calib_path = Path(__file__).parent / "robot_configs" / "pix2robot_matrices" / f"robot{rid}_pix2robot_data.npz"
-                if calib_path.exists():
+        # ── per-arm pix2robot 로드 — Charuco 우선, 폴백 homography ──
+        pix2robot_map = {}  # {robot_id: Pix2RobotCharuco | Pix2RobotCalibrator}
+        for rid in self.robot_ids:
+            charuco_path = (
+                Path(__file__).parent / "robot_configs" / "charuco_calibration"
+                / f"robot{rid}_cam2robot.npz"
+            )
+            legacy_path = (
+                Path(__file__).parent / "robot_configs" / "pix2robot_matrices"
+                / f"robot{rid}_pix2robot_data.npz"
+            )
+            if charuco_path.exists():
+                try:
+                    from pix2robot_charuco_calibrator import Pix2RobotCharuco
+                    pix2robot_map[rid] = Pix2RobotCharuco(robot_id=rid)
+                    continue
+                except Exception:
+                    pass
+            if legacy_path.exists():
+                try:
+                    from pix2robot_calibrator import Pix2RobotCalibrator
                     p2r = Pix2RobotCalibrator(robot_id=rid)
-                    if p2r.load(str(calib_path)):
+                    if p2r.load(str(legacy_path)):
                         pix2robot_map[rid] = p2r
-        except Exception:
-            pass
+                except Exception:
+                    pass
 
         # ── per-arm workspace + kinematics ──
         workspace_map = {}  # {robot_id: ResetWorkspace}

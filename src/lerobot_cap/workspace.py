@@ -37,7 +37,7 @@ class BaseWorkspace:
         self,
         kinematics_engine: Optional["KinematicsEngine"] = None,
         min_reach: float = 0.22,
-        max_reach: float = 0.407,
+        max_reach: float = 0.38,
         z_floor: float = -0.02,  # 캘리브레이션 오차 허용 (-2cm)
         **kwargs,
     ):

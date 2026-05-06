@@ -381,6 +381,8 @@ class LeRobotSkills:
             self._log(f"  Warning: Free state not found: {free_state_path}")
 
         # Initialize compensator
+        # pick_z_offset 기본값 (보정 파일에서 덮어쓸 수 있음, signed 미터 단위)
+        self.pick_z_offset: float = 0.0
         if self.use_compensation:
             compensation_file = self.config.get("compensation_file")
             if compensation_file and Path(compensation_file).exists():
@@ -394,6 +396,16 @@ class LeRobotSkills:
                     self.gravity_sag = self.compensator.gravity_sag
                     self._log(f"  Gravity sag compensation: gain={self.gravity_sag.gain}, "
                               f"reach_power={self.gravity_sag.reach_power}")
+                # Per-robot pick descent boost (residual sag absorber)
+                try:
+                    with open(compensation_file) as _f:
+                        _comp = json.load(_f)
+                    self.pick_z_offset = float(_comp.get("pick_z_offset", 0.0))
+                    if abs(self.pick_z_offset) > 1e-9:
+                        self._log(f"  Pick z offset: {self.pick_z_offset*1000:+.1f}mm "
+                                  f"(applied at execute_pick_object descent)")
+                except Exception as _e:
+                    self._log(f"  Warning: failed to read pick_z_offset: {_e}")
 
         # Load Pix2Robot calibrator
         # 우선: 새 Charuco 캘리브 (factory K + depth + Affine 12 DoF, 시차 보정)
@@ -2060,14 +2072,17 @@ class LeRobotSkills:
         object_height = object_position[2]
 
         MIN_PICK_Z = 0.00  # Minimum pick height — no ground margin
-        pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
+        # pick_z = (object_top - pick_offset) + pick_z_offset (per-robot residual sag absorber, usually negative)
+        pick_z_raw = object_height - self.pick_offset + self.pick_z_offset
+        pick_z = max(pick_z_raw, MIN_PICK_Z)
         pick_position = [object_position[0], object_position[1], pick_z]
 
         self._log(f"\n[Execute Pick Object]")
         self._log(f"  Object height: {object_height*100:.1f}cm")
-        if object_height - self.pick_offset < MIN_PICK_Z:
-            self._log(f"  [Pick Z-Fix] {(object_height - self.pick_offset)*100:.1f}cm < min {MIN_PICK_Z*100:.1f}cm, clamping to {MIN_PICK_Z*100:.1f}cm")
-        self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.1f}cm from top)")
+        if pick_z_raw < MIN_PICK_Z:
+            self._log(f"  [Pick Z-Fix] {pick_z_raw*100:.1f}cm < min {MIN_PICK_Z*100:.1f}cm, clamping to {MIN_PICK_Z*100:.1f}cm")
+        offset_str = f", z_offset={self.pick_z_offset*1000:+.1f}mm" if abs(self.pick_z_offset) > 1e-9 else ""
+        self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.1f}cm from top{offset_str})")
 
         # NOTE: gripper_frame_link 위치를 URDF 에서 fingertip 자체로 옮겼으므로
         # (gripper_frame_joint origin: 98mm → 85mm 앞) tip offset 수동 보정 불필요.

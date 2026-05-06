@@ -92,7 +92,7 @@ ROBOT_IDS=(0)
 # RESET_INSTRUCTION=""
 
 # arrange
-INSTRUCTION="Arrange red, green, blue blocks from top to bottom "
+INSTRUCTION="Arrange red, green, blue blocks along the block line from top to bottom"
 RESET_INSTRUCTION=""
 
 ## stack3

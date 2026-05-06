@@ -24,6 +24,8 @@
     "wrist_roll": 0.0
   },
   "preload_gain": 0.5,
+  "pick_z_offset": 0.0,
+  "_pick_z_offset_comment": "Per-robot pick descent boost (meters, signed). Added to execute_pick_object's commanded pick_z. Negative = descend further to absorb residual sag the gravity_sag model leaves uncompensated. Default 0.0 \u2014 set non-zero only if production logs show fingertip stops above commanded z (=above object) even after gravity_sag compensation.",
   "base_compensation": {
     "shoulder_pan": 0.0,
     "shoulder_lift": 1.84,

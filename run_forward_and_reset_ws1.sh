@@ -145,7 +145,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
+RESUME_SESSION="./results/session_20260506_131357"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

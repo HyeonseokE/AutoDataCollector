@@ -24,6 +24,10 @@
     "wrist_roll": 0.0
   },
   "preload_gain": 0.5,
+
+  "pick_z_offset": -0.03,
+  "_pick_z_offset_comment": "Per-robot pick descent boost (meters, signed). Added to execute_pick_object's commanded pick_z. Negative = descend further to absorb residual sag the gravity_sag model leaves uncompensated. Set to -0.030 (descend 3cm extra) on 2026-05-06 — production logs showed fingertip stopping ~5mm below block top instead of intended 15mm dive (red block: pick_z cmd=34mm, actual=44mm; effective dive only 5mm). MIN_PICK_Z=0 clamp protects against below-table commands for short objects.",
+
   "base_compensation": {
     "shoulder_pan": 0.0,
     "shoulder_lift": 0.13,
@@ -40,12 +44,12 @@
   },
   "gravity_sag": {
     "enabled": true,
-    "base_sag": 0.0,
-    "gain": 0.1443,
-    "reach_power": 0.5756,
+    "base_sag": 0.20,
+    "gain": 0.24,
+    "reach_power": 2.0,
     "z_deadzone": 0.05,
     "max_offset": 0.05,
-    "_comment": "Auto-calibrated. sag = 0.0000*reach^0.58 + 0.1443*reach^0.58*max(0, z - 0.05). base_sag covers pick region (z<deadzone); gain covers high-z extra droop."
+    "_comment": "Hand-tuned over auto-cal (auto fit settled at base_sag=0 because no-payload calibration data was ~6mm at low z; production pick with payload showed 14.7mm at reach=0.27). base_sag=0.20 + reach_power=2.0 reproduces the 14.7mm pick-region observation while preserving cantilever-style reach^2 scaling. gain=0.24 retained for high-z extra droop."
   },
   "gravity_lut": {
     "joint_names": [

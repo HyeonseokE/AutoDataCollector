@@ -109,6 +109,7 @@ def lerobot_code_gen_prompt(
        | `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
        | `execute_pick_object(object_position, ...)` | Descend to pick position (2.5cm from top), close gripper, save pitch | object_position, object_name |
        | `execute_place_object(place_position, ...)` | Descend to place position with saved pitch, open gripper 70% | place_position, is_table, gripper_open_ratio, target_name |
+       | `execute_place_lid(place_position, ...)` | Lid-specific place: descend → drag -x 2cm → release. Use INSTEAD OF execute_place_object when seating a lid on a container | place_position, pull_distance, gripper_open_ratio, target_name |
        | `execute_press(position, ...)` | 2-phase press: descend to contact, then press with torque limit | position, press_depth, contact_height, hold_time, target_name |
        | `execute_push(start_position, end_position, ...)` | Descend → run-up → linear push → retreat (all-in-one) | start_position, end_position, push_height, object_name |
 
@@ -121,6 +122,12 @@ def lerobot_code_gen_prompt(
          - gripper_open_ratio=0.7: opens gripper to 70% (ALWAYS use 0.7)
          - Pitch is automatically restored from the saved value at pick time
          - **target_name**: Pass the target name for subgoal labeling (e.g., "blue dish")
+       **execute_place_lid**: Lid-specific variant of execute_place_object. Use whenever the held object is a lid (any object whose name contains "lid") being seated on top of a container.
+         - Same descent semantics as execute_place_object(is_table=False): place_position is the container's top-surface position, release height = surface_z + saved pick_z.
+         - After descent, drags the lid by `pull_distance` (default 2cm) in the -x direction (toward the robot base) with the gripper still closed, then opens the gripper. This compensates for systematic +x landing offset so the lid sits centered on the rim.
+         - Pass the container's position as-is (e.g. `positions["pot"]["position"]`). Leave `pull_distance` at default unless instructed otherwise. Use `gripper_open_ratio=0.7`.
+         - Do NOT use execute_place_object for lids — use execute_place_lid.
+
        **execute_press**: Call from approach position with gripper closed. 2-phase descent: normal speed to contact surface, then slow press with torque limit (400/1000).
 
          - `contact_height`: surface height of the button/switch (meters, e.g., object's z value)
@@ -156,6 +163,16 @@ def lerobot_code_gen_prompt(
        skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Move object_name above target_object", verification_question="Is object_name above target_object?")
        skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="Place object_name on target_object", verification_question="Is object_name placed on target_object?")
        skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from target_object and close gripper", verification_question="Is the gripper clear of target_object and closed?")
+
+       # PLACE LID pattern (lid-specific variant: descends, drags -x 2cm, releases — compensates +x landing bias):
+       # Use this whenever the held object is a lid (object name contains "lid").
+       # Container z must be the rim/top surface (already provided in positions dict).
+       lid_target = positions["pot"]   # or any container whose top is the lid's resting surface
+       lid_target_pos = lid_target["position"]
+
+       skills.move_to_position([lid_target_pos[0], lid_target_pos[1], approach_height], target_name="pot", skill_description="Move lid above pot", verification_question="Is the lid above the pot?")
+       skills.execute_place_lid(lid_target_pos, gripper_open_ratio=0.7, target_name="pot", skill_description="Place lid on pot and seat it", verification_question="Is the lid centered and seated on the pot?")
+       skills.move_to_position([lid_target_pos[0] - 0.02, lid_target_pos[1], approach_height], target_name="pot", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from pot and close gripper", verification_question="Is the gripper clear of the pot and closed?")
 
        # LATERAL PICK pattern (approach from side at object height WHILE opening gripper, then slide in):
        # Use when the object is thin/tall and top-down approach is not suitable (e.g., gooseneck, handle, lever).
@@ -384,6 +401,14 @@ skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_na
 
 # PLACE ON TABLE — same as above but is_table=True
 
+# PLACE LID — lid-specific variant: descend → drag -x 2cm → release. USE THIS (not execute_place_object) when the held object's name contains "lid".
+# Container z must already be the rim/top surface (positions dict provides this for "pot" etc.).
+lid_target = positions["pot"]   # container the lid sits on
+lid_target_pos = lid_target["position"]
+skills.move_to_position([lid_target_pos[0], lid_target_pos[1], approach_height], target_name="pot")
+skills.execute_place_lid(lid_target_pos, gripper_open_ratio=0.7, target_name="pot")
+skills.move_to_position([lid_target_pos[0] - 0.02, lid_target_pos[1], approach_height], target_name="pot", gripper_action="close", gripper_start_fraction=0.2)
+
 # LATERAL PICK — approach from side at object height (for thin/tall objects like gooseneck, handle, lever)
 # Determine offset direction from scene analysis — approach from obstacle-free side
 lat_obj = positions["object_name"]
@@ -439,9 +464,18 @@ if __name__ == "__main__":
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
-6. **Re-detection**: After each subtask, re-detect ONLY if the next subtask needs the **new position of an already-moved object** (e.g., stacking on top of it). If the next object to manipulate **hasn't been touched yet**, its initial `positions` value is still valid — skip re-detection and use it directly.
-   - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. Use the initial positions instead.
-   - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
+6. **Re-detection (MANDATORY between subtasks)**: BEFORE entering each subtask after the first, re-detect THAT subtask's pick AND place targets to refresh their positions. The previous subtask may have changed the scene in ways that affect the next target — opening a lid uncovers contents, settling shifts an object, lighting/shadow shifts after arm motion. Pattern:
+   ```python
+   skills.move_to_initial_state()  # clear arm from camera view first
+   updated = skills.detect_objects(["next_pick_target", "next_place_target"])
+   if updated.get("next_pick_target") and updated["next_pick_target"].get("position"):
+       pick_pos = updated["next_pick_target"]["position"]
+   if updated.get("next_place_target") and updated["next_place_target"].get("position"):
+       place_pos = updated["next_place_target"]["position"]
+   ```
+   - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. For those, keep the initial positions instead.
+   - **CRITICAL**: After `detect_objects`, you MUST **re-assign ALL local variables** extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
+   - **NOTE**: `detect_objects` takes ONLY one positional argument (a list of object names). Do NOT pass `skill_description` or other kwargs.
 7. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 8. **Integrated gripper motion**:
    - Pick approach: `move_to_position(..., gripper_action="open", gripper_start_fraction=0.3)` — opens during last 70% of approach.
@@ -579,6 +613,14 @@ skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_na
 skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="Place object_name on target_object", verification_question="Is object_name on target_object?")
 skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from target_object and close gripper", verification_question="Is the gripper clear of target_object and closed?")
 
+# PLACE LID — lid-specific variant: descend → drag -x 2cm → release. USE THIS (not execute_place_object) whenever the held object's name contains "lid".
+# Container z is already the rim/top surface in positions dict (e.g. positions["pot"]).
+lid_target = positions["pot"]
+lid_target_pos = lid_target["position"]
+skills.move_to_position([lid_target_pos[0], lid_target_pos[1], approach_height], target_name="pot", skill_description="Move lid above pot", verification_question="Is the lid above the pot?")
+skills.execute_place_lid(lid_target_pos, gripper_open_ratio=0.7, target_name="pot", skill_description="Place lid on pot and seat it", verification_question="Is the lid centered and seated on the pot?")
+skills.move_to_position([lid_target_pos[0] - 0.02, lid_target_pos[1], approach_height], target_name="pot", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from pot and close gripper", verification_question="Is the gripper clear of the pot and closed?")
+
 # PLACE AT PIXEL (is_table=True) — target is NOT in positions dict (e.g., empty spot on table)
 # Specify [y, x] in normalized 0–1000 coordinates from the top-view image.
 # ⚠ REACHABILITY CHECK: Before using any pixel coordinate, verify on the workspace image
@@ -593,11 +635,11 @@ skills.gripper_close(skill_description="Close gripper after release", verificati
 # SUBTASK + RE-DETECTION PATTERN (MANDATORY for multi-object tasks)
 # Each pick-place of one object = one subtask.
 # Wrap with set_subtask() before and clear_subtask() after.
-# After each subtask (except the last), re-detect all objects to update positions.
+# BEFORE each subtask after the first, re-detect THAT subtask's pick AND place targets.
 
 # Example: stack B on A, then C on B
 
-# Subtask 1: 1st object — no re-detection needed (scene unchanged)
+# Subtask 1: 1st pick-place — uses initial detection (no prior subtask to invalidate state).
 # NOTE: For brevity this example omits explicit approach/retreat move_to_position calls.
 # In practice include them with gripper_action="open"/"close" as shown above.
 skills.set_subtask("pick A and place at target")
@@ -605,14 +647,12 @@ skills.execute_pick_object(a_pos, object_name="A", skill_description="Pick A", v
 skills.execute_place_object(target_pos, is_table=True, gripper_open_ratio=0.7, target_name="target", skill_description="Place A", verification_question="Is A placed?")
 skills.clear_subtask()
 
-# Re-detection: B hasn't been touched yet, so its initial position is still valid.
-# Re-detect ONLY if the next subtask needs the NEW position of an already-moved object (e.g., stacking ON A).
-# For stacking: re-detect A to get its updated position after placement.
+# Re-detect Subtask 2's targets — pick=B, place=A (A is the just-placed surface to stack on).
 # NOTE: detect_objects takes ONLY one argument (list of object names). Do NOT pass skill_description or other kwargs.
-skills.move_to_initial_state()  # clear arm from camera view
-updated = skills.detect_objects(["A"])  # re-detect only A (need its new position for stacking)
+skills.move_to_initial_state()  # clear arm from camera view first
+updated = skills.detect_objects(["A", "B"])
 if updated.get("A") and updated["A"].get("position"): a_pos = updated["A"]["position"]
-# b_pos is still valid from initial positions — no re-detection needed
+if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
 
 # Subtask 2: 2nd object — pick → place
 skills.set_subtask("pick B and place on A")
@@ -620,12 +660,11 @@ skills.execute_pick_object(b_pos, object_name="B", skill_description="Pick B", v
 skills.execute_place_object(a_pos, is_table=False, gripper_open_ratio=0.7, target_name="A", skill_description="Place B on A", verification_question="Is B on A?")
 skills.clear_subtask()
 
-# Re-detection: C hasn't been touched. Re-detect only objects whose NEW position is needed next.
-# NOTE: detect_objects takes ONLY one argument (list of object names). Do NOT pass skill_description or other kwargs.
+# Re-detect Subtask 3's targets — pick=C, place=B (newly placed; need updated position).
 skills.move_to_initial_state()
-updated = skills.detect_objects(["A"])  # need A's latest position for stacking C on it
-if updated.get("A") and updated["A"].get("position"): a_pos = updated["A"]["position"]
-# c_pos is still valid from initial positions
+updated = skills.detect_objects(["B", "C"])
+if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
+if updated.get("C") and updated["C"].get("position"): c_pos = updated["C"]["position"]
 
 # Subtask 3: 3rd object — pick → place
 skills.set_subtask("pick C and place on B")
@@ -634,8 +673,7 @@ skills.execute_place_object(b_pos, is_table=False, gripper_open_ratio=0.7, targe
 skills.clear_subtask()
 
 # DISTRIBUTE PATTERN (place each object onto a different target — e.g., distribute pies to plates)
-# Key: every object and every target are in the positions dict from initial detection.
-# NO re-detection needed — nothing changes position until you move it, and targets (plates) never move.
+# Re-detect Subtask N+1's pick + place targets between subtasks (defensive against scene shifts).
 
 # Subtask 1
 skills.set_subtask("place A on plate_1")
@@ -649,12 +687,16 @@ skills.execute_place_object(plate1_pos, is_table=True, gripper_open_ratio=0.7, t
 skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from plate_1 and close gripper", verification_question="Is gripper clear and closed?")
 skills.clear_subtask()
 
-# NO re-detection — B and plate_2 are untouched, use initial positions directly
+# Re-detect Subtask 2's targets — pick=B, place=plate_2.
+b_pos = positions["B"]["position"]            # initial-detection fallback
+plate2_pos = positions["plate_2"]["position"] # initial-detection fallback
+skills.move_to_initial_state()
+updated = skills.detect_objects(["B", "plate_2"])
+if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
+if updated.get("plate_2") and updated["plate_2"].get("position"): plate2_pos = updated["plate_2"]["position"]
 
 # Subtask 2
 skills.set_subtask("place B on plate_2")
-b_pos = positions["B"]["position"]
-plate2_pos = positions["plate_2"]["position"]
 skills.move_to_position([b_pos[0], b_pos[1], approach_height], target_name="B", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach B and open gripper", verification_question="Is gripper above B and open?")
 skills.execute_pick_object(b_pos, object_name="B", skill_description="Pick B", verification_question="Is B grasped?")
 skills.move_to_position([b_pos[0], b_pos[1], approach_height], target_name="B", skill_description="Lift B", verification_question="Is B lifted?")
@@ -693,9 +735,18 @@ if __name__ == "__main__":
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
-6. **Re-detection**: After each subtask, re-detect ONLY if the next subtask needs the **new position of an already-moved object** (e.g., stacking on top of it). If the next object to manipulate **hasn't been touched yet**, its initial `positions` value is still valid — skip re-detection and use it directly.
-   - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. Use the initial positions instead.
-   - **CRITICAL**: After updating positions, you MUST **re-assign ALL local variables** that were extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
+6. **Re-detection (MANDATORY between subtasks)**: BEFORE entering each subtask after the first, re-detect THAT subtask's pick AND place targets to refresh their positions. The previous subtask may have changed the scene in ways that affect the next target — opening a lid uncovers contents, settling shifts an object, lighting/shadow shifts after arm motion. Pattern:
+   ```python
+   skills.move_to_initial_state()  # clear arm from camera view first
+   updated = skills.detect_objects(["next_pick_target", "next_place_target"])
+   if updated.get("next_pick_target") and updated["next_pick_target"].get("position"):
+       pick_pos = updated["next_pick_target"]["position"]
+   if updated.get("next_place_target") and updated["next_place_target"].get("position"):
+       place_pos = updated["next_place_target"]["position"]
+   ```
+   - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. For those, keep the initial positions instead.
+   - **CRITICAL**: After `detect_objects`, you MUST **re-assign ALL local variables** extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
+   - **NOTE**: `detect_objects` takes ONLY one positional argument (a list of object names). Do NOT pass `skill_description` or other kwargs.
 7. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 8. **Integrated gripper motion**:
    - Pick approach: `move_to_position(..., gripper_action="open", gripper_start_fraction=0.3)` — opens during last 70% of approach.

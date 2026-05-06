@@ -5,7 +5,7 @@
 set -euo pipefail
 
 PORT="${PORT:-/dev/ttyACM2}"
-ID="${ID:-so101_robot3_leader}"
+ID="${ID:-so101_robot4_leader}"
 TELEOP_TYPE="${TELEOP_TYPE:-so101_leader}"
 
 echo "========================================="

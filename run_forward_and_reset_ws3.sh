@@ -78,33 +78,32 @@ cd "$SCRIPT_DIR"
 # 예: (0)       → shared + left_arm
 #     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
-ROBOT_IDS=(6)
+ROBOT_IDS=(4)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
 
-### [single arm task]
+### ==================== [single arm task] ==================
 ## pick and place
-# INSTRUCTION="close the pot’s lid."
+# INSTRUCTION="pick up the red block and place it on the blue dish"
 # RESET_INSTRUCTION=""
 
-INSTRUCTION="Sort each colored block onto the plate of the matching color."
-RESET_INSTRUCTION=""
-
-
-## stack red and yellow
+## stack2
 # INSTRUCTION="stack the blocks in the order of red and yellow"
 # RESET_INSTRUCTION=""
 
-## stack RYP blocks
-# INSTRUCTION="stack the blocks in the order of red and yellow, purple."
+## stack3
+# INSTRUCTION="Stack the red, yellow, and purple blocks on the blue dish in that order."
 # RESET_INSTRUCTION=""
 
-## distribute chocolate pies to each plate
-# INSTRUCTION="distribute chocolate pies to each plate."
+## 
+INSTRUCTION="making ramen: pick up the noodles, put them in the pot, then pour water into the pot using the ladle."
+RESET_INSTRUCTION=""
+
+# INSTRUCTION="Close the pot by placing the lid on top."
 # RESET_INSTRUCTION=""
 
-### [dual arm task]
+### ==================== [dual arm task] ==================
 ## towel folding
 # INSTRUCTION="fold the towel in half from top to bottom."
 # RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
@@ -120,15 +119,12 @@ RESET_INSTRUCTION=""
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=100
-NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=30
+NUM_RANDOM_SEEDS=3 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
-# [선택] 로봇별 reset 공간 제약 (all, all_wo_center, top-left, top-right, bottom-left, bottom-right)
+# [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
-# all:           워크스페이스 전역
-# all_wo_center: all 에서 이미지 중앙 세로 타원 (160 x 320 px) 영역만 제외
-#                (위↔아래 1열 정렬 같은 task 에서 reset 위치가 중앙 라인에 떨어지지 않게 함)
-# top-left 등:   테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
+# all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
 RESETSPACE_PER_ROBOT=(all) 
 
 # [필수] 결과 저장 경로
@@ -207,7 +203,7 @@ load_free_api_config() {
     fi
 }
 
-RECORDING_CONFIG_FILE="$CONFIG_DIR/recording_config_ws4.yaml"
+RECORDING_CONFIG_FILE="$CONFIG_DIR/recording_config_ws3.yaml"
 
 load_recording_config() {
     local config_file="$RECORDING_CONFIG_FILE"

@@ -74,6 +74,16 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+import av
+
+# Suppress libx264/libav INFO banners (e.g. "[libx264 @ ...] using cpu capabilities ...")
+# so per-episode encoder init does not drown out "Recording episode N" messages.
+# Note: video_utils calls av.logging.restore_default_callback() after each encode,
+# which restores ffmpeg's native stderr printer and bypasses set_level filtering.
+# Neutralizing it keeps PyAV's Python log forwarding active so set_level holds.
+av.logging.set_level(av.logging.ERROR)
+av.logging.restore_default_callback = lambda: None
+
 from lerobot.cameras import (  # noqa: F401
     CameraConfig,  # noqa: F401
 )

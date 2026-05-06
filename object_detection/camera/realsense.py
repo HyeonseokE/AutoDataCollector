@@ -9,7 +9,8 @@ from typing import Tuple, Optional
 
 
 class RealSenseD435:
-    def __init__(self, width: int = 640, height: int = 480, fps: int = 30):
+    def __init__(self, width: int = 640, height: int = 480, fps: int = 30,
+                 serial_number: Optional[str] = None):
         """
         D435 카메라 초기화
 
@@ -17,10 +18,12 @@ class RealSenseD435:
             width: 이미지 너비
             height: 이미지 높이
             fps: 프레임 레이트
+            serial_number: 특정 카메라 시리얼 번호 (None이면 첫 번째 카메라 사용)
         """
         self.width = width
         self.height = height
         self.fps = fps
+        self.serial_number = serial_number
 
         self.pipeline = rs.pipeline()
         self.config = rs.config()
@@ -64,6 +67,10 @@ class RealSenseD435:
 
     def _start_pipeline(self) -> None:
         """카메라 파이프라인 시작 (내부 구현)."""
+        # 특정 카메라 지정
+        if self.serial_number:
+            self.config.enable_device(self.serial_number)
+
         # RGB와 Depth 스트림 설정
         self.config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
         self.config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)

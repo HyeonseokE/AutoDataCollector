@@ -101,7 +101,7 @@ class LeRobotSkills:
         use_compensation: bool = True,
         use_deceleration: bool = True,
         verbose: bool = True,
-        pick_offset: float = 0.015,  # Pick/place offset from object top (meters, 1.5cm)
+        pick_offset: float = 0.025,  # Pick/place offset from object top (meters, 2.5cm)
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
         detect_model: str = "gemini-3-flash-preview",  # VLM model for detect_objects
@@ -2192,6 +2192,55 @@ class LeRobotSkills:
 
         self._log("[Execute Place Object] Complete")
         return True
+
+    def execute_place_lid(
+        self,
+        place_position: Union[List[float], np.ndarray],
+        pull_distance: float = 0.02,
+        gripper_open_ratio: float = 0.7,
+        target_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
+    ) -> bool:
+        """
+        Place a lid on a container, drag it -x toward the robot, then release.
+
+        Use this in place of execute_place_object whenever the held object is a lid
+        (or similar wide cap) being seated on top of a container. The drag step
+        compensates for systematic place-offset that lands the lid slightly farther
+        from the robot than the true container center.
+
+        Sequence:
+          1. Descend to (place_position[0], place_position[1], surface_z + saved pick_z)
+             with the saved pitch restored.
+          2. Move linearly -x by pull_distance with the gripper still closed
+             (lid drags along, pitch maintained).
+          3. Open gripper to release the lid at the corrected position.
+
+        Args:
+            place_position: Target surface position [x, y, z] in meters
+                (typically positions["pot"]["position"]). z is treated as the
+                container's top surface height — same convention as
+                execute_place_object(is_table=False).
+            pull_distance: -x drag distance in meters (default 0.02 = 2cm).
+            gripper_open_ratio: Release open ratio (0.0-1.0, default 0.7).
+            target_name: Subgoal label for the placement target (e.g. "pot").
+            skill_description: Skill recording label.
+            verification_question: Recording metadata.
+
+        Returns:
+            True if descent, drag, and release all succeed.
+        """
+        from skills.place_lid import place_lid
+        return place_lid(
+            self,
+            place_position=place_position,
+            pull_distance=pull_distance,
+            gripper_open_ratio=gripper_open_ratio,
+            target_name=target_name,
+            skill_description=skill_description,
+            verification_question=verification_question,
+        )
 
     def execute_press(
         self,

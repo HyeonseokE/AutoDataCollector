@@ -169,6 +169,38 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             True if place successful (object released at target position).
         """
 
+    def execute_place_lid(self, place_position: list[float],
+                          pull_distance: float = 0.02,
+                          gripper_open_ratio: float = 0.7,
+                          target_name: str = None) -> bool:
+        """Executes a lid-specific place: descends onto the container, drags the lid
+        in the -x direction by `pull_distance`, then releases.
+
+        USE THIS — NOT execute_place_object — whenever the held object is a lid
+        (e.g. pot lid) being seated on top of a container. Lids systematically land
+        slightly farther from the robot (+x) than the true container center; the
+        drag step pulls the lid back toward the robot before release so the lid
+        sits centered on the rim.
+
+        Must be called AFTER moving to the approach position above the container
+        with the lid already grasped (saved pitch from execute_pick_object is
+        automatically restored). The release height is computed exactly like
+        execute_place_object(is_table=False): surface_z + saved pick_z.
+
+        Args:
+            place_position: Container top-surface position [x, y, z] in meters.
+                Pass the container's position as-is from the positions dictionary
+                (e.g., positions["pot"]["position"]). z is the surface height.
+            pull_distance: -x drag distance in meters before release (default 0.02 = 2cm).
+                Leave at default unless explicitly instructed otherwise.
+            gripper_open_ratio: How much to open the gripper for release (default 0.7).
+                ALWAYS use 0.7 (70% open) for controlled release.
+            target_name: Container label for subgoal recording (e.g. "pot").
+
+        Returns:
+            True if descent, drag, and release all succeed.
+        """
+
     def execute_press(self, position: list[float], press_depth: float = 0.01,
                       contact_height: float = 0.02, press_duration: float = 0.5,
                       hold_time: float = 0.3, max_press_torque: int = 400,

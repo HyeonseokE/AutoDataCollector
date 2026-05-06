@@ -2456,7 +2456,7 @@ class ForwardAndResetPipeline(BasePipeline):
         from code_gen_lerobot.reset_execution.workspace import is_grippable as _is_grip
         self._all_previous_seed_positions.append(
             {name: info for name, info in new_positions.items()
-             if isinstance(info, dict) and _is_grip(info.get("bbox_px"))}
+             if isinstance(info, dict) and _is_grip(info.get("bbox_px"), name=name)}
         )
 
         # 시각화: workspace + 과거 시드 bbox + 새 시드 bbox
@@ -2513,7 +2513,7 @@ class ForwardAndResetPipeline(BasePipeline):
             for name, info in self.first_episode_positions.items():
                 if not isinstance(info, dict):
                     continue
-                if not _is_grippable(info.get("bbox_px")):
+                if not _is_grippable(info.get("bbox_px"), name=name):
                     pos = info.get("position")
                     bbox = _get_bbox_px(info)
                     if pos and pix2robot:
@@ -2549,7 +2549,7 @@ class ForwardAndResetPipeline(BasePipeline):
         for name, info in new_positions.items():
             if not isinstance(info, dict):
                 continue
-            if not _is_grippable(info.get("bbox_px")):
+            if not _is_grippable(info.get("bbox_px"), name=name):
                 continue
             pos = info.get("position")
             bbox = _get_bbox_px(info)
@@ -2599,10 +2599,10 @@ class ForwardAndResetPipeline(BasePipeline):
         all_obj_names = set()
         if self.first_episode_positions:
             for name, info in self.first_episode_positions.items():
-                if isinstance(info, dict) and _is_grippable(info.get("bbox_px")):
+                if isinstance(info, dict) and _is_grippable(info.get("bbox_px"), name=name):
                     all_obj_names.add(name)
         for name in new_positions:
-            if isinstance(new_positions[name], dict) and _is_grippable(new_positions[name].get("bbox_px")):
+            if isinstance(new_positions[name], dict) and _is_grippable(new_positions[name].get("bbox_px"), name=name):
                 all_obj_names.add(name)
         all_obj_names = sorted(all_obj_names)
 
@@ -2641,7 +2641,7 @@ class ForwardAndResetPipeline(BasePipeline):
         for name, info in new_positions.items():
             if name not in obj_color_map or not isinstance(info, dict):
                 continue
-            if not _is_grippable(info.get("bbox_px")):
+            if not _is_grippable(info.get("bbox_px"), name=name):
                 continue
             pos = info.get("position")
             if pos and pix2robot:

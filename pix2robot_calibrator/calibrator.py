@@ -36,8 +36,9 @@ class Pix2RobotCalibrator:
     호모그래피(u,v→x,y) + 테이블 z상수를 계산한다.
     """
 
-    def __init__(self, robot_id: int):
+    def __init__(self, robot_id: int, camera_serial: str = None):
         self.robot_id = robot_id
+        self.camera_serial = camera_serial
 
         # 대응점 저장
         self.pixel_points: List[List[int]] = []      # [[u, v], ...]
@@ -67,7 +68,7 @@ class Pix2RobotCalibrator:
         """RealSense로 컬러 + depth 이미지 1장 캡처하여 반환."""
         from object_detection.camera import RealSenseD435
 
-        with RealSenseD435() as camera:
+        with RealSenseD435(serial_number=self.camera_serial) as camera:
             print()
             print("-" * 60)
             print("[Step 1/3] 카메라 이미지 캡처")

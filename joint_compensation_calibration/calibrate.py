@@ -117,6 +117,7 @@ def is_safe_target(skills, joint_idx, target_norm, current_full):
     return True, ee_pos, "OK"
 
 
+
 def read_joint(robot, joint_idx, num_samples=5, delay=0.05):
     """Read joint position multiple times and average (reduce noise)."""
     readings = []
@@ -512,8 +513,14 @@ def main():
         for joint_info in CALIBRATE_JOINTS:
             idx = joint_info["idx"]
             name = joint_info["name"]
+
+            if name not in all_results:
+                continue
+
             print(f"\n  Verifying {name}...")
 
+            # Use the same safe angles from calibration phase
+            verify_angles = [r["target_angle"] for r in all_results[name]["base_measurements"]]
             base_results_after = measure_base_compensation(
                 robot2, idx, name, args.test_angles, skills=skills2)
 

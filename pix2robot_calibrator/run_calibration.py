@@ -28,9 +28,13 @@ def main():
         "--resume", action="store_true",
         help="기존 캘리브레이션 데이터를 로드하여 이어서 포인트 수집",
     )
+    parser.add_argument(
+        "--camera-serial", type=str, default=None,
+        help="사용할 RealSense 카메라 시리얼 번호 (미지정 시 첫 번째 카메라 사용)",
+    )
     args = parser.parse_args()
 
-    calibrator = Pix2RobotCalibrator(robot_id=args.robot)
+    calibrator = Pix2RobotCalibrator(robot_id=args.robot, camera_serial=args.camera_serial)
 
     try:
         success = calibrator.calibrate_interactive(resume=args.resume)

@@ -13,6 +13,13 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# 검출 z가 물체 바닥으로 잡히는 라벨에 대한 z-offset 보정 (meters)
+# e.g. pot은 검출 z가 바닥 → lid 안착 면(림)까지 +7cm 올림
+LABEL_Z_OFFSETS: Dict[str, float] = {
+    "pot": 0.07,  # pot은 바닥이 검출되므로 lid 안착면까지 올려야 함
+}
+
+
 def lerobot_code_gen(
     instruction: str,
     object_queries: List[str] = None,
@@ -844,6 +851,17 @@ def lerobot_code_gen_multi_turn(
                     fb_pos = fb["position"] if isinstance(fb, dict) and "position" in fb else fb
                     info["position"] = list(fb_pos[:3])
                     info.pop("_needs_world_coords", None)
+
+    # 라벨별 z-offset 보정 (LABEL_Z_OFFSETS 참조)
+    for label, dz in LABEL_Z_OFFSETS.items():
+        if label not in positions:
+            continue
+        info = positions[label]
+        pos = info["position"]
+        info["position"] = [pos[0], pos[1], pos[2] + dz]
+        for pt_label, pt_pos in info.get("points", {}).items():
+            info["points"][pt_label] = [pt_pos[0], pt_pos[1], pt_pos[2] + dz]
+        print(f"    [z-offset] {label}: +{dz*100:.0f}cm applied to position and points")
 
     for name, info in positions.items():
         pos = info["position"]

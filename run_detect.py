@@ -822,7 +822,7 @@ def run_realtime_detection(
                 extended_results[q] = None
             else:
                 bbox_size = last_bbox_sizes.get(q)
-                grippable = is_grippable(bbox_size) if bbox_size else True
+                grippable = is_grippable(bbox_size, name=q) if bbox_size else True
 
                 extended_results[q] = {
                     "position": list(pos),

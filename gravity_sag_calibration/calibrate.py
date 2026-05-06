@@ -226,6 +226,8 @@ def save_to_compensation(robot_id, base_sag, gain, power, deadzone, max_offset=0
 def plot_results(measurements, base_sag, gain, power, deadzone, robot_id, save_path):
     """Visualize measurements and fitted model."""
     try:
+        import matplotlib
+        matplotlib.use("Agg")  # Non-interactive backend (no GUI needed)
         import matplotlib.pyplot as plt
     except ImportError:
         print("[PLOT] matplotlib not available, skipping visualization")

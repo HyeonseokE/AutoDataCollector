@@ -283,22 +283,36 @@ class ResetWorkspace(BaseWorkspace):
 # bbox가 커도 가장자리를 잡을 수 있는 deformable 물체 키워드
 DEFORMABLE_KEYWORDS = ("towel", "cloth", "fabric", "napkin", "sheet")
 
+# bbox가 커도 작은 손잡이/꼭지로 잡을 수 있는 물체 키워드 (e.g. pot lid의 knob)
+GRIPPABLE_KEYWORDS = ("lid",)
+
 
 def is_grippable(
     bbox_px: Tuple[int, int],
     gripper_max_px: int = GRIPPER_MAX_OPEN_PX,
+    name: Optional[str] = None,
 ) -> bool:
     """
     그리퍼로 잡을 수 있는 물체인지 판단 (픽셀 bbox 기반).
 
+    name이 주어지면 DEFORMABLE_KEYWORDS / GRIPPABLE_KEYWORDS 화이트리스트를
+    먼저 검사 — bbox가 커도 손잡이/꼭지로 잡을 수 있는 lid나 가장자리를 잡을
+    수 있는 천류는 grippable로 판정. classify_objects 가 이미 사용하는 동일
+    규칙을 raw is_grippable 호출자에도 일관되게 적용하기 위함.
+
     Args:
         bbox_px: (width_px, height_px) 픽셀 크기
         gripper_max_px: 그리퍼 최대 열림 폭 (pixels)
+        name: 객체 라벨 (선택). 주어지면 키워드 화이트리스트 우선 적용.
 
     Returns:
         True if object can be gripped
     """
     if bbox_px is None:
+        return True
+    if name is not None and any(
+        kw in name.lower() for kw in DEFORMABLE_KEYWORDS + GRIPPABLE_KEYWORDS
+    ):
         return True
     return min(bbox_px) < gripper_max_px
 
@@ -329,8 +343,8 @@ def classify_objects(
         if info.get("is_obstacle"):
             obstacles[name] = info
             continue
-        # Deformable 물체는 bbox 크기와 무관하게 grippable
-        if any(kw in name.lower() for kw in DEFORMABLE_KEYWORDS):
+        # Deformable 물체 / 손잡이로 잡는 물체는 bbox 크기와 무관하게 grippable
+        if any(kw in name.lower() for kw in DEFORMABLE_KEYWORDS + GRIPPABLE_KEYWORDS):
             grippable[name] = info
             continue
         bbox_px = info.get("bbox_px")

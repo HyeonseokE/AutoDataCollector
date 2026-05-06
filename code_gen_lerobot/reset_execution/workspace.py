@@ -33,11 +33,19 @@ GRIPPER_MAX_OPEN_PX = 80  # 그리퍼 최대 열림 폭 (pixels, ~10cm 상당)
 # Reset Quadrant Definitions (오버헤드 카메라 pixel 기준, 640x480)
 # ============================================================
 QUADRANT_DEFINITIONS = {
-    "all": None,  # 제약 없음
+    "all": None,                    # 제약 없음
+    "all_wo_center": "exclude_ellipse",  # 중앙 타원 영역 제외 (특별 마커)
     "top-left":     {"u_range": (0, 320), "v_range": (0, 240)},
     "top-right":    {"u_range": (320, 640), "v_range": (0, 240)},
     "bottom-left":  {"u_range": (0, 320), "v_range": (240, 480)},
     "bottom-right": {"u_range": (320, 640), "v_range": (240, 480)},
+}
+
+# all_wo_center 의 제외 타원 (장축 = 세로, 단축 = 가로)
+# 식: ((u - cu) / a_h)^2 + ((v - cv) / a_v)^2 < 1  → 제외
+CENTER_EXCLUDE_ELLIPSE = {
+    "center_px": (320, 240),  # 이미지 중앙
+    "axes_px": (80, 160),     # (가로 반축, 세로 반축) → 160 x 320 px 타원
 }
 
 VALID_RESETSPACE_TYPES = list(QUADRANT_DEFINITIONS.keys())
@@ -47,6 +55,13 @@ def is_in_quadrant(u: int, v: int, quadrant: str) -> bool:
     """pixel 좌표 (u, v)가 지정된 quadrant 안에 있는지 체크."""
     if quadrant == "all" or quadrant is None:
         return True
+    if quadrant == "all_wo_center":
+        cu_e, cv_e = CENTER_EXCLUDE_ELLIPSE["center_px"]
+        a_h, a_v = CENTER_EXCLUDE_ELLIPSE["axes_px"]
+        if a_h <= 0 or a_v <= 0:
+            return True
+        val = ((u - cu_e) / a_h) ** 2 + ((v - cv_e) / a_v) ** 2
+        return val >= 1.0  # 타원 밖이면 OK
     bounds = QUADRANT_DEFINITIONS.get(quadrant)
     if bounds is None:
         return True
@@ -146,7 +161,7 @@ class ResetWorkspace(BaseWorkspace):
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
         max_attempts: int = 500,
-        max_iou: float = 0.3,
+        max_iou: float = 0.7,
         exclusion_zones: Optional[List[dict]] = None,
         resetspace: Optional[str] = None,
     ) -> Optional[List[float]]:
@@ -161,7 +176,7 @@ class ResetWorkspace(BaseWorkspace):
             obj_bbox_px: 이 객체의 bbox 픽셀 크기 (w_px, h_px). None이면 (30, 30) 사용.
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
-            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.5)
+            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.7)
             exclusion_zones: 제외 영역 리스트 (robot base_link frame).
                        [{"center": [x, y], "radius": float}, ...]
                        예: free state EE 주변 8cm 제외.
@@ -429,7 +444,7 @@ def generate_random_positions(
                     pix2robot = None
 
     # 장애물 리스트 (픽셀 bbox 기반)
-    # allow_overlap: True → IoU ≤ 0.5 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
+    # allow_overlap: True → IoU ≤ 0.7 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
     occupied = []
 
     # 1) Non-grippable 객체 (고정 장애물, 겹침 불허 + margin)
@@ -448,7 +463,7 @@ def generate_random_positions(
             "allow_overlap": False,  # 겹침 불허
         })
 
-    # 2) Grippable 객체의 현재 위치 (IoU ≤ 0.5 허용)
+    # 2) Grippable 객체의 현재 위치 (IoU ≤ 0.7 허용)
     for name, info in grippable_objects.items():
         if info is None:
             continue
@@ -461,10 +476,10 @@ def generate_random_positions(
             "center_px": center_px,
             "bbox_w": bbox_px[0],
             "bbox_h": bbox_px[1],
-            "allow_overlap": True,  # IoU ≤ 0.5 허용
+            "allow_overlap": True,  # IoU ≤ 0.7 허용
         })
 
-    # 3) 초기 위치 + 과거 시드 위치 (IoU ≤ 0.5 허용)
+    # 3) 초기 위치 + 과거 시드 위치 (IoU ≤ 0.7 허용)
     for name, info in initial_positions.items():
         if info is None:
             continue
@@ -478,7 +493,7 @@ def generate_random_positions(
             "center_px": center_px,
             "bbox_w": bbox_px[0],
             "bbox_h": bbox_px[1],
-            "allow_overlap": True,  # IoU ≤ 0.5 허용
+            "allow_overlap": True,  # IoU ≤ 0.7 허용
         })
 
     # 4) 현재 위치의 물체 (고정 장애물, 겹침 불허 + margin)
@@ -692,19 +707,33 @@ def draw_workspace_on_image(
 
     # ── Resetspace quadrant 마스킹 ──
     if resetspace is not None and resetspace != "all":
-        bounds = QUADRANT_DEFINITIONS.get(resetspace)
-        if bounds is not None:
-            u_min, u_max = bounds["u_range"]
-            v_min, v_max = bounds["v_range"]
+        if resetspace == "all_wo_center":
+            cu_e, cv_e = CENTER_EXCLUDE_ELLIPSE["center_px"]
+            a_h, a_v = CENTER_EXCLUDE_ELLIPSE["axes_px"]
             for v in range(0, img_h, step_px):
                 for u in range(0, img_w, step_px):
                     if ws_mask[v, u] == 0:
-                        continue  # 이미 도달 불가로 어두워진 영역은 스킵
-                    if not (u_min <= u < u_max and v_min <= v < v_max):
+                        continue
+                    val = ((u - cu_e) / a_h) ** 2 + ((v - cv_e) / a_v) ** 2
+                    if val < 1.0:  # 타원 안 → 제외
                         result[v:v+step_px, u:u+step_px] = (
                             image[v:v+step_px, u:u+step_px] * 0.4
                         ).astype(np.uint8)
                         ws_mask[v:v+step_px, u:u+step_px] = 0
+        else:
+            bounds = QUADRANT_DEFINITIONS.get(resetspace)
+            if bounds is not None and isinstance(bounds, dict):
+                u_min, u_max = bounds["u_range"]
+                v_min, v_max = bounds["v_range"]
+                for v in range(0, img_h, step_px):
+                    for u in range(0, img_w, step_px):
+                        if ws_mask[v, u] == 0:
+                            continue
+                        if not (u_min <= u < u_max and v_min <= v < v_max):
+                            result[v:v+step_px, u:u+step_px] = (
+                                image[v:v+step_px, u:u+step_px] * 0.4
+                            ).astype(np.uint8)
+                            ws_mask[v:v+step_px, u:u+step_px] = 0
 
     # ── Free state EE exclusion zone (반경 8cm) 마스킹 ──
     FREE_STATE_EXCLUSION_RADIUS = 0.08
@@ -803,24 +832,35 @@ def draw_workspace_on_image(
     # ── Resetspace quadrant 경계선 (Yellow 점선) ──
     COLOR_YELLOW = (0, 255, 255)
     if resetspace is not None and resetspace != "all":
-        bounds = QUADRANT_DEFINITIONS.get(resetspace)
-        if bounds is not None:
-            u_min, u_max = bounds["u_range"]
-            v_min, v_max = bounds["v_range"]
-            # 점선으로 경계 그리기
-            dash_len = 8
-            # 수평선 (v_min, v_max)
-            for line_v in [v_min, v_max - 1]:
-                if 0 < line_v < img_h:
-                    for u_start in range(u_min, u_max, dash_len * 2):
-                        u_end = min(u_start + dash_len, u_max)
-                        cv2.line(result, (u_start, line_v), (u_end, line_v), COLOR_YELLOW, 1)
-            # 수직선 (u_min, u_max)
-            for line_u in [u_min, u_max - 1]:
-                if 0 < line_u < img_w:
-                    for v_start in range(v_min, v_max, dash_len * 2):
-                        v_end = min(v_start + dash_len, v_max)
-                        cv2.line(result, (line_u, v_start), (line_u, v_end), COLOR_YELLOW, 1)
+        if resetspace == "all_wo_center":
+            # 중앙 제외 타원을 점선으로 그리기
+            cu_e, cv_e = CENTER_EXCLUDE_ELLIPSE["center_px"]
+            a_h, a_v = CENTER_EXCLUDE_ELLIPSE["axes_px"]
+            for angle_deg in range(0, 360, 6):
+                rad = np.radians(angle_deg)
+                eu = int(cu_e + a_h * np.cos(rad))
+                ev = int(cv_e + a_v * np.sin(rad))
+                if 0 <= eu < img_w and 0 <= ev < img_h:
+                    cv2.circle(result, (eu, ev), 2, COLOR_YELLOW, -1)
+        else:
+            bounds = QUADRANT_DEFINITIONS.get(resetspace)
+            if isinstance(bounds, dict):
+                u_min, u_max = bounds["u_range"]
+                v_min, v_max = bounds["v_range"]
+                # 점선으로 경계 그리기
+                dash_len = 8
+                # 수평선 (v_min, v_max)
+                for line_v in [v_min, v_max - 1]:
+                    if 0 < line_v < img_h:
+                        for u_start in range(u_min, u_max, dash_len * 2):
+                            u_end = min(u_start + dash_len, u_max)
+                            cv2.line(result, (u_start, line_v), (u_end, line_v), COLOR_YELLOW, 1)
+                # 수직선 (u_min, u_max)
+                for line_u in [u_min, u_max - 1]:
+                    if 0 < line_u < img_w:
+                        for v_start in range(v_min, v_max, dash_len * 2):
+                            v_end = min(v_start + dash_len, v_max)
+                            cv2.line(result, (line_u, v_start), (line_u, v_end), COLOR_YELLOW, 1)
 
     # ── 라벨 텍스트 ──
     reach_label = f"Reach: [{min_reach:.2f}, {max_reach:.2f}]m"

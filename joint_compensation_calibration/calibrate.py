@@ -35,8 +35,10 @@ CALIBRATE_JOINTS = [
 ]
 
 # Test angles per joint (normalized, -100 to +100)
-# Spread across the working range
-TEST_ANGLES = [-60, -30, 0, 30, 60]
+# Conservative range — APPROACH_OFFSET is added/subtracted on either side
+# (so candidates reach ±60 worst case) and full-range FK safety check (joint
+# limits + workspace reach + z floor) drops anything still extreme.
+TEST_ANGLES = [-40, -20, 0, 20, 40]
 
 # Movement amplitude for approach (normalized units)
 APPROACH_OFFSET = 20.0
@@ -46,6 +48,73 @@ SETTLE_TIME = 1.5
 
 # Movement duration (seconds)
 MOVE_DURATION = 2.0
+
+# Hard safety bounds for predicted EE z during calibration.
+#  - MIN: avoids table-collision (gripper plunge below 2cm)
+#  - MAX: avoids overextended/strained reach above ~25cm (motor stall risk)
+MIN_SAFE_EE_Z = 0.02  # meters
+MAX_SAFE_EE_Z = 0.25  # meters
+
+
+def predict_ee_state(skills, joint_idx, target_norm, current_full):
+    """Forward-kinematics-predict (arm_rad, ee_pos) if joint_idx moved to target_norm.
+
+    Returns:
+        (arm_rad, ee_pos) tuple, or (None, None) if FK unavailable.
+        arm_rad: 5-DoF arm joints in radians (np.ndarray)
+        ee_pos:  [x, y, z] in meters (np.ndarray)
+    """
+    if not hasattr(skills, "kinematics") or skills.kinematics is None:
+        return None, None
+    cmd = np.asarray(current_full, dtype=float).copy()
+    cmd[joint_idx] = float(target_norm)
+    # _normalized_to_radians expects a 5-element ARM-only vector (no gripper).
+    arm_norm = cmd[:5]
+    arm_rad = np.asarray(skills._normalized_to_radians(arm_norm))
+    ee_pos = np.asarray(skills.kinematics.get_ee_position(arm_rad))
+    return arm_rad, ee_pos
+
+
+def is_safe_target(skills, joint_idx, target_norm, current_full):
+    """Comprehensive safety check before commanding a joint to target_norm.
+
+    Validates:
+      1. Joint radians within calibrated joint range limits.
+      2. Predicted EE position within Cartesian workspace (reach min/max).
+      3. Predicted EE z above MIN_SAFE_EE_Z (table-collision floor).
+
+    Returns:
+        (safe: bool, ee_pos_or_None, reason: str)
+    """
+    arm_rad, ee_pos = predict_ee_state(skills, joint_idx, target_norm, current_full)
+    if ee_pos is None:
+        return True, None, "FK unavailable — skipping safety check"
+
+    # 1) Joint range limits (calibrated)
+    cal = getattr(skills, "calibration_limits", None)
+    if cal is not None and hasattr(cal, "is_within_limits"):
+        ok, violations = cal.is_within_limits(arm_rad)
+        if not ok:
+            v = violations[0]
+            return False, ee_pos, (
+                f"joint {v[1]} rad={v[2]:.3f} outside calibrated limit {v[3]:+.3f}"
+            )
+
+    # 2) Cartesian workspace reach
+    if hasattr(skills.kinematics, "is_position_reachable"):
+        if not skills.kinematics.is_position_reachable(ee_pos):
+            return False, ee_pos, (
+                f"predicted EE [{ee_pos[0]:+.3f}, {ee_pos[1]:+.3f}, {ee_pos[2]:+.3f}]m "
+                f"unreachable (reach limits violated)"
+            )
+
+    # 3) Z bounds (table floor + reach ceiling)
+    if ee_pos[2] < MIN_SAFE_EE_Z:
+        return False, ee_pos, f"predicted EE z={ee_pos[2]*1000:.0f}mm < {MIN_SAFE_EE_Z*1000:.0f}mm floor"
+    if ee_pos[2] > MAX_SAFE_EE_Z:
+        return False, ee_pos, f"predicted EE z={ee_pos[2]*1000:.0f}mm > {MAX_SAFE_EE_Z*1000:.0f}mm ceiling"
+
+    return True, ee_pos, "OK"
 
 
 def read_joint(robot, joint_idx, num_samples=5, delay=0.05):
@@ -58,8 +127,18 @@ def read_joint(robot, joint_idx, num_samples=5, delay=0.05):
     return float(np.median(readings))
 
 
-def move_to_joint(robot, joint_idx, target, current_full, duration=MOVE_DURATION):
-    """Move a single joint to target while keeping others fixed."""
+def move_to_joint(robot, joint_idx, target, current_full, duration=MOVE_DURATION, skills=None):
+    """Move a single joint to target while keeping others fixed.
+
+    If `skills` is provided, refuses any command whose predicted EE z would be
+    below MIN_SAFE_EE_Z (table-collision guard).
+    """
+    if skills is not None:
+        safe, ee_pos, reason = is_safe_target(skills, joint_idx, target, current_full)
+        if not safe:
+            print(f"    [SAFETY] BLOCKED move joint={joint_idx} → {target}: {reason}")
+            return False
+
     command = current_full.copy()
     num_steps = int(duration * 50)
     start_val = command[joint_idx]
@@ -67,6 +146,12 @@ def move_to_joint(robot, joint_idx, target, current_full, duration=MOVE_DURATION
     for i in range(num_steps):
         alpha = (i + 1) / num_steps
         command[joint_idx] = start_val + alpha * (target - start_val)
+        # Per-step safety check (in case interpolated path violates any limit)
+        if skills is not None:
+            safe, ee_pos, reason = is_safe_target(skills, joint_idx, command[joint_idx], current_full)
+            if not safe:
+                print(f"    [SAFETY] interpolated step {i}/{num_steps} blocked: {reason}")
+                return False
         robot.write_positions(command, normalize=True)
         time.sleep(1.0 / 50)
 
@@ -74,9 +159,31 @@ def move_to_joint(robot, joint_idx, target, current_full, duration=MOVE_DURATION
     command[joint_idx] = target
     robot.write_positions(command, normalize=True)
     time.sleep(SETTLE_TIME)
+    return True
 
 
-def measure_deadband(robot, joint_idx, joint_name, test_angles):
+def filter_safe_angles(skills, joint_idx, test_angles, current_full):
+    """Drop test_angles whose target OR ±APPROACH_OFFSET candidate would violate any limit:
+       - joint range (calibrated)
+       - workspace reach (Cartesian)
+       - z floor (table-collision)
+    """
+    safe = []
+    for a in test_angles:
+        candidates = [a, a + APPROACH_OFFSET, a - APPROACH_OFFSET]
+        all_safe = True
+        for c in candidates:
+            ok, ee_pos, reason = is_safe_target(skills, joint_idx, c, current_full)
+            if not ok:
+                print(f"  [SAFETY] DROP test_angle={a}: candidate={c} → {reason}")
+                all_safe = False
+                break
+        if all_safe:
+            safe.append(a)
+    return safe
+
+
+def measure_deadband(robot, joint_idx, joint_name, test_angles, skills=None):
     """Measure backlash deadband for one joint.
 
     Method: For each test angle, approach from +offset and -offset.
@@ -89,21 +196,26 @@ def measure_deadband(robot, joint_idx, joint_name, test_angles):
     results = []
 
     current = robot.read_positions(normalize=True)
+    safe_angles = filter_safe_angles(skills, joint_idx, test_angles, current) if skills else test_angles
 
-    for angle in test_angles:
+    for angle in safe_angles:
         # Approach from positive side: go to angle+offset, then to angle
         above = angle + APPROACH_OFFSET
-        move_to_joint(robot, joint_idx, above, current)
+        if not move_to_joint(robot, joint_idx, above, current, skills=skills):
+            continue
         current = robot.read_positions(normalize=True)
-        move_to_joint(robot, joint_idx, angle, current)
+        if not move_to_joint(robot, joint_idx, angle, current, skills=skills):
+            continue
         from_pos = read_joint(robot, joint_idx)
 
         # Approach from negative side: go to angle-offset, then to angle
         current = robot.read_positions(normalize=True)
         below = angle - APPROACH_OFFSET
-        move_to_joint(robot, joint_idx, below, current)
+        if not move_to_joint(robot, joint_idx, below, current, skills=skills):
+            continue
         current = robot.read_positions(normalize=True)
-        move_to_joint(robot, joint_idx, angle, current)
+        if not move_to_joint(robot, joint_idx, angle, current, skills=skills):
+            continue
         from_neg = read_joint(robot, joint_idx)
 
         deadband = abs(from_pos - from_neg)
@@ -124,7 +236,7 @@ def measure_deadband(robot, joint_idx, joint_name, test_angles):
     return results
 
 
-def measure_direction_offset(robot, joint_idx, joint_name, test_angles):
+def measure_direction_offset(robot, joint_idx, joint_name, test_angles, skills=None):
     """Measure direction-dependent offset for one joint.
 
     Method: For each test angle, command the same position and measure
@@ -139,22 +251,27 @@ def measure_direction_offset(robot, joint_idx, joint_name, test_angles):
     results = []
 
     current = robot.read_positions(normalize=True)
+    safe_angles = filter_safe_angles(skills, joint_idx, test_angles, current) if skills else test_angles
 
-    for angle in test_angles:
+    for angle in safe_angles:
         # From positive
         above = angle + APPROACH_OFFSET
-        move_to_joint(robot, joint_idx, above, current)
+        if not move_to_joint(robot, joint_idx, above, current, skills=skills):
+            continue
         current = robot.read_positions(normalize=True)
-        move_to_joint(robot, joint_idx, angle, current)
+        if not move_to_joint(robot, joint_idx, angle, current, skills=skills):
+            continue
         actual_from_pos = read_joint(robot, joint_idx)
         error_from_pos = angle - actual_from_pos
 
         # From negative
         current = robot.read_positions(normalize=True)
         below = angle - APPROACH_OFFSET
-        move_to_joint(robot, joint_idx, below, current)
+        if not move_to_joint(robot, joint_idx, below, current, skills=skills):
+            continue
         current = robot.read_positions(normalize=True)
-        move_to_joint(robot, joint_idx, angle, current)
+        if not move_to_joint(robot, joint_idx, angle, current, skills=skills):
+            continue
         actual_from_neg = read_joint(robot, joint_idx)
         error_from_neg = angle - actual_from_neg
 
@@ -172,7 +289,7 @@ def measure_direction_offset(robot, joint_idx, joint_name, test_angles):
     return results
 
 
-def measure_base_compensation(robot, joint_idx, joint_name, test_angles):
+def measure_base_compensation(robot, joint_idx, joint_name, test_angles, skills=None):
     """Measure static gravity offset for one joint.
 
     Method: Command each angle, wait for settle, read actual.
@@ -185,9 +302,11 @@ def measure_base_compensation(robot, joint_idx, joint_name, test_angles):
     results = []
 
     current = robot.read_positions(normalize=True)
+    safe_angles = filter_safe_angles(skills, joint_idx, test_angles, current) if skills else test_angles
 
-    for angle in test_angles:
-        move_to_joint(robot, joint_idx, angle, current)
+    for angle in safe_angles:
+        if not move_to_joint(robot, joint_idx, angle, current, skills=skills):
+            continue
         actual = read_joint(robot, joint_idx)
         error = angle - actual
 
@@ -311,10 +430,10 @@ def main():
         print(f"  Calibrating: {name} (joint {idx})")
         print(f"{'='*50}")
 
-        # Measure
-        db_results = measure_deadband(robot, idx, name, args.test_angles)
-        offset_results = measure_direction_offset(robot, idx, name, args.test_angles)
-        base_results = measure_base_compensation(robot, idx, name, args.test_angles)
+        # Measure (pass skills for FK-based safety floor at z=2cm)
+        db_results = measure_deadband(robot, idx, name, args.test_angles, skills=skills)
+        offset_results = measure_direction_offset(robot, idx, name, args.test_angles, skills=skills)
+        base_results = measure_base_compensation(robot, idx, name, args.test_angles, skills=skills)
 
         # Compute parameters
         params = compute_parameters(db_results, offset_results, base_results, name)
@@ -396,7 +515,7 @@ def main():
             print(f"\n  Verifying {name}...")
 
             base_results_after = measure_base_compensation(
-                robot2, idx, name, args.test_angles)
+                robot2, idx, name, args.test_angles, skills=skills2)
 
             before = [r for r in all_results[name]["base_measurements"]]
             after = base_results_after

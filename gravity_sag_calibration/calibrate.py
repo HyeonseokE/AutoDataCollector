@@ -32,6 +32,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 
+MIN_SAFE_Z = 0.02  # Hard floor — never command EE below 2cm (table collision)
+MAX_SAFE_Z = 0.25  # Hard ceiling — physical EE z reach is ~25cm; above is unreachable/strained
+
+
 def measure_z_errors(skills, reaches, heights, verbose=True):
     """Move to each (reach, z) grid point and measure z-error.
 
@@ -44,6 +48,18 @@ def measure_z_errors(skills, reaches, heights, verbose=True):
     Returns:
         List of dicts: [{reach, z_target, z_actual, z_error}, ...]
     """
+    # Safety filter: drop any height outside [MIN_SAFE_Z, MAX_SAFE_Z]
+    safe_heights = [z for z in heights if MIN_SAFE_Z <= z <= MAX_SAFE_Z]
+    dropped = [z for z in heights if not (MIN_SAFE_Z <= z <= MAX_SAFE_Z)]
+    if dropped:
+        print(f"[SAFETY] Dropped {len(dropped)} heights outside "
+              f"[{MIN_SAFE_Z*100:.0f}cm, {MAX_SAFE_Z*100:.0f}cm]: {dropped}")
+    heights = safe_heights
+    if not heights:
+        raise ValueError(
+            f"No safe heights remain (must be in [{MIN_SAFE_Z*100:.0f}cm, {MAX_SAFE_Z*100:.0f}cm])"
+        )
+
     measurements = []
 
     total = len(reaches) * len(heights)
@@ -57,6 +73,12 @@ def measure_z_errors(skills, reaches, heights, verbose=True):
 
             if verbose:
                 print(f"\n[{idx}/{total}] reach={reach:.2f}m, z={z_target:.3f}m")
+
+            # Defensive z bounds (heights already filtered above)
+            if z_target < MIN_SAFE_Z or z_target > MAX_SAFE_Z:
+                if verbose:
+                    print(f"  SKIP: z outside [{MIN_SAFE_Z*100:.0f}cm, {MAX_SAFE_Z*100:.0f}cm]")
+                continue
 
             # Check reachability
             if not skills.kinematics.is_position_reachable(np.array(position)):
@@ -93,68 +115,85 @@ def measure_z_errors(skills, reaches, heights, verbose=True):
 
 
 def fit_sag_model(measurements, deadzone=0.05):
-    """Fit sag = gain * reach^power * max(0, z - deadzone) to measurements.
+    """Fit full sag model jointly: base_sag (z-independent) + gain (z-extra above deadzone).
+
+    Model: sag = base_sag * reach^power + gain * reach^power * max(0, z - deadzone)
+
+    All successful measurements contribute — including low-z points (z ≤ deadzone)
+    where only the base_sag term is active. This is what captures pick-region sag.
 
     Args:
         measurements: List from measure_z_errors().
         deadzone: Fixed z deadzone (meters).
 
     Returns:
-        (gain, power, deadzone, fit_stats)
+        (base_sag, gain, power, deadzone, fit_stats)
     """
     from scipy.optimize import curve_fit
 
-    # Filter: only successful measurements with positive z_error and z > deadzone
-    valid = [m for m in measurements if m["success"] and m["z_target"] > deadzone]
-    if len(valid) < 3:
-        print(f"[FIT] Not enough valid measurements ({len(valid)}). Need at least 3.")
-        return None, None, deadzone, {}
+    valid = [m for m in measurements if m["success"]]
+    if len(valid) < 4:
+        print(f"[FIT] Not enough valid measurements ({len(valid)}). Need at least 4 (3 params).")
+        return None, None, None, deadzone, {}
 
     reaches = np.array([m["reach"] for m in valid])
     z_targets = np.array([m["z_target"] for m in valid])
     z_errors = np.array([m["z_error"] for m in valid])
-
-    # z_factor = max(0, z - deadzone)
     z_factors = np.maximum(0, z_targets - deadzone)
 
-    def sag_model(X, gain, power):
+    def sag_model(X, base_sag, gain, power):
         reach, z_factor = X
-        return gain * (reach ** power) * z_factor
+        return base_sag * (reach ** power) + gain * (reach ** power) * z_factor
 
     try:
         popt, pcov = curve_fit(
             sag_model,
             (reaches, z_factors),
             z_errors,
-            p0=[1.0, 2.0],        # initial guess
-            bounds=([0.0, 0.5], [10.0, 5.0]),  # reasonable bounds
+            p0=[0.13, 0.5, 2.0],
+            bounds=([0.0, 0.0, 0.5], [5.0, 10.0, 5.0]),
             maxfev=5000,
         )
-        gain, power = popt
+        base_sag, gain, power = popt
 
-        # Compute fit quality
-        predicted = sag_model((reaches, z_factors), gain, power)
+        predicted = sag_model((reaches, z_factors), base_sag, gain, power)
         residuals = z_errors - predicted
         rmse = float(np.sqrt(np.mean(residuals ** 2)))
         r2 = float(1 - np.sum(residuals ** 2) / np.sum((z_errors - np.mean(z_errors)) ** 2))
 
+        # Per-region diagnostics — pick (z<=deadzone) vs lift (z>deadzone)
+        low_mask = z_targets <= deadzone
+        high_mask = ~low_mask
+        def _mean_abs_mm(arr):
+            return round(float(np.mean(np.abs(arr))) * 1000, 2)
+        low_before = _mean_abs_mm(z_errors[low_mask]) if low_mask.any() else None
+        high_before = _mean_abs_mm(z_errors[high_mask]) if high_mask.any() else None
+        low_after = _mean_abs_mm(residuals[low_mask]) if low_mask.any() else None
+        high_after = _mean_abs_mm(residuals[high_mask]) if high_mask.any() else None
+
         fit_stats = {
             "num_points": len(valid),
+            "num_low_z": int(low_mask.sum()),
+            "num_high_z": int(high_mask.sum()),
             "rmse_mm": round(rmse * 1000, 2),
             "r_squared": round(r2, 4),
-            "mean_error_before_mm": round(float(np.mean(np.abs(z_errors))) * 1000, 2),
-            "mean_error_after_mm": round(float(np.mean(np.abs(residuals))) * 1000, 2),
+            "mean_error_before_mm": _mean_abs_mm(z_errors),
+            "mean_error_after_mm": _mean_abs_mm(residuals),
+            "low_z_before_mm": low_before,
+            "low_z_after_mm": low_after,
+            "high_z_before_mm": high_before,
+            "high_z_after_mm": high_after,
         }
 
-        return float(gain), float(power), deadzone, fit_stats
+        return float(base_sag), float(gain), float(power), deadzone, fit_stats
 
     except Exception as e:
         print(f"[FIT] curve_fit failed: {e}")
-        return None, None, deadzone, {}
+        return None, None, None, deadzone, {}
 
 
-def save_to_compensation(robot_id, gain, power, deadzone, max_offset=0.05):
-    """Write gravity_sag parameters to the robot's compensation JSON."""
+def save_to_compensation(robot_id, base_sag, gain, power, deadzone, max_offset=0.05):
+    """Write gravity_sag parameters (full model: base_sag + z-extra) to JSON."""
     comp_path = PROJECT_ROOT / "robot_configs" / "motor_calibration" / "so101" / f"robot{robot_id}_compensation.json"
     if not comp_path.exists():
         print(f"[SAVE] Compensation file not found: {comp_path}")
@@ -165,11 +204,16 @@ def save_to_compensation(robot_id, gain, power, deadzone, max_offset=0.05):
 
     data["gravity_sag"] = {
         "enabled": True,
+        "base_sag": round(base_sag, 4),
         "gain": round(gain, 4),
         "reach_power": round(power, 4),
         "z_deadzone": deadzone,
         "max_offset": max_offset,
-        "_comment": f"Auto-calibrated. sag = {gain:.4f} * reach^{power:.2f} * max(0, z - {deadzone})"
+        "_comment": (
+            f"Auto-calibrated. sag = {base_sag:.4f}*reach^{power:.2f} "
+            f"+ {gain:.4f}*reach^{power:.2f}*max(0, z - {deadzone}). "
+            f"base_sag covers pick region (z<deadzone); gain covers high-z extra droop."
+        ),
     }
 
     with open(comp_path, "w") as f:
@@ -179,7 +223,7 @@ def save_to_compensation(robot_id, gain, power, deadzone, max_offset=0.05):
     return True
 
 
-def plot_results(measurements, gain, power, deadzone, robot_id, save_path):
+def plot_results(measurements, base_sag, gain, power, deadzone, robot_id, save_path):
     """Visualize measurements and fitted model."""
     try:
         import matplotlib.pyplot as plt
@@ -192,9 +236,9 @@ def plot_results(measurements, gain, power, deadzone, robot_id, save_path):
     z_targets = np.array([m["z_target"] for m in valid])
     z_errors = np.array([m["z_error_mm"] for m in valid])
 
-    # Predicted
+    # Predicted (full model: base + z-extra)
     z_factors = np.maximum(0, z_targets - deadzone)
-    predicted_mm = gain * (reaches ** power) * z_factors * 1000
+    predicted_mm = (base_sag * (reaches ** power) + gain * (reaches ** power) * z_factors) * 1000
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -234,8 +278,10 @@ def main():
                         default=[0.20, 0.25, 0.30, 0.35, 0.40],
                         help="Reach distances to measure (meters)")
     parser.add_argument("--heights", type=float, nargs="+",
-                        default=[0.05, 0.10, 0.15, 0.20],
-                        help="Z heights to measure (meters)")
+                        default=[0.025, 0.04, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25],
+                        help=f"Z heights to measure (meters). Will be filtered to "
+                             f"[{MIN_SAFE_Z}m, {MAX_SAFE_Z}m]. Includes low-z points "
+                             f"(z<deadzone) so base_sag is fit alongside gain.")
     parser.add_argument("--deadzone", type=float, default=0.05,
                         help="Z deadzone for model (meters, default 0.05)")
     parser.add_argument("--verify", action="store_true",
@@ -300,27 +346,37 @@ def main():
         return
 
     # ── Phase 2: Fit ──
-    print("\n[Phase 2] Fitting sag model...")
+    print("\n[Phase 2] Fitting sag model (base_sag + gain jointly)...")
 
-    gain, power, deadzone, fit_stats = fit_sag_model(measurements, args.deadzone)
+    base_sag, gain, power, deadzone, fit_stats = fit_sag_model(measurements, args.deadzone)
 
     if gain is None:
         print("[Phase 2] Fitting failed. Exiting.")
         return
 
-    print(f"\n  Model: sag = {gain:.4f} * reach^{power:.2f} * max(0, z - {deadzone})")
+    print(f"\n  Model: sag = {base_sag:.4f}*reach^{power:.2f} "
+          f"+ {gain:.4f}*reach^{power:.2f}*max(0, z - {deadzone})")
+    print(f"  Points: {fit_stats['num_points']} total "
+          f"({fit_stats['num_low_z']} low-z, {fit_stats['num_high_z']} high-z)")
     print(f"  RMSE: {fit_stats['rmse_mm']:.2f}mm")
     print(f"  R-squared: {fit_stats['r_squared']:.4f}")
     print(f"  Mean |error| before: {fit_stats['mean_error_before_mm']:.2f}mm")
     print(f"  Mean |error| after:  {fit_stats['mean_error_after_mm']:.2f}mm")
     improvement = 100 * (1 - fit_stats['mean_error_after_mm'] / fit_stats['mean_error_before_mm'])
     print(f"  Improvement: {improvement:.0f}%")
+    if fit_stats.get('low_z_before_mm') is not None:
+        print(f"  Low-z (pick region):  {fit_stats['low_z_before_mm']:.2f}mm → "
+              f"{fit_stats['low_z_after_mm']:.2f}mm")
+    if fit_stats.get('high_z_before_mm') is not None:
+        print(f"  High-z (lift region): {fit_stats['high_z_before_mm']:.2f}mm → "
+              f"{fit_stats['high_z_after_mm']:.2f}mm")
 
     # Save fit result
     fit_path = results_dir / f"robot{args.robot_id}_sag_fit.json"
     with open(fit_path, "w") as f:
         json.dump({
             "robot_id": args.robot_id,
+            "base_sag": round(base_sag, 4),
             "gain": round(gain, 4),
             "reach_power": round(power, 4),
             "z_deadzone": deadzone,
@@ -330,11 +386,11 @@ def main():
 
     # Plot
     plot_path = results_dir / f"robot{args.robot_id}_sag_fit.png"
-    plot_results(measurements, gain, power, deadzone, args.robot_id, str(plot_path))
+    plot_results(measurements, base_sag, gain, power, deadzone, args.robot_id, str(plot_path))
 
     # ── Phase 3: Save to compensation config ──
     print("\n[Phase 3] Saving to compensation config...")
-    save_to_compensation(args.robot_id, gain, power, deadzone)
+    save_to_compensation(args.robot_id, base_sag, gain, power, deadzone)
 
     # ── Phase 4: Verify (optional) ──
     if args.verify:
@@ -348,7 +404,10 @@ def main():
         skills2.connect()
 
         if skills2.gravity_sag is not None:
-            print(f"  gravity_sag: ENABLED (gain={skills2.gravity_sag.gain}, power={skills2.gravity_sag.reach_power})")
+            print(f"  gravity_sag: ENABLED "
+                  f"(base_sag={getattr(skills2.gravity_sag, 'base_sag', 0.0):.4f}, "
+                  f"gain={skills2.gravity_sag.gain:.4f}, "
+                  f"power={skills2.gravity_sag.reach_power:.2f})")
         else:
             print("  WARNING: gravity_sag still not loaded!")
 

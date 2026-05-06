@@ -155,7 +155,7 @@ def lerobot_code_gen_prompt(
 
        skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Move object_name above target_object", verification_question="Is object_name above target_object?")
        skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="Place object_name on target_object", verification_question="Is object_name placed on target_object?")
-       skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from target_object and close gripper", verification_question="Is the gripper clear of target_object and closed?")
+       skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from target_object and close gripper", verification_question="Is the gripper clear of target_object and closed?")
 
        # LATERAL PICK pattern (approach from side at object height WHILE opening gripper, then slide in):
        # Use when the object is thin/tall and top-down approach is not suitable (e.g., gooseneck, handle, lever).
@@ -224,7 +224,7 @@ def execute_task():
         # === PLACE on object === (retreat closes gripper at 20% of retreat)
         skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_name")
         skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_name")
-        skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_name", gripper_action="close", gripper_start_fraction=0.2)
+        skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_name", gripper_action="close", gripper_start_fraction=0.7)
 
         # === Cleanup ===
         skills.move_to_free_state()
@@ -252,7 +252,7 @@ if __name__ == "__main__":
    - **ALWAYS use `gripper_open_ratio=0.7`** in `execute_place_object()` to open gripper 70%
    - **Integrated gripper motion (IMPORTANT)**:
      - Pick approach → `move_to_position(..., gripper_action="open", gripper_start_fraction=0.3)` (opens during last 70% of approach)
-     - Place retreat → `move_to_position(..., gripper_action="close", gripper_start_fraction=0.2)` (closes during last 80% of retreat)
+     - Place retreat → `move_to_position(..., gripper_action="close", gripper_start_fraction=0.7)` (closes during last 30% of retreat)
      - Do NOT call standalone `gripper_open()` / `gripper_close()` for pick/place. Use them only when the arm must stay still (rare).
      - When `gripper_action` is used, write `skill_description` as a compound sentence: `"Approach <obj> and open gripper"`, `"Retreat from <target> and close gripper"`.
    - Always include try/finally for proper cleanup
@@ -380,7 +380,7 @@ place_obj = positions["target_object"]
 place_pos = place_obj["position"]
 skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object")
 skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object")
-skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.2)
+skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.7)
 
 # PLACE ON TABLE — same as above but is_table=True
 
@@ -445,7 +445,7 @@ if __name__ == "__main__":
 7. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 8. **Integrated gripper motion**:
    - Pick approach: `move_to_position(..., gripper_action="open", gripper_start_fraction=0.3)` — opens during last 70% of approach.
-   - Place retreat: `move_to_position(..., gripper_action="close", gripper_start_fraction=0.2)` — closes during last 80% of retreat.
+   - Place retreat: `move_to_position(..., gripper_action="close", gripper_start_fraction=0.7)` — closes during last 30% of retreat.
    - When `gripper_action` is used, write `skill_description` as compound: e.g., `"Approach <obj> and open gripper"`, `"Retreat from <target> and close gripper"`.
 9. Wrap with `try/finally` → `disconnect()`.
 10. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
@@ -577,7 +577,7 @@ place_obj = positions["target_object"]
 place_pos = place_obj["position"]
 skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", skill_description="Move object_name above target_object", verification_question="Is object_name above target_object?")
 skills.execute_place_object(place_pos, is_table=False, gripper_open_ratio=0.7, target_name="target_object", skill_description="Place object_name on target_object", verification_question="Is object_name on target_object?")
-skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from target_object and close gripper", verification_question="Is the gripper clear of target_object and closed?")
+skills.move_to_position([place_pos[0], place_pos[1], approach_height], target_name="target_object", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from target_object and close gripper", verification_question="Is the gripper clear of target_object and closed?")
 
 # PLACE AT PIXEL (is_table=True) — target is NOT in positions dict (e.g., empty spot on table)
 # Specify [y, x] in normalized 0–1000 coordinates from the top-view image.
@@ -646,7 +646,7 @@ skills.execute_pick_object(a_pos, object_name="A", skill_description="Pick A", v
 skills.move_to_position([a_pos[0], a_pos[1], approach_height], target_name="A", skill_description="Lift A", verification_question="Is A lifted?")
 skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", skill_description="Move A above plate_1", verification_question="Is A above plate_1?")
 skills.execute_place_object(plate1_pos, is_table=True, gripper_open_ratio=0.7, target_name="plate_1", skill_description="Place A on plate_1", verification_question="Is A on plate_1?")
-skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from plate_1 and close gripper", verification_question="Is gripper clear and closed?")
+skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from plate_1 and close gripper", verification_question="Is gripper clear and closed?")
 skills.clear_subtask()
 
 # NO re-detection — B and plate_2 are untouched, use initial positions directly
@@ -660,7 +660,7 @@ skills.execute_pick_object(b_pos, object_name="B", skill_description="Pick B", v
 skills.move_to_position([b_pos[0], b_pos[1], approach_height], target_name="B", skill_description="Lift B", verification_question="Is B lifted?")
 skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="plate_2", skill_description="Move B above plate_2", verification_question="Is B above plate_2?")
 skills.execute_place_object(plate2_pos, is_table=True, gripper_open_ratio=0.7, target_name="plate_2", skill_description="Place B on plate_2", verification_question="Is B on plate_2?")
-skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="plate_2", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from plate_2 and close gripper", verification_question="Is gripper clear and closed?")
+skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="plate_2", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from plate_2 and close gripper", verification_question="Is gripper clear and closed?")
 skills.clear_subtask()
 
 # END — always last
@@ -699,7 +699,7 @@ if __name__ == "__main__":
 7. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 8. **Integrated gripper motion**:
    - Pick approach: `move_to_position(..., gripper_action="open", gripper_start_fraction=0.3)` — opens during last 70% of approach.
-   - Place retreat: `move_to_position(..., gripper_action="close", gripper_start_fraction=0.2)` — closes during last 80% of retreat.
+   - Place retreat: `move_to_position(..., gripper_action="close", gripper_start_fraction=0.7)` — closes during last 30% of retreat.
    - When `gripper_action` is used, write `skill_description` as compound: e.g., `"Approach <obj> and open gripper"`, `"Retreat from <target> and close gripper"`.
 9. Wrap with `try/finally` → `disconnect()`.
 10. **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.

@@ -73,7 +73,8 @@ Robot Physical Constraints:
 
 Position Access:
   - Object positions are pre-detected and provided as a `positions` dictionary.
-  - Access positions by object name key (e.g.,`positions["red_block"]["position"]`).
+  - Access positions by the EXACT object name string used in detection — names contain spaces, NOT underscores
+    (e.g., `positions["red block"]["position"]`, NOT `positions["red_block"]`).
   - Coordinate transformation to each robot's frame is handled internally by the skill API — you do not need to handle any conversion.
   - ALWAYS prefer using the `positions` dictionary when the target location corresponds to a detected object.
   - Only use pixel coordinates when the target is NOT available in the dictionary (e.g., an empty spot on the table).

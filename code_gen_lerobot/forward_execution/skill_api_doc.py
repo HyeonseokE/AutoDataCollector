@@ -84,8 +84,8 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                 For pick approach, use: gripper_action="open", gripper_start_fraction=0.3
                 (gripper opens during the last 70% of the approach).
             - gripper_action="close": gripper closes during the motion.
-                For place retreat, use: gripper_action="close", gripper_start_fraction=0.2
-                (gripper closes during the last 80% of the retreat).
+                For place retreat, use: gripper_action="close", gripper_start_fraction=0.7
+                (gripper closes during the last 30% of the retreat).
 
             When gripper_action is used, write skill_description as a compound sentence:
                 "Approach <obj> and open gripper"

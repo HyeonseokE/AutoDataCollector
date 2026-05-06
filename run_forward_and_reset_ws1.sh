@@ -80,9 +80,6 @@ cd "$SCRIPT_DIR"
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
 ROBOT_IDS=(2)
 
-## Task_instruction 
-# INSTRUCTION="stack red block at center, then place yellow block on top of red block"
-
 ### [single arm task]
 ## pick and place
 # INSTRUCTION="stack the blocks in the order of red and blue"
@@ -96,9 +93,13 @@ ROBOT_IDS=(2)
 # INSTRUCTION="stack the blocks in the order of red and yellow, purple."
 # RESET_INSTRUCTION=""
 
-## distribute chocolate pies to each plate
-INSTRUCTION="distribute chocolate pies to each plate."
+# arrange
+INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
 RESET_INSTRUCTION=""
+
+# ## distribute chocolate pies to each plate
+# INSTRUCTION="distribute chocolate pies to each plate."
+# RESET_INSTRUCTION=""
 
 ### [dual arm task]
 ## towel folding
@@ -119,10 +120,13 @@ RESET_INSTRUCTION=""
 NUM_EPISODES=100
 NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
-# [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
+# [선택] 로봇별 reset 공간 제약 (all, all_wo_center, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
-# all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(top-left) 
+# all:           워크스페이스 전역
+# all_wo_center: all 에서 이미지 중앙 세로 타원 (160 x 320 px) 영역만 제외
+#                (위↔아래 1열 정렬 같은 task 에서 reset 위치가 중앙 라인에 떨어지지 않게 함)
+# top-left 등:   테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
+RESETSPACE_PER_ROBOT=(all) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -141,7 +145,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/session_20260502_090649"
+RESUME_SESSION=""
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

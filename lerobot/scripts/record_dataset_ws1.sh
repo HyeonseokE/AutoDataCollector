@@ -41,8 +41,6 @@ export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 # -------- video codec (H.264) --------
 # 기본은 소프트웨어 h264.
 VCODEC="${VCODEC:-h264}" # always h264 - hscho
-STREAMING_ENCODING="${STREAMING_ENCODING:-true}"
-ENCODER_THREADS="${ENCODER_THREADS:-2}"
 
 # -------- normalization mode --------
 # false: 본체 5 모터 -100~100, gripper 0~100 (gripper는 항상 0~100 하드코딩)
@@ -50,12 +48,12 @@ ENCODER_THREADS="${ENCODER_THREADS:-2}"
 USE_DEGREES="${USE_DEGREES:-false}" # always false - hscho
 
 # -------- dataset --------
-REPO_ID="${REPO_ID:-skkuprism/recorded_dataset_h264}"
-TASK="${TASK:-pick up the red block and place it on the blue dish.}"
+REPO_ID="${REPO_ID:-CoRL2026-CSI/stack_RGB_blocks_on_bluedish}"
+TASK="${TASK:-Stack red, green, and blue blocks on the blue dish from bottom to top.}"
 FPS="${FPS:-30}"
-EPISODE_TIME_S="${EPISODE_TIME_S:-30}"
-RESET_TIME_S="${RESET_TIME_S:-3}"
-NUM_EPISODES="${NUM_EPISODES:-50}"
+EPISODE_TIME_S="${EPISODE_TIME_S:-100}"
+RESET_TIME_S="${RESET_TIME_S:-5}"
+NUM_EPISODES="${NUM_EPISODES:-100}"
 PUSH_TO_HUB="${PUSH_TO_HUB:-false}"
 DATASET_ROOT="${DATASET_ROOT:-$REPO_DIR/outputs/datasets/$REPO_ID}"
 DISPLAY_DATA="${DISPLAY_DATA:-true}"
@@ -65,17 +63,20 @@ RESUME="${RESUME:-false}"
 
 # -------- follower (robot) --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"
-FOLLOWER_PORT="${FOLLOWER_PORT:-/dev/ttyACM1}"
+FOLLOWER_PORT="${FOLLOWER_PORT:-/dev/ttyACM0}"
 FOLLOWER_ID="${FOLLOWER_ID:-so101_robot2}"
 
 # -------- leader (teleop) --------
 TELEOP_TYPE="${TELEOP_TYPE:-so101_leader}"
-LEADER_PORT="${LEADER_PORT:-/dev/ttyACM4}"
+LEADER_PORT="${LEADER_PORT:-/dev/ttyACM3}"
 LEADER_ID="${LEADER_ID:-so101_robot2_leader}"
 
 # -------- cameras --------
+# ws1 (recording_config_ws1.yaml) 와 동일 설정:
+#   shared/top:     RealSense 335622072328  640x480@30fps
+#   left_arm/wrist: OpenCV /dev/video6      640x480@30fps  (MJPG)
 CAM_LEFT_WRIST_TYPE="${CAM_LEFT_WRIST_TYPE:-opencv}"
-CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video18}"
+CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video6}"
 CAM_LEFT_WRIST_WIDTH="${CAM_LEFT_WRIST_WIDTH:-640}"
 CAM_LEFT_WRIST_HEIGHT="${CAM_LEFT_WRIST_HEIGHT:-480}"
 CAM_LEFT_WRIST_FPS="${CAM_LEFT_WRIST_FPS:-30}"
@@ -123,7 +124,7 @@ unset _port
 cat <<EOF
 ========= SO-101 Dataset Recording (H.264) =========
  env       : $CONDA_ENV ($(python --version 2>&1))
- codec     : $VCODEC  (streaming=$STREAMING_ENCODING, threads=$ENCODER_THREADS)
+ codec     : $VCODEC  (lerobot default streaming/threads)
  norm mode : use_degrees=$USE_DEGREES  (false → 본체 5DoF -100~100, gripper 0~100)
  follower  : $ROBOT_TYPE ($FOLLOWER_ID)  port=$FOLLOWER_PORT
  leader    : $TELEOP_TYPE ($LEADER_ID)   port=$LEADER_PORT
@@ -157,8 +158,6 @@ RECORD_ARGS=(
     --dataset.num_episodes="$NUM_EPISODES"
     --dataset.push_to_hub="$PUSH_TO_HUB"
     --dataset.vcodec="$VCODEC"
-    --dataset.streaming_encoding="$STREAMING_ENCODING"
-    --dataset.encoder_threads="$ENCODER_THREADS"
     --display_data="$DISPLAY_DATA"
     --resume="$RESUME"
 )

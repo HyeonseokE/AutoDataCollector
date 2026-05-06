@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-PORT="${PORT:-/dev/ttyACM4}"
-ID="${ID:-so101_robot2_leader}"
+PORT="${PORT:-/dev/ttyACM2}"
+ID="${ID:-so101_robot3_leader}"
 TELEOP_TYPE="${TELEOP_TYPE:-so101_leader}"
 
 echo "========================================="

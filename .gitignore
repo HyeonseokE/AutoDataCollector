@@ -48,6 +48,10 @@ outputs/
 openai_api_key.json
 google_aistudio_key.json
 
+# Workspace-specific configs & calibrations (machine/robot별 관리)
+pipeline_config/
+robot_configs/
+
 # Legacy folders (DO NOT MODIFY)
 code_gen/
 

@@ -91,3 +91,33 @@ observation_features:
   radian_urdf0:
     state: true            # observation.state.radian_urdf0 (URDF 0° 기준 관절 위치, 6D radian)
     action: true           # action.radian_urdf0        (URDF 0° 기준 목표 관절 위치, 6D radian)
+
+# =============================================================================
+# Stochastic Perturbation Configuration
+# =============================================================================
+## (Phase 5) ws1 과 동일 schema. ws2 는 robot0 단일 arm.
+perturbation:
+  subgoal:
+    enabled: false
+    sigma: 0.05
+    clip_factor: 2.0
+
+  skill:
+    enabled: true         # OMPL ensemble 활성화
+    n_candidates: 4
+    planning_time: 0.5
+    waypoint_density: 0.02
+    n_workers: 4
+    algorithms:
+      - RRTConnect
+      - PRMstar
+      - BITstar
+      # KPIECE1 제외 — wild zigzag (z 400+mm) 위험
+    workspace:
+      table_enabled: true
+      table_z: 0.0
+      table_thickness: 0.10
+      table_size: [2.0, 2.0]
+      table_mount_links: [base_link]
+      ceiling_enabled: false
+      other_arms: []

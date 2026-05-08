@@ -115,10 +115,10 @@ perturbation:
   ## - workspace 정의는 robot 별 collision world (table, ceiling, 다른 arm bbox).
   ##   skill perturbation 미사용해도 daemon 안 뜨므로 비용 0.
   skill:
-    enabled: false        # true → OMPL ensemble 기반 trajectory 변형 활성화
+    enabled: true         # true → OMPL ensemble 기반 trajectory 변형 활성화
     n_candidates: 4       # plan_batch 의 N — 4 algorithm round-robin 분배
     planning_time: 0.5    # seconds, 알고리즘별 .solve() 예산
-    waypoint_density: 0.02  # m — joint-distance 기반 출력 waypoint 밀도
+    waypoint_density: 0.02   # rad — joint-distance 기반 출력 waypoint 밀도. 실측 endpoint 정확도 4mm 이내 (controller 가 hold 단계에서 수렴)
     n_workers: 4          # daemon 의 multiprocessing.Pool 워커 수 (CPU 코어 ≤)
     algorithms:           # 활성화할 OMPL 알고리즘 (다양한 모드 → 다양한 path 형상)
       - RRTConnect

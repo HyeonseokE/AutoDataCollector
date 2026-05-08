@@ -1379,6 +1379,30 @@ class LeRobotSkills:
                 total_out = sum(u.get("output_tokens", 0) for u in detect_usage_list)
                 self._log(f"  [detect_objects] Token usage: in={total_in}, out={total_out}")
 
+            # Phase 6 auto-hook: push detected positions into the OMPL daemon's
+            # collision world so subsequent transit plans avoid them. Silent
+            # no-op when skill perturbation isn't enabled. Filters out None
+            # entries (failed detections). Each object becomes a small Box;
+            # callers can override default size by extending detect output
+            # with a "size" field, but the typical detect dict only has
+            # {"position", "points"} and we use the default 5cm cube.
+            if self._skill_planner_client is not None and results:
+                obstacles = {
+                    name: {"position": info["position"]}
+                    for name, info in results.items()
+                    if info is not None and info.get("position") is not None
+                }
+                if obstacles:
+                    try:
+                        rep = self._skill_planner_client.update_scene(obstacles)
+                        self._log(
+                            f"  [Skill Perturbation] update_scene: "
+                            f"+{rep.get('added',0)} -{rep.get('removed',0)} "
+                            f"={rep.get('kept',0)}"
+                        )
+                    except Exception as e:
+                        self._log(f"  [Skill Perturbation] update_scene failed: {e}")
+
             return results
 
         except Exception as e:
@@ -1743,20 +1767,27 @@ class LeRobotSkills:
                     f"(seed={chosen.seed}, wp={chosen.waypoints.shape[0]}, "
                     f"cost={chosen.cost:.3f}) chosen from {len(cands)} candidates"
                 )
-                # Replace trajectory.joint_positions and re-time per the same
-                # max_velocity / max_acceleration as the original planner.
+                # Replace trajectory.joint_positions and re-time. Use a higher
+                # max_velocity than the cartesian-line planner uses so that
+                # long-cost OMPL detours (RRTConnect cost ~3) don't drag at
+                # 3s+ duration — speed is constant, duration varies with cost
+                # but stays roughly proportional to path length.
                 from lerobot_cap.planning.interpolation import time_parameterize_trajectory
                 new_joints = np.asarray(chosen.waypoints, dtype=float)
-                # Conservative kinematic limits: reuse the planner's default
-                # max_velocity (rad/s) — fall back to ~1.0 rad/s if not exposed.
-                max_v = getattr(active_planner, "max_velocity", 1.0)
-                max_a = getattr(active_planner, "max_acceleration", 2.0)
-                new_ts, _ = time_parameterize_trajectory(new_joints, max_v, max_a)
+                planner_max_v = float(getattr(active_planner, "max_velocity", 1.0))
+                planner_max_a = float(getattr(active_planner, "max_acceleration", 2.0))
+                # OMPL_VELOCITY_FACTOR > 1 keeps motion brisk regardless of
+                # path length. Could be exposed in yaml later if per-task
+                # tuning is needed. Acceleration scales together so the
+                # velocity-ramp profile stays consistent.
+                OMPL_VELOCITY_FACTOR = 1.5
+                ompl_max_v = OMPL_VELOCITY_FACTOR * planner_max_v
+                ompl_max_a = OMPL_VELOCITY_FACTOR * planner_max_a
+                new_ts, _ = time_parameterize_trajectory(new_joints, ompl_max_v, ompl_max_a)
                 trajectory.joint_positions = new_joints
                 trajectory.timestamps = new_ts
                 # ee_positions cached array no longer matches; clear so executor
-                # recomputes via FK if needed (or it stays None and executor
-                # tracks via FK on each step).
+                # recomputes via FK if needed.
                 trajectory.ee_positions = None
                 # goal_joint_rad unchanged — endpoint of OMPL plan == requested goal.
             else:

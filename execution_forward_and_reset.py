@@ -384,16 +384,26 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Skill Perturbation] import failed (skill_level package): {e}")
             return
 
-        # Resolve URDF path from the skills' active robot config.
+        # Resolve URDF path from the skills' robot config YAML directly.
+        # NOTE: self._skills.config is None until LeRobotSkills.connect() runs;
+        # this hook fires earlier (during _create_skills), so we must read the
+        # YAML ourselves from self._skills.robot_config_path (set in __init__).
         urdf_path = None
-        if hasattr(self._skills, "config"):
-            urdf_path = (self._skills.config.get("kinematics") or {}).get("urdf_path")
-            # robot_configs/robot/so101_robotN.yaml uses relative paths;
-            # resolve against project root.
+        try:
+            import yaml as _yaml
+            robot_cfg_path = getattr(self._skills, "robot_config_path", None)
+            if robot_cfg_path is None or not Path(robot_cfg_path).exists():
+                print(f"[Skill Perturbation] robot_config_path not available; skipping")
+                return
+            with open(robot_cfg_path, "r") as _f:
+                _robot_cfg = _yaml.safe_load(_f) or {}
+            urdf_path = (_robot_cfg.get("kinematics") or {}).get("urdf_path")
+            # YAML may store relative paths; resolve against the YAML's directory.
             if urdf_path and not Path(urdf_path).is_absolute():
-                urdf_path = str((Path(self.recording_config).resolve().parent.parent
-                                 / "assets" / "urdf" / Path(urdf_path).name)) \
-                            if not Path(urdf_path).exists() else urdf_path
+                urdf_path = str((Path(robot_cfg_path).parent / urdf_path).resolve())
+        except Exception as _e:
+            print(f"[Skill Perturbation] Failed to read robot config: {_e}; skipping")
+            return
         if not urdf_path or not Path(urdf_path).exists():
             print(f"[Skill Perturbation] URDF not found ({urdf_path!r}); skipping")
             return
@@ -417,7 +427,13 @@ class ForwardAndResetPipeline(BasePipeline):
                 ws["table_mount_links"] = tuple(ws["table_mount_links"])
 
         # Per-robot socket so multiple robots in one host don't collide.
-        robot_id = self._skills.config.get("robot_id", "default") if hasattr(self._skills, "config") else "default"
+        # Use the robot config stem as the id (e.g., "so101_robot0") since
+        # self._skills.config is still None at this point.
+        robot_id = "default"
+        try:
+            robot_id = Path(self._skills.robot_config_path).stem
+        except Exception:
+            pass
         import os as _os
         socket_path = f"/tmp/lerobot_planner_{_os.getuid()}_{robot_id}.sock"
 
@@ -438,6 +454,11 @@ class ForwardAndResetPipeline(BasePipeline):
                 f"(algos={planner_cfg['algorithms']}, n_candidates={skill_raw.get('n_candidates', 4)}, "
                 f"socket={socket_path})"
             )
+            # Apply pending per-episode seed (mirror subgoal setup). The RNG
+            # check in skills_lerobot.move_to_position swap requires this.
+            pending = getattr(self, "_pending_perturbation_seed", None)
+            if pending is not None:
+                self._skills.set_perturbation_rng(pending)
         except Exception as e:
             print(f"[Skill Perturbation] Failed to start daemon: {e}")
             self._skill_planner_client = None
@@ -469,9 +490,13 @@ class ForwardAndResetPipeline(BasePipeline):
         """
         ep_seed = int(batch_index) * 10000 + int(slot_in_batch)
         self._pending_perturbation_seed = ep_seed
-        if (hasattr(self, "_skills") and self._skills is not None
-                and getattr(self._skills, "_perturbation", None) is not None):
-            self._skills.set_perturbation_rng(ep_seed)
+        # Seed the RNG when EITHER subgoal-level or skill-level perturbation
+        # is attached — both branches in skills_lerobot use _perturbation_rng.
+        if hasattr(self, "_skills") and self._skills is not None:
+            has_subgoal = getattr(self._skills, "_perturbation", None) is not None
+            has_skill = getattr(self._skills, "_skill_planner_client", None) is not None
+            if has_subgoal or has_skill:
+                self._skills.set_perturbation_rng(ep_seed)
 
     def _get_pipeline_camera(self):
         """PipelineCamera lazy init."""

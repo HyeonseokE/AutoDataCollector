@@ -176,6 +176,14 @@ class LeRobotSkills:
         self._perturbation = None      # SubgoalPerturbation or None
         self._perturbation_rng = None  # np.random.Generator or None
 
+        # Skill-level perturbation: OMPL planner ensemble talked to via a
+        # PlanServiceClient (separate mplib_env). When attached + RNG set +
+        # is_transit, move_to_position swaps the cartesian-line trajectory
+        # for an OMPL joint-space candidate randomly drawn from a batch.
+        # See perturbation/skill_level.
+        self._skill_planner_client = None     # PlanServiceClient or None
+        self._skill_planner_n_candidates = 4  # batch size; fallback to old path on empty
+
     def _log(self, message: str):
         """Print message if verbose mode is enabled."""
         if self.verbose:
@@ -191,6 +199,21 @@ class LeRobotSkills:
     def set_perturbation_rng(self, seed: int) -> None:
         """(Re)seed the per-episode RNG for perturbation sampling."""
         self._perturbation_rng = np.random.default_rng(int(seed))
+
+    # ─────────────────────────────────────────────
+    # Skill-level perturbation hooks (OMPL via daemon)
+    # ─────────────────────────────────────────────
+    def set_skill_planner_client(self, client, n_candidates: int = 4) -> None:
+        """Attach a PlanServiceClient. Pass None to detach.
+
+        When attached AND the per-episode RNG is set AND is_transit=True,
+        move_to_position will replace its cartesian-line trajectory with
+        one OMPL joint-space candidate randomly drawn from a batch of
+        ``n_candidates`` parallel plans (different algos, different seeds).
+        Fallback to the original cartesian path is automatic on empty batch.
+        """
+        self._skill_planner_client = client
+        self._skill_planner_n_candidates = max(1, int(n_candidates))
 
     def perturbation_disabled(self):
         """Context manager that temporarily detaches perturbation.
@@ -1687,6 +1710,58 @@ class LeRobotSkills:
             label = f"{base} {default_suffix}".strip() if default_suffix else base
 
         goal_joint_rad = trajectory.joint_positions[-1]
+
+        # Skill-level perturbation (Phase 5): swap the cartesian-line trajectory
+        # for an OMPL joint-space candidate. Conditions:
+        #   - is_transit=True (caller-declared transit; not pick/place descents)
+        #   - PlanServiceClient attached AND per-episode RNG attached
+        #   - existing IK converged (so we have a valid goal_joint_rad)
+        # Uses the same start (current_joints) and goal (goal_joint_rad), but
+        # asks OMPL for N candidate paths and picks one randomly. Falls back
+        # to the cartesian-line trajectory on any error or empty batch.
+        if (is_transit
+                and self._skill_planner_client is not None
+                and self._perturbation_rng is not None
+                and trajectory.ik_converged):
+            seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
+            try:
+                cands = self._skill_planner_client.plan_batch(
+                    start_qpos=np.asarray(current_joints, dtype=float),
+                    goal_qpos=np.asarray(goal_joint_rad, dtype=float),
+                    n=self._skill_planner_n_candidates,
+                    seed=seed,
+                )
+            except Exception as e:
+                cands = []
+                self._log(f"  [Skill Perturbation] daemon error, fallback to cartesian: {e}")
+
+            if cands:
+                idx = int(self._perturbation_rng.integers(0, len(cands)))
+                chosen = cands[idx]
+                self._log(
+                    f"  [Skill Perturbation] {chosen.algo} "
+                    f"(seed={chosen.seed}, wp={chosen.waypoints.shape[0]}, "
+                    f"cost={chosen.cost:.3f}) chosen from {len(cands)} candidates"
+                )
+                # Replace trajectory.joint_positions and re-time per the same
+                # max_velocity / max_acceleration as the original planner.
+                from lerobot_cap.planning.interpolation import time_parameterize_trajectory
+                new_joints = np.asarray(chosen.waypoints, dtype=float)
+                # Conservative kinematic limits: reuse the planner's default
+                # max_velocity (rad/s) — fall back to ~1.0 rad/s if not exposed.
+                max_v = getattr(active_planner, "max_velocity", 1.0)
+                max_a = getattr(active_planner, "max_acceleration", 2.0)
+                new_ts, _ = time_parameterize_trajectory(new_joints, max_v, max_a)
+                trajectory.joint_positions = new_joints
+                trajectory.timestamps = new_ts
+                # ee_positions cached array no longer matches; clear so executor
+                # recomputes via FK if needed (or it stays None and executor
+                # tracks via FK on each step).
+                trajectory.ee_positions = None
+                # goal_joint_rad unchanged — endpoint of OMPL plan == requested goal.
+            else:
+                self._log("  [Skill Perturbation] empty batch — using cartesian fallback")
+
         self._set_skill_recording(
             label=label,
             skill_type=skill_type_val,

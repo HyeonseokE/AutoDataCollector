@@ -308,6 +308,9 @@ class ForwardAndResetPipeline(BasePipeline):
         # Subgoal-level perturbation: read recording_config and attach if enabled.
         # Per-episode RNG is seeded later via _seed_episode_perturbation().
         self._setup_perturbation_on_skills()
+        # Skill-level perturbation (OMPL ensemble via daemon). Same gating as
+        # subgoal — the daemon only spawns when skill.enabled == true.
+        self._setup_skill_perturbation_on_skills()
 
         return self._skills
 
@@ -351,6 +354,109 @@ class ForwardAndResetPipeline(BasePipeline):
                 self._skills.set_perturbation_rng(pending)
         except Exception as e:
             print(f"[Perturbation] Failed to construct perturbation: {e}")
+
+    def _setup_skill_perturbation_on_skills(self) -> None:
+        """Read perturbation.skill from recording_config and wire a PlanServiceClient.
+
+        Silent no-op when recording_config absent or skill perturbation disabled.
+        Daemon (mplib_env) auto-spawns on client construction; lerobot_cap process
+        keeps a reference and shuts it down at teardown via ``_teardown_skill_perturbation``.
+        """
+        if not self.recording_config:
+            return
+        cfg_path = Path(self.recording_config)
+        if not cfg_path.exists():
+            return
+        try:
+            import yaml as _yaml
+            with open(cfg_path, "r") as f:
+                full_cfg = _yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[Skill Perturbation] Failed to read recording_config: {e}")
+            return
+        skill_raw = (full_cfg.get("perturbation") or {}).get("skill") or {}
+        if not skill_raw.get("enabled", False):
+            return
+
+        try:
+            from perturbation.skill_level import PlanServiceClient
+        except Exception as e:
+            print(f"[Skill Perturbation] import failed (skill_level package): {e}")
+            return
+
+        # Resolve URDF path from the skills' active robot config.
+        urdf_path = None
+        if hasattr(self._skills, "config"):
+            urdf_path = (self._skills.config.get("kinematics") or {}).get("urdf_path")
+            # robot_configs/robot/so101_robotN.yaml uses relative paths;
+            # resolve against project root.
+            if urdf_path and not Path(urdf_path).is_absolute():
+                urdf_path = str((Path(self.recording_config).resolve().parent.parent
+                                 / "assets" / "urdf" / Path(urdf_path).name)) \
+                            if not Path(urdf_path).exists() else urdf_path
+        if not urdf_path or not Path(urdf_path).exists():
+            print(f"[Skill Perturbation] URDF not found ({urdf_path!r}); skipping")
+            return
+
+        # Build planner config dict for the daemon.
+        planner_cfg = dict(
+            enabled=True,
+            algorithms=tuple(skill_raw.get("algorithms",
+                                            ("RRTConnect", "PRMstar", "BITstar", "KPIECE1"))),
+            planning_time=float(skill_raw.get("planning_time", 0.5)),
+            waypoint_density=float(skill_raw.get("waypoint_density", 0.02)),
+            workspace=skill_raw.get("workspace") or None,
+        )
+        # Normalize workspace nested types (yaml gives lists; the dataclass
+        # defaults are tuples, but mplib accepts both).
+        ws = planner_cfg.get("workspace")
+        if isinstance(ws, dict):
+            if "table_size" in ws and ws["table_size"] is not None:
+                ws["table_size"] = tuple(ws["table_size"])
+            if "table_mount_links" in ws and ws["table_mount_links"] is not None:
+                ws["table_mount_links"] = tuple(ws["table_mount_links"])
+
+        # Per-robot socket so multiple robots in one host don't collide.
+        robot_id = self._skills.config.get("robot_id", "default") if hasattr(self._skills, "config") else "default"
+        import os as _os
+        socket_path = f"/tmp/lerobot_planner_{_os.getuid()}_{robot_id}.sock"
+
+        try:
+            client = PlanServiceClient(
+                urdf=urdf_path,
+                config=planner_cfg,
+                socket_path=socket_path,
+                n_workers=int(skill_raw.get("n_workers", 4)),
+                autospawn=True,
+            )
+            self._skill_planner_client = client
+            self._skills.set_skill_planner_client(
+                client, n_candidates=int(skill_raw.get("n_candidates", 4)),
+            )
+            print(
+                f"[Skill Perturbation] OMPL ensemble ENABLED "
+                f"(algos={planner_cfg['algorithms']}, n_candidates={skill_raw.get('n_candidates', 4)}, "
+                f"socket={socket_path})"
+            )
+        except Exception as e:
+            print(f"[Skill Perturbation] Failed to start daemon: {e}")
+            self._skill_planner_client = None
+
+    def _teardown_skill_perturbation(self) -> None:
+        """Cleanly shut down the PlanServiceClient and its daemon."""
+        client = getattr(self, "_skill_planner_client", None)
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception:
+            pass
+        self._skill_planner_client = None
+        if hasattr(self, "_skills") and self._skills is not None:
+            try:
+                self._skills.set_skill_planner_client(None)
+            except Exception:
+                pass
 
     def _seed_episode_perturbation(self, batch_index: int, slot_in_batch: int) -> None:
         """Seed per-episode RNG for subgoal perturbation. No-op if disabled.
@@ -580,6 +686,12 @@ class ForwardAndResetPipeline(BasePipeline):
             except Exception as e:
                 print(f"[Recording] Warning: Failed to disconnect cameras: {e}")
             self.camera_manager = None
+
+        # Skill-level perturbation: shut down OMPL daemon if it was spawned
+        try:
+            self._teardown_skill_perturbation()
+        except Exception as e:
+            print(f"[Recording] Warning: skill perturbation teardown failed: {e}")
 
 
     def capture_frame(self) -> Optional[np.ndarray]:

@@ -105,3 +105,31 @@ perturbation:
     enabled: false     # true → transit subgoal 위치 변형 활성화
     sigma: 0.05           # metres; isotropic Gaussian 표준편차 (robotwin 기준값)
     clip_factor: 2.0      # truncate at clip_factor * sigma (최대 offset = 0.10m)
+
+  ## Skill-level perturbation (OMPL planner ensemble — Phase 5)
+  ## - is_transit=True 인 move_to_position 호출에만 적용 (subgoal 과 동일한 가드)
+  ## - 매 호출 시 N 개 후보 trajectory 를 OMPL 알고리즘 (RRTConnect/PRMstar/BITstar/KPIECE1) 다양하게 병렬 plan
+  ## - RNG-driven 으로 1 개를 선택하여 cartesian-line 대신 실행 → trajectory shape 자체 변형
+  ## - subgoal 과 직교: 둘 다 켜면 perturbed-target × ompl-shape 모두 적용
+  ## - daemon (mplib_env) 자동 spawn; 비활성 시 daemon 안 띄움
+  ## - workspace 정의는 robot 별 collision world (table, ceiling, 다른 arm bbox).
+  ##   skill perturbation 미사용해도 daemon 안 뜨므로 비용 0.
+  skill:
+    enabled: false        # true → OMPL ensemble 기반 trajectory 변형 활성화
+    n_candidates: 4       # plan_batch 의 N — 4 algorithm round-robin 분배
+    planning_time: 0.5    # seconds, 알고리즘별 .solve() 예산
+    waypoint_density: 0.02  # m — joint-distance 기반 출력 waypoint 밀도
+    n_workers: 4          # daemon 의 multiprocessing.Pool 워커 수 (CPU 코어 ≤)
+    algorithms:           # 활성화할 OMPL 알고리즘 (다양한 모드 → 다양한 path 형상)
+      - RRTConnect
+      - PRMstar
+      - BITstar
+      - KPIECE1
+    workspace:
+      table_enabled: true
+      table_z: 0.0          # 로봇 base_link 기준 테이블 표면 z (m)
+      table_thickness: 0.10 # 테이블 두께 (m); plan 이 표면 아래로 dip 하는 것 차단
+      table_size: [2.0, 2.0]
+      table_mount_links: [base_link]   # ACM whitelist (base 가 테이블에 mount 됨)
+      ceiling_enabled: false
+      other_arms: []        # bi-arm 시 [{name, size: [x,y,z], center: [x,y,z]}]

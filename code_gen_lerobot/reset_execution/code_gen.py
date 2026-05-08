@@ -226,6 +226,17 @@ def lerobot_reset_code_gen(
     # 3) 객체 분류 (grippable vs obstacle)
     print(f"\n{YELLOW}" + _log("Classifying objects", step="3/5") + f"{RESET_COLOR}")
 
+    # is_obstacle 플래그를 original_positions(forward 단계의 first_episode_positions)에서
+    # 가져와 전파. run_realtime_detection 자체는 needs_manipulation 신호를 채우지 않으므로,
+    # 단일턴 경로에서도 placement reference (bread/cereal 등) 이 obstacle 로 정확히 분류되려면
+    # 이 전파가 필요.
+    for name, info in extended_detections.items():
+        if info is None or not isinstance(info, dict):
+            continue
+        orig = original_positions.get(name)
+        if isinstance(orig, dict) and orig.get("is_obstacle"):
+            info["is_obstacle"] = True
+
     grippable_objects, obstacle_objects = classify_objects(extended_detections)
 
     print(f"  Grippable (will move): {list(grippable_objects.keys())}")
@@ -275,6 +286,34 @@ def lerobot_reset_code_gen(
         for name, info in grippable_objects.items()
         if name in target_positions
     }
+
+    # Displacement-based exclusion: skip objects already near their target
+    # (current ≈ target within RESET_SKIP_THRESHOLD_M). Avoids unnecessary
+    # pick/place on objects that didn't move during forward — protects light
+    # objects (bread/cereal) from being disturbed by spurious grasps.
+    RESET_SKIP_THRESHOLD_M = 0.03  # 3cm — absorbs camera/detection noise
+    skipped = []
+    for name in list(current_positions.keys()):
+        cur = current_positions[name]
+        tgt_info = target_positions.get(name)
+        if tgt_info is None:
+            continue
+        tgt = tgt_info["position"] if isinstance(tgt_info, dict) and "position" in tgt_info else tgt_info
+        try:
+            dx = float(cur[0]) - float(tgt[0])
+            dy = float(cur[1]) - float(tgt[1])
+            dz = float(cur[2]) - float(tgt[2])
+            disp = (dx * dx + dy * dy + dz * dz) ** 0.5
+        except (TypeError, IndexError, ValueError):
+            continue
+        if disp < RESET_SKIP_THRESHOLD_M:
+            skipped.append((name, disp))
+            current_positions.pop(name, None)
+            target_positions.pop(name, None)
+    if skipped:
+        print(f"  Skipping (already at target, < {RESET_SKIP_THRESHOLD_M*100:.0f}cm displacement):")
+        for name, disp in skipped:
+            print(f"    - {name}: {disp*1000:.1f}mm")
 
     # 5) 프롬프트 생성 및 LLM 호출
     print(f"\n{YELLOW}" + _log(f"Generating reset code via LLM ({llm_model})", step="5/5") + f"{RESET_COLOR}")
@@ -892,10 +931,16 @@ def lerobot_reset_code_gen_multi_turn(
             h_px = int((ymax - ymin) * img_h / 1000)
             bbox_px_map[label] = (max(w_px, 10), max(h_px, 10))
 
-    from .workspace import is_grippable
     for label, info in current_positions.items():
         info["bbox_px"] = bbox_px_map.get(label, (30, 30))
-        info["grippable"] = is_grippable(info["bbox_px"])
+        # VLM Turn 1 의 needs_manipulation=false 신호를 is_obstacle 플래그로 전파.
+        # placement reference (bread, cereal 등 — 다른 객체를 그 위/사이에 놓는 기준점)
+        # 이 manipulated 로 분류되면 reset 단계에서 reference 까지 잡으려 시도하는 회귀 발생.
+        strat = strategy_by_label.get(label)
+        if strat and strat.get("needs_manipulation") is False:
+            info["is_obstacle"] = True
+        # 디버그 표시용 grippable 플래그 — classify_objects 와 동일 정책 (is_obstacle 부정).
+        info["grippable"] = not info.get("is_obstacle", False)
 
     # Classify objects
     grippable_objects, obstacle_objects = classify_objects(current_positions)
@@ -963,6 +1008,33 @@ def lerobot_reset_code_gen_multi_turn(
             print(f"    + {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
         elif isinstance(info, (list, tuple)) and len(info) >= 3:
             print(f"    + {name}: [{info[0]:.4f}, {info[1]:.4f}, {info[2]:.4f}]")
+
+    # Displacement-based exclusion: skip objects already near their target.
+    # See identical block in lerobot_reset_code_gen() for rationale.
+    RESET_SKIP_THRESHOLD_M = 0.03  # 3cm — absorbs camera/detection noise
+    skipped = []
+    for name in list(target_positions.keys()):
+        cur_info = grippable_objects.get(name)
+        if cur_info is None:
+            continue
+        cur = cur_info["position"] if isinstance(cur_info, dict) and "position" in cur_info else cur_info
+        tgt_info = target_positions[name]
+        tgt = tgt_info["position"] if isinstance(tgt_info, dict) and "position" in tgt_info else tgt_info
+        try:
+            dx = float(cur[0]) - float(tgt[0])
+            dy = float(cur[1]) - float(tgt[1])
+            dz = float(cur[2]) - float(tgt[2])
+            disp = (dx * dx + dy * dy + dz * dz) ** 0.5
+        except (TypeError, IndexError, ValueError):
+            continue
+        if disp < RESET_SKIP_THRESHOLD_M:
+            skipped.append((name, disp))
+            target_positions.pop(name, None)
+            grippable_objects.pop(name, None)
+    if skipped:
+        print(f"  Skipping (already at target, < {RESET_SKIP_THRESHOLD_M*100:.0f}cm displacement):")
+        for name, disp in skipped:
+            print(f"    - {name}: {disp*1000:.1f}mm")
 
     # ── skip_codegen 모드: T0~T2 검출만 수행, 코드 생성 스킵 ──
     if skip_codegen:

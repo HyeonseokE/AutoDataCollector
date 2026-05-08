@@ -68,13 +68,26 @@ class PipelineCamera:
 
         # 2순위: 직접 연결
         try:
+            import os
             from object_detection.camera import RealSenseD435
-            self.camera = RealSenseD435(width=640, height=480, fps=30)
+            # When camera_manager isn't built (e.g. record_dataset=False), the
+            # fallback would otherwise grab the first enumerated RealSense and
+            # silently bind to the wrong workstation. Allow the launcher to
+            # pin a specific serial via env var so the recording_config_ws*.yaml
+            # serial is honored even on this path.
+            rs_serial = os.environ.get("VOXPOSER_RS_SERIAL") or None
+            kwargs = {"width": 640, "height": 480, "fps": 30}
+            if rs_serial:
+                kwargs["serial_number"] = rs_serial
+            self.camera = RealSenseD435(**kwargs)
             self.camera.start()
             for _ in range(30):
                 self.camera.get_frames()
             if self.verbose:
-                print("[Camera] Initialized (direct)")
+                if rs_serial:
+                    print(f"[Camera] Initialized (direct, serial={rs_serial})")
+                else:
+                    print("[Camera] Initialized (direct)")
             return True
         except Exception as e:
             print(f"[Camera] Initialization failed: {e}")

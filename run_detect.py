@@ -646,7 +646,11 @@ def run_realtime_detection(
 
                     # Workspace 범위 체크 (skip_workspace_filter=True면 건너뜀)
                     if not skip_workspace_filter and position_m is not None and not workspace.is_reachable(position_m):
-                        frame_info = workspace._transformer.get_frame_info("world") if workspace._transformer else None
+                        # `_transformer` is a legacy attribute not defined on
+                        # current `BaseWorkspace`. Guard with getattr so the
+                        # debug branch falls through to the short message.
+                        _xform = getattr(workspace, "_transformer", None)
+                        frame_info = _xform.get_frame_info("world") if _xform else None
                         if frame_info:
                             robot_pos = frame_info["robot_position"]
                             dx = position_m[0] - robot_pos[0]

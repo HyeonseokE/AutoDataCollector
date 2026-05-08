@@ -216,7 +216,7 @@ class ResetJudge:
                 prompt=full_prompt,
                 images_b64=[initial_image_b64, final_image_b64],
                 model=self.model,
-                max_tokens=1000,
+                max_tokens=2000,
                 temperature=self.temperature,
                 use_server=True if self.use_server else None,
             )
@@ -254,7 +254,7 @@ class ResetJudge:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_completion_tokens=1000,
+            max_completion_tokens=2000,
             reasoning_effort="minimal",  # 추론 토큰 최소화
         )
 

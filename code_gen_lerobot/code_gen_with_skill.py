@@ -821,26 +821,35 @@ def lerobot_code_gen_multi_turn(
     print(f"\n{YELLOW}" + _log("Building positions...", step="Positions") + f"{RESET}")
     positions = _points_to_positions(all_points, robot_id=robot_id, camera=camera, valid_objects=valid_objects)
 
-    # Obstacle 물체 (needs_manipulation=false)를 positions에 bbox만 추가
-    # → seed 생성 시 장애물로 사용됨
+    # Obstacle 물체 (needs_manipulation=false) 처리
+    # → 기존 entry 에는 is_obstacle 플래그만 추가하고, positions 에 없는 경우만 신규 항목 생성.
+    #   placement reference (cereal, bread 등 — needs_manipulation=false 이지만 expected_points 가 있어
+    #   _points_to_positions 가 이미 positions 에 넣어둔 케이스) 도 is_obstacle 로 정확히 마킹돼야
+    #   downstream classify_objects/seed-randomization 가 manipulated 와 reference 를 구분할 수 있음.
     for obj in valid_objects:
         label = obj.get("label", "")
         strategy = obj.get("manipulation_strategy", {})
-        if strategy and strategy.get("needs_manipulation") is False and label not in positions:
-            box = obj.get("box_2d", [])
-            if len(box) == 4:
-                ymin, xmin, ymax, xmax = box
-                cx = int((xmin + xmax) / 2 * img_w / 1000)
-                cy = int((ymin + ymax) / 2 * img_h / 1000)
-                w_px = int((xmax - xmin) * img_w / 1000)
-                h_px = int((ymax - ymin) * img_h / 1000)
-                positions[label] = {
-                    "position": [0, 0, 0],  # placeholder — pix2robot 변환은 seed에서 수행
-                    "pixel": [cx, cy],
-                    "bbox_px": (max(w_px, 10), max(h_px, 10)),
-                    "is_obstacle": True,
-                }
-                print(f"    {label}: obstacle bbox=({w_px}x{h_px}) pixel=({cx},{cy})")
+        if not strategy or strategy.get("needs_manipulation") is not False:
+            continue
+        if label in positions:
+            positions[label]["is_obstacle"] = True
+            print(f"    {label}: marked as obstacle (placement reference)")
+            continue
+        # 기존에 positions 에 없는 진짜 obstacle (collision-only) — bbox 기반 신규 entry
+        box = obj.get("box_2d", [])
+        if len(box) == 4:
+            ymin, xmin, ymax, xmax = box
+            cx = int((xmin + xmax) / 2 * img_w / 1000)
+            cy = int((ymin + ymax) / 2 * img_h / 1000)
+            w_px = int((xmax - xmin) * img_w / 1000)
+            h_px = int((ymax - ymin) * img_h / 1000)
+            positions[label] = {
+                "position": [0, 0, 0],  # placeholder — pix2robot 변환은 seed에서 수행
+                "pixel": [cx, cy],
+                "bbox_px": (max(w_px, 10), max(h_px, 10)),
+                "is_obstacle": True,
+            }
+            print(f"    {label}: obstacle bbox=({w_px}x{h_px}) pixel=({cx},{cy})")
 
     # Fallback
     if fallback_positions:

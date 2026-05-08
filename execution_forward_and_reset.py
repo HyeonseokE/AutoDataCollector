@@ -2589,11 +2589,10 @@ class ForwardAndResetPipeline(BasePipeline):
             if pos and len(pos) >= 3:
                 print(f"    {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
 
-        # 과거 시드 위치에 추가 (다음 시드 생성 시 겹침 방지) — grippable만
-        from code_gen_lerobot.reset_execution.workspace import is_grippable as _is_grip
+        # 과거 시드 위치에 추가 (다음 시드 생성 시 겹침 방지) — grippable 만 (is_obstacle 아닌 것)
         self._all_previous_seed_positions.append(
             {name: info for name, info in new_positions.items()
-             if isinstance(info, dict) and _is_grip(info.get("bbox_px"), name=name)}
+             if isinstance(info, dict) and not info.get("is_obstacle")}
         )
 
         # 시각화: workspace + 과거 시드 bbox + 새 시드 bbox
@@ -2626,7 +2625,13 @@ class ForwardAndResetPipeline(BasePipeline):
         - 새 시드: 초록색 bbox (굵게)
         """
         import cv2
-        from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image, _get_bbox_px, is_grippable as _is_grippable
+        from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image, _get_bbox_px
+
+        # is_obstacle 플래그 기반 분류 (classify_objects 와 동일 정책).
+        # raw bbox 휴리스틱 (is_grippable) 은 길쭉한 도구의 AABB 부풀림으로
+        # manipulated 객체를 NOT grippable 로 잘못 떨어트리는 회귀가 있어 시각화에서도 폐기.
+        def _info_is_grippable(info):
+            return not bool(info.get("is_obstacle"))
 
         # 초기 이미지 로드
         if self.forward_initial_image_path and Path(self.forward_initial_image_path).exists():
@@ -2645,20 +2650,21 @@ class ForwardAndResetPipeline(BasePipeline):
                 cv2.putText(img, label, (cu - hw, cv - hh - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
 
-        # 장애물 (빨간색)
+        # 장애물 (빨간색) — is_obstacle=True 로 표시된 객체
         if self.first_episode_positions:
             for name, info in self.first_episode_positions.items():
                 if not isinstance(info, dict):
                     continue
-                if not _is_grippable(info.get("bbox_px"), name=name):
-                    pos = info.get("position")
-                    bbox = _get_bbox_px(info)
-                    if pos and pix2robot:
-                        try:
-                            px = pix2robot.robot_to_pixel(pos[0], pos[1])
-                            _draw_bbox(result, px, bbox, (0, 0, 255), 2, f"obs:{name}")
-                        except Exception:
-                            pass
+                if _info_is_grippable(info):
+                    continue
+                pos = info.get("position")
+                bbox = _get_bbox_px(info)
+                if pos and pix2robot:
+                    try:
+                        px = pix2robot.robot_to_pixel(pos[0], pos[1])
+                        _draw_bbox(result, px, bbox, (0, 0, 255), 2, f"obs:{name}")
+                    except Exception:
+                        pass
 
         # 과거 시드 — 모두 회색 계열 (초기 위치 = s0)
         PAST_COLORS = [
@@ -2682,11 +2688,11 @@ class ForwardAndResetPipeline(BasePipeline):
                     except Exception:
                         pass
 
-        # 새 시드 (초록색, 굵게) — grippable만
+        # 새 시드 (초록색, 굵게) — grippable만 (is_obstacle 아닌 것)
         for name, info in new_positions.items():
             if not isinstance(info, dict):
                 continue
-            if not _is_grippable(info.get("bbox_px"), name=name):
+            if not _info_is_grippable(info):
                 continue
             pos = info.get("position")
             bbox = _get_bbox_px(info)
@@ -2723,7 +2729,11 @@ class ForwardAndResetPipeline(BasePipeline):
         위치를 점(원)으로 표시. 현재 시드는 크게, 과거는 작게.
         """
         import cv2
-        from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image, is_grippable as _is_grippable
+        from code_gen_lerobot.reset_execution.workspace import draw_workspace_on_image
+
+        # is_obstacle 플래그 기반 분류 (classify_objects 와 동일 정책).
+        def _info_is_grippable(info):
+            return not bool(info.get("is_obstacle"))
 
         if self.forward_initial_image_path and Path(self.forward_initial_image_path).exists():
             base_img = cv2.imread(self.forward_initial_image_path)
@@ -2732,14 +2742,14 @@ class ForwardAndResetPipeline(BasePipeline):
 
         result = draw_workspace_on_image(base_img, robot_id=self.robot_id, pix2robot_calibrator=pix2robot, resetspace=self.resetspace)
 
-        # 객체 이름 수집 (grippable만)
+        # 객체 이름 수집 (grippable만 — is_obstacle 아닌 것)
         all_obj_names = set()
         if self.first_episode_positions:
             for name, info in self.first_episode_positions.items():
-                if isinstance(info, dict) and _is_grippable(info.get("bbox_px"), name=name):
+                if isinstance(info, dict) and _info_is_grippable(info):
                     all_obj_names.add(name)
         for name in new_positions:
-            if isinstance(new_positions[name], dict) and _is_grippable(new_positions[name].get("bbox_px"), name=name):
+            if isinstance(new_positions[name], dict) and _info_is_grippable(new_positions[name]):
                 all_obj_names.add(name)
         all_obj_names = sorted(all_obj_names)
 
@@ -2774,11 +2784,11 @@ class ForwardAndResetPipeline(BasePipeline):
                     except Exception:
                         pass
 
-        # 현재 시드 (큰 점 + 라벨)
+        # 현재 시드 (큰 점 + 라벨) — grippable만 (is_obstacle 아닌 것)
         for name, info in new_positions.items():
             if name not in obj_color_map or not isinstance(info, dict):
                 continue
-            if not _is_grippable(info.get("bbox_px"), name=name):
+            if not _info_is_grippable(info):
                 continue
             pos = info.get("position")
             if pos and pix2robot:

@@ -231,12 +231,15 @@ class ResetWorkspace(BaseWorkspace):
                 if not is_in_quadrant(cu, cv, resetspace):
                     continue
 
-                # FOV + 가장자리 마진
+                # FOV: center 는 edge margin 안쪽, bbox 는 이미지 안쪽이면 OK
                 img_w, img_h = 640, 480
                 edge_margin = 30
                 hw, hh = obj_w // 2, obj_h // 2
-                if (cu - hw < edge_margin or cu + hw >= img_w - edge_margin or
-                    cv - hh < edge_margin or cv + hh >= img_h - edge_margin):
+                if not (edge_margin <= cu < img_w - edge_margin
+                        and edge_margin <= cv < img_h - edge_margin):
+                    continue
+                if (cu - hw < 0 or cu + hw >= img_w
+                        or cv - hh < 0 or cv + hh >= img_h):
                     continue
             elif resetspace is not None and resetspace != "all":
                 # pix2robot 없으면 quadrant 체크 불가 → 스킵
@@ -334,13 +337,20 @@ def classify_objects(
     gripper_max_px: int = GRIPPER_MAX_OPEN_PX,
 ) -> Tuple[Dict[str, dict], Dict[str, dict]]:
     """
-    객체를 grippable / non-grippable(obstacle)로 분류 (픽셀 bbox 기반).
+    객체를 grippable / non-grippable(obstacle)로 분류.
 
-    Deformable 물체 (이름에 towel, cloth 등 포함)는 bbox가 커도 grippable로 분류.
+    분류 우선순위 (upstream 신호를 신뢰):
+      1) is_obstacle=True (Turn 1 needs_manipulation=false)  → obstacle
+      2) DEFORMABLE/GRIPPABLE 화이트리스트 키워드 매칭        → grippable
+      3) 그 외 (upstream 이 obstacle 로 표시 안 함)          → grippable
+         · bbox 휴리스틱은 경고로만 사용 (hard filter X) — 길쭉한
+           수저류처럼 AABB bbox 가 부풀어 잡히는 케이스에서 manipulated
+           객체가 obstacle 로 잘못 떨어져 reset 랜덤화에서 빠지던 회귀를
+           회피.
 
     Args:
-        detections: {name: {"position": [...], "bbox_px": (w,h), ...}}
-        gripper_max_px: 그리퍼 최대 열림 폭 (pixels)
+        detections: {name: {"position": [...], "bbox_px": (w,h), "is_obstacle": bool?, ...}}
+        gripper_max_px: 그리퍼 최대 열림 폭 (pixels) — 경고 임계치.
 
     Returns:
         (grippable_objects, obstacle_objects)
@@ -351,23 +361,28 @@ def classify_objects(
     for name, info in detections.items():
         if info is None:
             continue
-        # Robot self-image 라벨 (e.g. "left robot arm", "gripper") 은 통째로 무시.
+        # 0) Robot self-image 라벨 (e.g. "left robot arm", "gripper") 은 통째로 무시.
         # 카메라 시야 가장자리에 잡혀서 obstacle 처리되면 reset 후보 영역을 크게 깎음.
         if any(kw in name.lower() for kw in ROBOT_SELF_KEYWORDS):
             continue
-        # 명시적 obstacle 플래그 (Turn 1에서 needs_manipulation=false로 검출된 물체)
+        # 1) Upstream 이 명시적으로 obstacle 로 표시한 경우 (Turn 1 needs_manipulation=false)
         if info.get("is_obstacle"):
             obstacles[name] = info
             continue
-        # Deformable 물체 / 손잡이로 잡는 물체는 bbox 크기와 무관하게 grippable
+        # 2) Deformable 물체 / 손잡이로 잡는 물체 (lid 등) — 명시적 grippable
         if any(kw in name.lower() for kw in DEFORMABLE_KEYWORDS + GRIPPABLE_KEYWORDS):
             grippable[name] = info
             continue
+        # 3) 기본: upstream 신뢰 — obstacle 표시 없으면 grippable.
+        #    bbox 가 그리퍼 폭을 넘어도 경고만 남기고 grippable 로 채택.
         bbox_px = info.get("bbox_px")
-        if is_grippable(bbox_px, gripper_max_px):
-            grippable[name] = info
-        else:
-            obstacles[name] = info
+        if bbox_px is not None and not is_grippable(bbox_px, gripper_max_px):
+            print(
+                f"  [classify_objects] '{name}' bbox {tuple(bbox_px)} 가 "
+                f"gripper_max_px={gripper_max_px} 보다 큼 — upstream 이 obstacle 로 표시 "
+                f"안 했으므로 grippable 로 분류 (길쭉한 도구의 AABB 부풀림 가능성)."
+            )
+        grippable[name] = info
 
     return grippable, obstacles
 

@@ -104,6 +104,13 @@ class Pix2RobotCharuco:
             if rob_pts.size > 0:
                 self.table_z_robot = float(np.median(rob_pts[:, 2]))
 
+        # table_z_override: 캘리 시 EE-touch들의 sag/노이즈로 인한 systematic z bias를
+        # 사후 보정하기 위한 명시적 override. 존재하면 robot_points median을 무시하고
+        # 이 값을 reference table_z로 사용. 단위: meters (robot base_link 기준).
+        # 보통 0.0 (테이블 표면 = robot z=0) 으로 설정.
+        if "table_z_override" in ext.files:
+            self.table_z_robot = float(np.asarray(ext["table_z_override"]).flatten()[0])
+
         # 메타정보 (디버그용)
         self.image_size: Optional[Tuple[int, int]] = None
         if "image_width" in intr.files and "image_height" in intr.files:

@@ -1586,8 +1586,8 @@ class LeRobotSkills:
         ik_target_position = target_position.copy()
         if self.gravity_sag is not None:
             sag_offset = self.gravity_sag.compute_offset(target_position)
+            ik_target_position[2] += sag_offset  # always apply; only logging is gated below
             if sag_offset > 0.001:  # Only log when meaningful (> 1mm)
-                ik_target_position[2] += sag_offset
                 reach = np.sqrt(target_position[0] ** 2 + target_position[1] ** 2)
                 self._log(f"  [Gravity Sag] reach={reach:.3f}m, z={target_position[2]:.3f}m "
                           f"→ z_offset=+{sag_offset * 1000:.1f}mm")
@@ -1712,7 +1712,7 @@ class LeRobotSkills:
             skill_type_val = "move_and_close"
             default_suffix = "and close gripper"
         elif gripper_action == "open":
-            GRIPPER_MAX_RATIO = 0.30  # same as gripper_open()
+            GRIPPER_MAX_RATIO = 0.20  # same as gripper_open()
             clamped_ratio = min(gripper_open_ratio, GRIPPER_MAX_RATIO)
             target_g = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
             gripper_start_value = self.current_gripper_pos
@@ -1958,7 +1958,7 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        GRIPPER_MAX_RATIO = 0.30
+        GRIPPER_MAX_RATIO = 0.20
         clamped_ratio = min(ratio, GRIPPER_MAX_RATIO)
         target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
@@ -2177,7 +2177,10 @@ class LeRobotSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = 0.00  # Minimum pick height — no ground margin
+        MIN_PICK_Z = -0.025  # Minimum pick height (25mm below table) — loose floor that
+                             # lets per-robot pick_z_offset (signed, set in compensation file)
+                             # take full effect for thin objects. The motor's natural reach
+                             # floor + arm compliance still prevent grinding into the table.
         # pick_z = (object_top - pick_offset) + pick_z_offset (per-robot residual sag absorber, usually negative)
         pick_z_raw = object_height - self.pick_offset + self.pick_z_offset
         pick_z = max(pick_z_raw, MIN_PICK_Z)
@@ -2248,13 +2251,22 @@ class LeRobotSkills:
         place_position = np.array(place_position)
         target_surface_height = 0.0 if is_table else place_position[2]
 
-        MIN_PLACE_Z = 0.005  # Minimum place height (0.5cm) — ground margin
+        MIN_PLACE_Z = -0.025  # Minimum place height (25mm below table) — relaxed to allow
+                              # PLACE_EXTRA_DESCENT_M to actually take effect on thin objects.
+
+        # Hardcoded extra place descent (signed, meters). Adds 5mm of additional
+        # downward travel at place to compensate for residual FK/URDF z bias —
+        # measured fingertip ~5mm above commanded z at place. Negative = descend more.
+        PLACE_EXTRA_DESCENT_M = -0.005
 
         if is_table:
             # Placing on table: use target z (object's own height) as reference
             # place_position[2] = object's own height when on table
             # place_z = object height - pick_offset (same as how we'd pick it from table)
-            place_z = max(place_position[2] - self.pick_offset, MIN_PLACE_Z)
+            place_z = max(
+                place_position[2] - self.pick_offset + PLACE_EXTRA_DESCENT_M,
+                MIN_PLACE_Z,
+            )
         else:
             # Placing on another object: use saved pick_z offset from surface
             pick_z = getattr(self, '_pick_z', self.pick_offset)

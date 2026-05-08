@@ -25,8 +25,8 @@
   },
   "preload_gain": 0.5,
 
-  "pick_z_offset": -0.03,
-  "_pick_z_offset_comment": "Per-robot pick descent boost (meters, signed). Added to execute_pick_object's commanded pick_z. Negative = descend further to absorb residual sag the gravity_sag model leaves uncompensated. Set to -0.030 (descend 3cm extra) on 2026-05-06 — production logs showed fingertip stopping ~5mm below block top instead of intended 15mm dive (red block: pick_z cmd=34mm, actual=44mm; effective dive only 5mm). MIN_PICK_Z=0 clamp protects against below-table commands for short objects.",
+  "pick_z_offset": -0.005,
+  "_pick_z_offset_comment": "Per-robot pick descent boost (meters, signed). Added to execute_pick_object's commanded pick_z. Negative = descend further to absorb residual sag. Updated 2026-05-08: -0.015 → -0.005 to raise pick height by 1cm. Net commanded descent: object_top - 2.5cm (pick_offset) - 0.5cm (this offset). MIN_PICK_Z=0 clamp still guards against below-table commands.",
 
   "base_compensation": {
     "shoulder_pan": 0.0,

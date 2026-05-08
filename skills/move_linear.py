@@ -87,6 +87,10 @@ def _cartesian_ik_trajectory(
             skills.planner.calibration_limits.upper_limits_radians,
         )
 
+    PITCH_TOLERANCE_DEG = 20.0  # waypoint별 pitch 허용 편차 (move_to_position과 동일)
+    pitch_offsets_deg = [i for j in range(int(PITCH_TOLERANCE_DEG) + 1)
+                         for i in ((-j, j) if j > 0 else (0,))]
+
     joint_trajectory = []
     prev_joints = current_joints
 
@@ -101,10 +105,31 @@ def _cartesian_ik_trajectory(
             target_pitch=target_pitch,
         )
 
+        # Retry with pitch tolerance ±20° if maintain_pitch was set and IK failed
+        if (not success or ik_info["num_valid"] == 0) and target_pitch is not None:
+            for offset_deg in pitch_offsets_deg:
+                if offset_deg == 0:
+                    continue  # already tried original pitch
+                test_pitch = target_pitch + np.radians(offset_deg)
+                target_joints, success, ik_info = kinematics.inverse_kinematics_multi(
+                    wp,
+                    current_joints=prev_joints,
+                    custom_limits=custom_limits,
+                    num_random_samples=10,
+                    verbose=False,
+                    fixed_joints=fixed_joints,
+                    target_pitch=test_pitch,
+                )
+                if success and ik_info["num_valid"] > 0:
+                    print(f"  [move_linear] waypoint {i+1}/{len(waypoints_base)}: "
+                          f"pitch relaxed to {offset_deg:+d}° (no exact-pitch solution)")
+                    break
+
         if not success or ik_info["num_valid"] == 0:
             raise RuntimeError(
                 f"[move_linear] IK failed at waypoint {i+1}/{len(waypoints_base)}: "
-                f"[{wp[0]:.3f}, {wp[1]:.3f}, {wp[2]:.3f}]"
+                f"[{wp[0]:.3f}, {wp[1]:.3f}, {wp[2]:.3f}] "
+                f"(tried ±{int(PITCH_TOLERANCE_DEG)}° pitch tolerance)"
             )
 
         joint_trajectory.append(target_joints)
@@ -142,9 +167,9 @@ def move_linear(
              - start와 end 사이를 직선으로 이동
 
         duration: 이동 시간 (단위: 초). default=None
-                  - None: 거리 기반 자동 계산 (5cm/s 기준, 최소 2초)
+                  - None: 거리 기반 자동 계산 (5cm/s 기준, 최소 1.5초)
                   - 작을수록 빠르게 이동 (단, 너무 빠르면 추종 오차 증가)
-                  - 접촉 동작에서는 2~5초 권장
+                  - 접촉 동작에서는 1.5~5초 권장
 
         maintain_pitch: 이동 중 pitch 유지 여부. default=True
                         - True: 이동 시작 시점의 gripper pitch를 전 구간 유지
@@ -175,7 +200,7 @@ def move_linear(
     # Duration: 거리 기반 자동 계산 (없으면)
     distance = np.linalg.norm(end - start)
     if duration is None:
-        duration = max(distance / 0.05, 2.0)  # 5cm/s 기준, 최소 2초
+        duration = max(distance / 0.05, 1.5)  # 5cm/s 기준, 최소 1.5초
 
     skills._log(f"\n[move_linear] {start} -> {end}")
     skills._log(f"  Distance: {distance*100:.1f}cm, Duration: {duration:.1f}s")
@@ -269,9 +294,9 @@ def _execute_linear_trajectory(
     num_waypoints = len(joint_trajectory)
     timestamps = np.linspace(0, duration, num_waypoints)
 
-    POSITION_TOLERANCE = 0.005  # 5mm
+    POSITION_TOLERANCE = 0.007  # 7mm — 도달 즉시 다음 동작
     MAX_TOTAL_TIME = duration + 2.0
-    SETTLE_TIME = 0.2
+    SETTLE_TIME = 0.0  # tolerance 안에 들어오자마자 break
 
     start_time = time.time()
     target_reached = False

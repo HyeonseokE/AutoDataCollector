@@ -4,9 +4,10 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026/Stack_RGBblock_on_bluedish_10fps" # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
+dataset_repo_id: "CoRL2026/Sort_RGBblock_to_matchingplate_10fps" # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
 recording_fps: 10
 robot_type: "so101"
+vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv
 
 # =============================================================================
 # Camera Configuration
@@ -22,7 +23,7 @@ cameras:
   shared:
     - name: "top"
       type: "realsense"
-      serial_number: "254622075836"
+      serial_number: "335622072328"  # WS1 전용 RealSense
       enabled: true
       enable_depth: true
       width: 640
@@ -34,22 +35,22 @@ cameras:
     - name: "wrist"
       type: "opencv"
       enabled: true
-      index_or_path: "/dev/video1"
+      index_or_path: "/dev/video6"
       width: 640
       height: 480
       fps: 30
       fourcc: "MJPG"
 
-  ## Right arm 카메라 (ROBOT_IDS[1]에 매핑)
-  right_arm:
-    - name: "wrist"
-      type: "opencv"
-      enabled: true
-      index_or_path: "/dev/video8"
-      width: 640
-      height: 480
-      fps: 30
-      fourcc: "MJPG"
+  # ## Right arm 카메라 (ROBOT_IDS[1]에 매핑)
+  # right_arm:
+  #   - name: "wrist"
+  #     type: "opencv"
+  #     enabled: true
+  #     index_or_path: "/dev/video16"
+  #     width: 640
+  #     height: 480
+  #     fps: 30
+  #     fourcc: "MJPG"
 
 # =============================================================================
 # Skill Features Configuration
@@ -86,8 +87,21 @@ observation_features:
   ee_pos:
     robot_xyzrpy: true    # observation.ee_pos.robot_xyzrpy (robot base_link 좌표계 EE 자세 [x,y,z,r,p,y])
   gripper_binary: true    # observation.gripper_binary (그리퍼 열림=1.0 / 닫힘=0.0)
-  radian:
-    state: true            # observation.radian.state (캘리브레이션 중앙 기준 관절 위치, 라디안)
-    action: true           # observation.radian.action (캘리브레이션 중앙 기준 목표 관절 위치, 라디안)
-    state_urdf0: true      # observation.radian.state_urdf0 (URDF 0° 기준 관절 위치, 라디안)
-    action_urdf0: true     # observation.radian.action_urdf0 (URDF 0° 기준 목표 관절 위치, 라디안)
+  # URDF 0° 기준 radian (arm 5D + gripper 1D, 하드웨어 독립 학습용)
+  radian_urdf0:
+    state: true            # observation.state.radian_urdf0 (URDF 0° 기준 관절 위치, 6D radian)
+    action: true           # action.radian_urdf0        (URDF 0° 기준 목표 관절 위치, 6D radian)
+
+# =============================================================================
+# Stochastic Perturbation Configuration
+# =============================================================================
+## Transit subgoal에 3D Gaussian offset을 주입하여 trajectory 다양성 + recovery 신호 생성.
+## - skill_type이 transit("move", "move_initial", "move_free")인 호출에만 offset 적용
+## - interaction skill(grasp, place, gripper, rotate, move_and_close/open)은 절대 보호
+## - 매 skill 호출마다 새 offset 샘플 (truncated isotropic Gaussian, robot base frame)
+## - RNG seed: episode_seed * 10000 + trial_index (재현 가능)
+perturbation:
+  subgoal:
+    enabled: false     # true → transit subgoal 위치 변형 활성화
+    sigma: 0.05           # metres; isotropic Gaussian 표준편차 (robotwin 기준값)
+    clip_factor: 2.0      # truncate at clip_factor * sigma (최대 offset = 0.10m)

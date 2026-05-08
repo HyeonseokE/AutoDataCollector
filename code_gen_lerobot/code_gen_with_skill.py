@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 # 검출 z가 물체 바닥으로 잡히는 라벨에 대한 z-offset 보정 (meters)
 # e.g. pot은 검출 z가 바닥 → lid 안착 면(림)까지 +7cm 올림
 LABEL_Z_OFFSETS: Dict[str, float] = {
-    "pot": 0.07,  # pot은 바닥이 검출되므로 lid 안착면까지 올려야 함
+    "pot": 0.06,  # 실제 림 z=7cm, 검출 floor z≈1cm (pot 바닥 두께) → offset 6cm
 }
 
 

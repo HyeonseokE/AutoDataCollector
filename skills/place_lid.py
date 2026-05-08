@@ -48,7 +48,7 @@ from skills.move_linear import move_linear
 def place_lid(
     skills,
     place_position: Union[List[float], np.ndarray],
-    pull_distance: float = 0.02,
+    pull_distance: float = 0.01,
     gripper_open_ratio: float = 0.7,
     target_name: Optional[str] = None,
     skill_description: Optional[str] = None,
@@ -84,7 +84,10 @@ def place_lid(
         )
 
     descend_position = [float(place_position[0]), float(place_position[1]), place_z]
-    drag_position = [descend_position[0] - pull_distance, descend_position[1], place_z]
+    push_distance = pull_distance               # +x 로 push 하는 거리 (= pull_distance)
+    pull_back_distance = pull_distance / 2.0    # -x 로 되돌아오는 거리 (= pull_distance / 2)
+    push_position = [descend_position[0] + push_distance, descend_position[1], place_z]
+    release_position = [push_position[0] - pull_back_distance, descend_position[1], place_z]
 
     saved_pitch = getattr(skills, "_saved_pitch", None)
 
@@ -98,8 +101,12 @@ def place_lid(
         f"  Descend to: [{descend_position[0]:.3f}, {descend_position[1]:.3f}, {descend_position[2]:.3f}]"
     )
     skills._log(
-        f"  Drag -x by {pull_distance*100:.1f}cm → "
-        f"[{drag_position[0]:.3f}, {drag_position[1]:.3f}, {drag_position[2]:.3f}]"
+        f"  Push +x by {push_distance*100:.1f}cm → "
+        f"[{push_position[0]:.3f}, {push_position[1]:.3f}, {push_position[2]:.3f}]"
+    )
+    skills._log(
+        f"  Pull -x by {pull_back_distance*100:.1f}cm → "
+        f"[{release_position[0]:.3f}, {release_position[1]:.3f}, {release_position[2]:.3f}]"
     )
     if saved_pitch is not None:
         skills._log(f"  Restoring pitch: {np.degrees(saved_pitch):.1f}°")
@@ -117,23 +124,39 @@ def place_lid(
         skills._log("Error: Failed to reach lid place position")
         return False
 
-    # 2. Drag -x by pull_distance (gripper still closed, lid drags along)
-    drag_label = (
-        f"drag lid -{pull_distance*100:.0f}cm on {target_name}"
-        if target_name else f"drag lid -{pull_distance*100:.0f}cm"
+    # 2. Push +x by push_distance (gripper still closed, lid pushes against rim)
+    push_label = (
+        f"push lid +{push_distance*100:.0f}cm on {target_name}"
+        if target_name else f"push lid +{push_distance*100:.0f}cm"
     )
-    drag_success = move_linear(
+    push_success = move_linear(
         skills,
         start=descend_position,
-        end=drag_position,
+        end=push_position,
         maintain_pitch=True,
         target_name=target_name,
-        skill_description=drag_label,
+        skill_description=push_label,
     )
-    if not drag_success:
-        skills._log("WARNING: lid drag did not fully converge")
+    if not push_success:
+        skills._log("WARNING: lid push did not fully converge")
 
-    # 3. Open gripper to release lid at the corrected position
+    # 3. Pull back -x by push_distance/2 (settle lid into rim)
+    pull_label = (
+        f"pull lid -{pull_back_distance*100:.0f}cm on {target_name}"
+        if target_name else f"pull lid -{pull_back_distance*100:.0f}cm"
+    )
+    pull_success = move_linear(
+        skills,
+        start=push_position,
+        end=release_position,
+        maintain_pitch=True,
+        target_name=target_name,
+        skill_description=pull_label,
+    )
+    if not pull_success:
+        skills._log("WARNING: lid pull-back did not fully converge")
+
+    # 4. Open gripper to release lid at the corrected position
     release_desc = f"release lid on {target_name}" if target_name else "release lid"
     skills.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
 

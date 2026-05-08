@@ -2196,7 +2196,7 @@ class LeRobotSkills:
     def execute_place_lid(
         self,
         place_position: Union[List[float], np.ndarray],
-        pull_distance: float = 0.02,
+        pull_distance: float = 0.01,
         gripper_open_ratio: float = 0.7,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,
@@ -2222,7 +2222,8 @@ class LeRobotSkills:
                 (typically positions["pot"]["position"]). z is treated as the
                 container's top surface height — same convention as
                 execute_place_object(is_table=False).
-            pull_distance: -x drag distance in meters (default 0.02 = 2cm).
+            pull_distance: settling motion magnitude in meters (default 0.01 = 1cm).
+                +x push uses pull_distance, -x pull-back uses pull_distance/2.
             gripper_open_ratio: Release open ratio (0.0-1.0, default 0.7).
             target_name: Subgoal label for the placement target (e.g. "pot").
             skill_description: Skill recording label.

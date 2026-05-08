@@ -220,7 +220,10 @@ class ResetWorkspace(BaseWorkspace):
             # 조건 1: pixel 변환 + quadrant 체크 + FOV 체크 (가벼운 연산 먼저)
             if pix2robot is not None:
                 try:
-                    cu, cv = pix2robot.robot_to_pixel(x, y)
+                    # NOTE: z 를 명시적으로 전달해야 함. robot 0 같이 12-DoF affine
+                    # 캘리브레이션이 z 축에서 degenerate 한 경우 z=0 default 로 호출하면
+                    # 거의 모든 도넛 sample 이 카메라 뒤(Zc<=0)로 매핑되어 풀에서 fail.
+                    cu, cv = pix2robot.robot_to_pixel(x, y, z)
                 except Exception:
                     continue
 
@@ -286,6 +289,15 @@ DEFORMABLE_KEYWORDS = ("towel", "cloth", "fabric", "napkin", "sheet")
 # bbox가 커도 작은 손잡이/꼭지로 잡을 수 있는 물체 키워드 (e.g. pot lid의 knob)
 GRIPPABLE_KEYWORDS = ("lid",)
 
+# VLM 이 가끔 잡아내는 robot self-image 라벨 (그리퍼 / 팔 / 베이스 etc.).
+# 워크스페이스 obstacle 도, reset 대상 도 아니므로 분류 단계에서 통째로 제외.
+ROBOT_SELF_KEYWORDS = (
+    "robot arm", "robotic arm", "robot gripper", "robot base",
+    "robot ", "robotic ",
+    "left arm", "right arm",
+    "gripper", "manipulator",
+)
+
 
 def is_grippable(
     bbox_px: Tuple[int, int],
@@ -338,6 +350,10 @@ def classify_objects(
 
     for name, info in detections.items():
         if info is None:
+            continue
+        # Robot self-image 라벨 (e.g. "left robot arm", "gripper") 은 통째로 무시.
+        # 카메라 시야 가장자리에 잡혀서 obstacle 처리되면 reset 후보 영역을 크게 깎음.
+        if any(kw in name.lower() for kw in ROBOT_SELF_KEYWORDS):
             continue
         # 명시적 obstacle 플래그 (Turn 1에서 needs_manipulation=false로 검출된 물체)
         if info.get("is_obstacle"):
@@ -515,6 +531,9 @@ def generate_random_positions(
         for name, info in current_positions.items():
             if info is None or name.startswith("_"):
                 continue
+            # Robot self-image 라벨은 obstacle 로 잡지 않음 (classify_objects 와 동일 처리)
+            if any(kw in name.lower() for kw in ROBOT_SELF_KEYWORDS):
+                continue
             cur_info = info if isinstance(info, dict) else {"position": info}
             center_px = _get_center_px(cur_info, pix2robot)
             if center_px is None:
@@ -535,23 +554,35 @@ def generate_random_positions(
         if obj_info is None:
             continue
 
-        # 이 객체의 bbox 픽셀 크기
+        # 이 객체의 bbox 픽셀 크기.
+        # 손잡이로 잡는 객체 (lid 등) 는 bbox 가 매우 큰데, 실제 placement 시
+        # 도달 필수 부위는 grasp point (knob) 만이므로 효과적인 footprint 는
+        # 그리퍼 크기. 큰 bbox 그대로 쓰면 reach donut 안의 valid 영역이
+        # 거의 사라져서 saturation 발생. 따라서 GRIPPABLE_KEYWORDS 매칭 시
+        # 그리퍼 max-open 크기로 effective bbox 축소.
         obj_bbox_px = _get_bbox_px(obj_info if isinstance(obj_info, dict) else {})
+        if any(kw in obj_name.lower() for kw in GRIPPABLE_KEYWORDS):
+            gw, gh = GRIPPER_MAX_OPEN_PX, GRIPPER_MAX_OPEN_PX
+            if obj_bbox_px[0] > gw or obj_bbox_px[1] > gh:
+                obj_bbox_px = (min(obj_bbox_px[0], gw), min(obj_bbox_px[1], gh))
 
         # 장애물 필터링:
-        # - 자기 자신의 현재 위치 제거 (이동할 거니까)
+        # - 자기 자신의 현재 위치 (grippable: "obj_name", current: "obj_name_current") 제거
         # - 과거 seed 위치(_pseed): 같은 종류만 유지, 다른 종류는 제거
         #   (chocolate_pie_1과 chocolate_pie_2는 같은 종류 → 둘 다 비교)
         # - 그 외 (obstacle, 현재 seed 내 확정 위치): 전부 유지
         import re
         obj_type = re.sub(r'_?\d+$', '', obj_name)  # chocolate_pie_1 → chocolate_pie
+        own_current = f"{obj_name}_current"
         def _pseed_type(n):
             return re.sub(r'_?\d+$', '', n.split('_pseed')[0])
         obstacles_for_this = [
             occ for occ in occupied
-            if occ["name"] != obj_name and (
-                "_pseed" not in occ["name"] or _pseed_type(occ["name"]) == obj_type
-            )
+            if occ["name"] != obj_name
+               and occ["name"] != own_current
+               and (
+                   "_pseed" not in occ["name"] or _pseed_type(occ["name"]) == obj_type
+               )
         ]
 
         # 랜덤 위치 생성 (IK + FOV + IoU 기반 충돌 검증)
@@ -683,10 +714,15 @@ def draw_workspace_on_image(
     if p2r is None:
         return result
 
-    def robot_to_px(x, y):
-        """로봇 좌표 → 픽셀 좌표 (범위 밖이면 None)"""
+    def robot_to_px(x, y, z=0.01):
+        """로봇 좌표 → 픽셀 좌표 (범위 밖이면 None).
+
+        z 기본값 0.01 (테이블 평면). robot 0 처럼 12-DoF affine 캘리브레이션이
+        z 차원에서 degenerate 한 경우 z=0 으로 호출하면 Zc<=0 으로 떨어져 모든
+        호 점이 그려지지 않음.
+        """
         try:
-            u, v = p2r.robot_to_pixel(x, y)
+            u, v = p2r.robot_to_pixel(x, y, z)
             if 0 <= u < img_w and 0 <= v < img_h:
                 return (u, v)
         except Exception:

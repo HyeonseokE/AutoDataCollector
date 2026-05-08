@@ -17,10 +17,10 @@ cd "$SCRIPT_DIR"
 # # Grasping:                                                                  
 # (1, 완료) pick up the red block and place it on the blue plate
 # (2, 완료) distribute chocolate pies to each plate                           
-# (3) clear the table after a meal
+# (3) -
 
 # # Arrangement:                                                               
-# (1, 완료) place the red block between chocolate pies             
+# (1, 완료) place the yellow block between chocolate pies             
 # (2, 완료) arrange yellow, red, and purple blocks in a line from left to right
 # (3, 완료) stack the blocks in the order of red and yellow
 # (3, 완료) stack the blocks in the order of red and yellow, purple
@@ -31,9 +31,9 @@ cd "$SCRIPT_DIR"
 # (3, 성공) Open the trash can lid
 
 # # Deformable:
-# (1) fold the towel
+# (1, 완료) fold the towel
 # (2) sweep the floor with a towel
-# (3, 성공) bend the microphone gooseneck leftward
+# (3) bend the microphone gooseneck leftward
 
 # # Articulated:
 # (1) open the drawers
@@ -78,12 +78,12 @@ cd "$SCRIPT_DIR"
 # 예: (0)       → shared + left_arm
 #     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
-ROBOT_IDS=(0)
+ROBOT_IDS=(2)
 
 ### [single arm task]
 ## pick and place
-INSTRUCTION="pick up the red block and place it on the blue dish"
-RESET_INSTRUCTION=""
+# INSTRUCTION="stack the blocks in the order of red and blue"
+# RESET_INSTRUCTION=""
 
 ## stack red and yellow
 # INSTRUCTION="stack the blocks in the order of red and yellow"
@@ -94,7 +94,7 @@ RESET_INSTRUCTION=""
 # RESET_INSTRUCTION=""
 
 # arrange
-INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
+INSTRUCTION="Sort each colored block onto the plate of the matching color."
 RESET_INSTRUCTION=""
 
 # ## distribute chocolate pies to each plate
@@ -103,14 +103,22 @@ RESET_INSTRUCTION=""
 
 ### [dual arm task]
 ## towel folding
+# INSTRUCTION="fold the towel in half from top to bottom."
+# RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
+
+## move
+# INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
+# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left area"
+
+## hand over the sponge
 # INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
 # RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
 
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=30
-NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=100
+NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, all_wo_center, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
@@ -118,7 +126,7 @@ NUM_RANDOM_SEEDS=15 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배
 # all_wo_center: all 에서 이미지 중앙 세로 타원 (160 x 320 px) 영역만 제외
 #                (위↔아래 1열 정렬 같은 task 에서 reset 위치가 중앙 라인에 떨어지지 않게 함)
 # top-left 등:   테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(all)
+RESETSPACE_PER_ROBOT=(all_wo_center) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -137,7 +145,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/session_20260506_131357"
+RESUME_SESSION="./results/session_20260508_154050"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================
@@ -196,13 +204,15 @@ load_free_api_config() {
     fi
 }
 
+RECORDING_CONFIG_FILE="$CONFIG_DIR/recording_config_ws1.yaml"
+
 load_recording_config() {
-    local config_file="$CONFIG_DIR/recording_config.yaml"
+    local config_file="$RECORDING_CONFIG_FILE"
     if [ -f "$config_file" ]; then
         eval "$(python3 "$CONFIG_DIR/parse_yaml.py" "$config_file")"
-        echo "[Config] Loaded: recording_config.yaml"
+        echo "[Config] Loaded: $(basename $config_file)"
     else
-        echo "[Config] Warning: recording_config.yaml not found, using defaults"
+        echo "[Config] Warning: $(basename $config_file) not found, using defaults"
         DATASET_REPO_ID=""
         RECORDING_FPS=30
     fi
@@ -420,6 +430,7 @@ python execution_forward_and_reset.py \
     $( [ "$SKIP_TURN_TEST" = "true" ] && echo "--skip-turn-test" ) \
     --save "$SAVE_DIR" \
     --num-episodes "$NUM_EPISODES" \
+    --recording-config "$RECORDING_CONFIG_FILE" \
     $CODEGEN_S2_ARG \
     $EXTRA_ARGS
 

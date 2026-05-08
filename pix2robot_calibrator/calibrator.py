@@ -456,14 +456,17 @@ class Pix2RobotCalibrator:
 
         return [float(robot_xy[0]), float(robot_xy[1]), z]
 
-    def robot_to_pixel(self, x: float, y: float) -> Tuple[int, int]:
+    def robot_to_pixel(self, x: float, y: float, z: float = None) -> Tuple[int, int]:
         """
         로봇 좌표(x,y) → 픽셀 좌표(u,v) 역변환.
 
-        호모그래피의 역행렬을 사용.
+        호모그래피의 역행렬을 사용. legacy 캘리브레이터는 테이블 평면(z ≈ self.table_z)
+        에 대해서만 호모그래피를 학습하므로, z 인자는 호환용으로만 받고 무시됩니다.
+        Charuco 캘리브레이터(Pix2RobotCharuco)는 z를 실제로 사용한 3D 투영을 지원합니다.
 
         Args:
             x, y: 로봇 좌표 (base_link frame, meters)
+            z: (legacy: 무시됨) 호환을 위해 받음. None 또는 임의 값.
 
         Returns:
             (u, v) 픽셀 좌표

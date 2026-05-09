@@ -56,15 +56,20 @@ class TaskRunner:
     def execute(self, code: str, positions: Dict, extra_globals: Dict = None) -> bool:
         """코드 실행 — 싱글/멀티 100% 동일.
 
-        레코딩 여부에 따라 자동 분기.
+        레코딩 여부에 따라 자동 분기. skills._exec_positions 에 호출자
+        positions 참조를 노출해 detect_objects() 가 점 라벨을 보존하면서
+        in-place merge 할 수 있게 한다 (try/finally 로 stale 방지).
         """
         try:
             exec_globals = self.build_exec_globals(positions, extra_globals)
-
-            if self.recorder is not None:
-                return self._execute_with_recording(code, exec_globals)
-            else:
-                return self._execute_bare(code, exec_globals)
+            self.skills._exec_positions = positions
+            try:
+                if self.recorder is not None:
+                    return self._execute_with_recording(code, exec_globals)
+                else:
+                    return self._execute_bare(code, exec_globals)
+            finally:
+                self.skills._exec_positions = None
 
         except AssertionError as e:
             error_msg = str(e)

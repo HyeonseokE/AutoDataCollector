@@ -48,6 +48,31 @@ except ImportError:
     RecordingContext = None
 
 
+def extract_point_labels(positions: Dict, queries) -> Dict[str, List[str]]:
+    """positions[name]["points"] 의 키 목록을 query별로 추출.
+
+    detect_objects 가 재검출 시 Turn 2 점 라벨을 보존하도록 호출 직전에
+    point_labels 를 자동 채우기 위해 사용. multi-arm dual-dict 의 경우
+    각 arm sub-dict 에 대해 별도로 호출.
+    """
+    return {
+        q: list(positions[q]["points"].keys())
+        for q in queries
+        if q in positions
+        and isinstance(positions[q], dict)
+        and positions[q].get("points")
+    }
+
+
+def merge_detected(target: Dict, results: Dict) -> None:
+    """검출 성공한 항목만 target dict 에 in-place merge (실패=None 은 skip)."""
+    if not results:
+        return
+    for name, info in results.items():
+        if info is not None:
+            target[name] = info
+
+
 def _compute_ee_xyzrpy(kinematics, joints_rad: np.ndarray) -> np.ndarray:
     """FK로 EE의 xyzrpy 계산"""
     pos, R = kinematics.forward_kinematics(joints_rad)
@@ -183,6 +208,10 @@ class LeRobotSkills:
         # See perturbation/skill_level.
         self._skill_planner_client = None     # PlanServiceClient or None
         self._skill_planner_n_candidates = 4  # batch size; fallback to old path on empty
+
+        # Caller positions reference for detect_objects auto-merge / label
+        # preservation. Set by TaskRunner.execute() per task.
+        self._exec_positions: Optional[Dict] = None
 
     def _log(self, message: str):
         """Print message if verbose mode is enabled."""
@@ -1028,7 +1057,8 @@ class LeRobotSkills:
             visualize: True면 검출 창 표시
             point_labels: 물체별 포인트 라벨 딕셔너리 (Turn 2 라벨 재사용)
                          {"red block": ["grasp center", "top surface center"], ...}
-                         None이면 기본 "grasp center"만 검출
+                         명시되지 않은 경우, task_runner 가 인젝션한 호출자
+                         positions 에서 라벨을 자동 추출하여 사용 (Turn 2 라벨 보존).
 
         Returns:
             Dict[str, Dict]: 검출 결과
@@ -1036,24 +1066,26 @@ class LeRobotSkills:
                 "red part": {"position": [x, y, z], "points": {"grasp center": [...], ...}},
                 "pink part": {"position": [x, y, z], "points": {"grasp center": [...], ...}},
             }
-            검출 실패한 객체는 None
+            검출 실패한 객체는 None.
+            추가로, task_runner 인젝션이 활성화된 경우 호출자의 ``positions``
+            dict 가 in-place 로 갱신됨 (재검출된 객체만 덮어쓰고, 그 외 객체는
+            기존 데이터 유지).
 
         Example:
-            # 코드 실행 중 객체 검출
-            positions = skills.detect_objects(["red part", "pink part"])
+            # 호출자 positions 가 자동 갱신되며 점 라벨도 보존됨
+            skills.detect_objects(["red part", "pink part"])
             red_pos = positions["red part"]["position"]
-
-            # Pick 후 재검출 (기존 라벨 유지)
-            positions = skills.detect_objects(
-                ["pink part"],
-                point_labels={"pink part": ["grasp center", "top surface center"]}
-            )
+            top = positions["red part"]["points"]["top surface center"]
         """
         from pathlib import Path
         import sys
 
         PROJECT_ROOT = Path(__file__).parent.parent
         sys.path.insert(0, str(PROJECT_ROOT))
+
+        # 호출자 positions 에서 Turn 2 점 라벨 자동 추출.
+        if self._exec_positions is not None and point_labels is None:
+            point_labels = extract_point_labels(self._exec_positions, queries)
 
         try:
             from run_detect import run_realtime_detection
@@ -1403,6 +1435,9 @@ class LeRobotSkills:
                     except Exception as e:
                         self._log(f"  [Skill Perturbation] update_scene failed: {e}")
 
+            if self._exec_positions is not None:
+                merge_detected(self._exec_positions, results)
+
             return results
 
         except Exception as e:
@@ -1712,7 +1747,7 @@ class LeRobotSkills:
             skill_type_val = "move_and_close"
             default_suffix = "and close gripper"
         elif gripper_action == "open":
-            GRIPPER_MAX_RATIO = 0.20  # same as gripper_open()
+            GRIPPER_MAX_RATIO = 0.30  # same as gripper_open()
             clamped_ratio = min(gripper_open_ratio, GRIPPER_MAX_RATIO)
             target_g = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
             gripper_start_value = self.current_gripper_pos
@@ -1958,7 +1993,7 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        GRIPPER_MAX_RATIO = 0.20
+        GRIPPER_MAX_RATIO = 0.30
         clamped_ratio = min(ratio, GRIPPER_MAX_RATIO)
         target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
         current_arm_norm, current_arm_rad, _ = self._get_current_state()
@@ -2314,7 +2349,7 @@ class LeRobotSkills:
     def execute_place_lid(
         self,
         place_position: Union[List[float], np.ndarray],
-        pull_distance: float = 0.01,
+        pull_distance: float = 0.02,
         gripper_open_ratio: float = 0.7,
         target_name: Optional[str] = None,
         skill_description: Optional[str] = None,

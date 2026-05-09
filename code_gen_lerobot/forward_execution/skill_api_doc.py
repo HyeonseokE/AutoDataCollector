@@ -257,8 +257,11 @@ ROBOT_API_DOC = '''class LeRobotSkills:
     def detect_objects(self, queries: list[str], timeout: float = 5.0,
                        visualize: bool = False) -> dict:
         """Re-detects objects in real-time using the camera during code execution.
-        Returns updated positions for the queried objects.
-        Use this after placing an object to get its new position (e.g., for stacking).
+
+        SIDE EFFECT: Automatically merges fresh detections into the global
+        ``positions`` dict in-place AND preserves Turn 2 point labels
+        (e.g. "top placement point", "grasp center"). Objects whose detection
+        fails simply keep their previous values — no fallback boilerplate.
 
         Args:
             queries: List of object names to detect. Example: ["brown block", "green block"].
@@ -266,18 +269,15 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             visualize: Whether to show detection visualization window (default False).
 
         Returns:
-            Dict mapping object name to position info:
-            {
-                "brown block": {"position": [x, y, z], ...},
-                "green block": {"position": [x, y, z], ...},
-            }
-            Returns None for objects that could not be detected.
+            Dict mapping object name to position info (same shape as initial detection).
+            Returns None for objects that could not be detected. The return
+            value mirrors what was merged into ``positions``; in typical
+            generated code you read from ``positions`` directly.
 
         Example:
-            # After placing block A, re-detect to get its updated position
-            updated = skills.detect_objects(["block A"])
-            new_pos = updated["block A"]["position"]
-            # Now place block B on top of block A using the updated position
+            # After placing block A, re-detect — `positions` is updated in-place.
+            skills.detect_objects(["block A"])
+            new_pos = positions["block A"]["position"]
             skills.execute_place_object(new_pos, is_table=False, ...)
         """
 
@@ -295,6 +295,11 @@ ROBOT_API_DOC = '''class LeRobotSkills:
     def detect_objects(self, queries: list) -> dict:
         """Re-detect objects in the current camera view using VLM + depth sensor.
 
+        SIDE EFFECT: Automatically merges fresh detections into the global
+        ``positions`` dict in-place AND preserves Turn 2 point labels
+        (e.g. "top placement point", "grasp center"). Objects whose detection
+        fails simply keep their previous values.
+
         Returns updated positions including z height (from RealSense depth).
         IMPORTANT: Always call this after set_subtask() to refresh object positions
         before picking/placing. This is critical when objects have been moved
@@ -305,20 +310,19 @@ ROBOT_API_DOC = '''class LeRobotSkills:
 
         Returns:
             Dict: {"object_name": {"position": [x, y, z], "pixel": (u, v), "bbox_px": (w, h)}}
-            Returns None for objects not found.
+            (Mirrors what was merged into ``positions``; usually read from
+            ``positions`` directly.)
 
         Pattern — always follow this sequence when switching to a new object:
             # 1. Set subtask label
             skills.set_subtask("pick purple block and place at target")
             # 2. Move to initial state (clear arm from camera view before detection)
             skills.move_to_initial_state()
-            # 3. Re-detect ALL objects to get updated positions
-            updated = skills.detect_objects(["red block", "yellow block", "purple block"])
-            # 4. Update local variables with fresh positions
-            if updated["purple block"]:
-                purple_pos = updated["purple block"]["position"]
-            if updated["yellow block"]:
-                target_pos = updated["yellow block"]["position"]
+            # 3. Re-detect — `positions` is updated in-place, point labels preserved.
+            skills.detect_objects(["red block", "yellow block", "purple block"])
+            # 4. Re-extract local variables from the refreshed `positions`.
+            purple_pos = positions["purple block"]["position"]
+            target_pos = positions["yellow block"]["position"]
             # 5. Approach with integrated gripper open, then pick
             skills.move_to_position([purple_pos[0], purple_pos[1], 0.20],
                                     target_name="purple block",

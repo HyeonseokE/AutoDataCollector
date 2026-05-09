@@ -281,8 +281,14 @@ target_positions = {{
 **Rule**: After EVERY subtask (except the very last one), you MUST:
 1. `skills.clear_subtask()` — close the just-completed subtask (gripper must be empty).
 2. `skills.move_to_initial_state()` — clear the arm out of the camera view.
-3. `skills.detect_objects([list of objects still to be moved])` — refresh their positions.
-4. **Re-assign** all local variables (`cur`, `tgt`, etc.) from the updated dict.
+3. `skills.detect_objects([list of objects still to be moved])` — refresh
+   their positions. The call AUTOMATICALLY merges fresh detections into
+   `current_positions` in-place AND preserves Turn 2 point labels (e.g.
+   "top placement point", "grasp center"). No `updated = ...` / conditional
+   update boilerplate — objects whose detection failed simply keep their
+   previous values.
+4. **Re-assign** all local variables (`cur`, `tgt`, etc.) from
+   `current_positions` (previously extracted variables still hold OLD values).
 5. `skills.set_subtask(...)` — start the next subtask with FRESH coordinates.
 
 ```python
@@ -305,11 +311,8 @@ skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_A
 # === MANDATORY SUBTASK BOUNDARY: clear → initial → re-detect → reassign ===
 skills.clear_subtask()
 skills.move_to_initial_state()
-updated = skills.detect_objects(["object_B", "object_C"])  # only objects still to be moved
-if updated.get("object_B") and updated["object_B"].get("position"):
-    current_positions["object_B"] = updated["object_B"]
-if updated.get("object_C") and updated["object_C"].get("position"):
-    current_positions["object_C"] = updated["object_C"]
+# Auto in-place merge into current_positions; failed detections keep prev value.
+skills.detect_objects(["object_B", "object_C"])  # only objects still to be moved
 
 # === STEP 2: Move 2nd object (object_B) — uses REFRESHED position ===
 cur = current_positions["object_B"]["position"]   # ← refreshed value
@@ -320,9 +323,7 @@ skills.set_subtask("move object_B to target")
 # === MANDATORY BOUNDARY again before STEP 3 ===
 skills.clear_subtask()
 skills.move_to_initial_state()
-updated = skills.detect_objects(["object_C"])
-if updated.get("object_C") and updated["object_C"].get("position"):
-    current_positions["object_C"] = updated["object_C"]
+skills.detect_objects(["object_C"])
 
 # === STEP 3 (LAST subtask): no re-detection needed AFTER it — final move ===
 cur = current_positions["object_C"]["position"]
@@ -515,8 +516,14 @@ target_positions = {{
 **Rule**: After EVERY subtask (except the very last one), you MUST:
 1. `skills.clear_subtask()` — close the just-completed subtask (gripper must be empty).
 2. `skills.move_to_initial_state()` — clear the arm out of the camera view.
-3. `skills.detect_objects([list of objects still to be moved])` — refresh their positions.
-4. **Re-assign** all local variables (`cur`, `tgt`, etc.) from the updated dict.
+3. `skills.detect_objects([list of objects still to be moved])` — refresh
+   their positions. The call AUTOMATICALLY merges fresh detections into
+   `current_positions` in-place AND preserves Turn 2 point labels (e.g.
+   "top placement point", "grasp center"). No `updated = ...` / conditional
+   update boilerplate — objects whose detection failed simply keep their
+   previous values.
+4. **Re-assign** all local variables (`cur`, `tgt`, etc.) from
+   `current_positions` (previously extracted variables still hold OLD values).
 5. `skills.set_subtask(...)` — start the next subtask with FRESH coordinates.
 
 ```python
@@ -539,11 +546,8 @@ skills.move_to_position([tgt[0], tgt[1], approach_height], target_name="object_A
 # === MANDATORY SUBTASK BOUNDARY: clear → initial → re-detect → reassign ===
 skills.clear_subtask()
 skills.move_to_initial_state()
-updated = skills.detect_objects(["object_B", "object_C"])  # only objects still to be moved
-if updated.get("object_B") and updated["object_B"].get("position"):
-    current_positions["object_B"] = updated["object_B"]
-if updated.get("object_C") and updated["object_C"].get("position"):
-    current_positions["object_C"] = updated["object_C"]
+# Auto in-place merge into current_positions; failed detections keep prev value.
+skills.detect_objects(["object_B", "object_C"])  # only objects still to be moved
 
 # === STEP 2: Move 2nd object (object_B) — uses REFRESHED position ===
 cur = current_positions["object_B"]["position"]   # ← refreshed value
@@ -554,9 +558,7 @@ skills.set_subtask("move object_B to target")
 # === MANDATORY BOUNDARY again before STEP 3 ===
 skills.clear_subtask()
 skills.move_to_initial_state()
-updated = skills.detect_objects(["object_C"])
-if updated.get("object_C") and updated["object_C"].get("position"):
-    current_positions["object_C"] = updated["object_C"]
+skills.detect_objects(["object_C"])
 
 # === STEP 3 (LAST subtask): no re-detection needed AFTER it — final move ===
 cur = current_positions["object_C"]["position"]

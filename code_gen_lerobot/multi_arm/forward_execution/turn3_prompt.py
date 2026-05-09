@@ -264,17 +264,15 @@ skills.gripper_control(left_arm="close", right_arm="wait", ...)                 
 skills.clear_subtask()
 
 # Re-detection (MANDATORY between subtasks)
-# detect_objects may return None for an object if detection fails — always check before using.
+# detect_objects automatically (a) preserves Turn 2 point labels (e.g. "top
+# placement point", "grasp center") and (b) merges results IN-PLACE into
+# pos_left / pos_right. Objects that fail re-detection keep their previous
+# values. No conditional / fallback / `updated = ...` boilerplate needed.
 skills.move_to_initial_state()  # clear arms from camera view
-updated = skills.detect_objects(["A", "B"])
-# Update both arm position dicts (skip if detection failed)
-if "left_arm" in updated:
-    pos_left.update(updated["left_arm"])
-if "right_arm" in updated:
-    pos_right.update(updated["right_arm"])
-# IMPORTANT: Re-assign ALL local variables from the updated dicts
-# (pos_left.update() replaces dict entries, but previously extracted variables still reference OLD values)
-b_grasp = pos_right["B"]["points"]["grasp center"]  # must re-extract after update
+skills.detect_objects(["A", "B"])
+# IMPORTANT: previously extracted local variables still reference OLD values.
+# Re-extract from pos_* after re-detection.
+b_grasp = pos_right["B"]["points"]["grasp center"]  # re-extract after update
 
 # Subtask 2
 skills.set_subtask("pick B with right arm and place on top of A")
@@ -409,8 +407,8 @@ if __name__ == "__main__":
    - NEVER skip the retract step after pick or place. Without retract, the arm drags the object across the table.
 3. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
-4. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arms from camera view, then `skills.detect_objects([...all object names...])` to update positions. Skip re-detection only after the very last subtask.
-   - **CRITICAL**: After `pos_left.update()` / `pos_right.update()`, you MUST **re-assign ALL local variables** that were extracted from the positions dict (e.g., `grasp_pt = pos_left["obj"]["points"]["grasp center"]`). The `update()` call replaces dict entries, but previously extracted variables still reference the OLD values.
+4. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arms from camera view, then `skills.detect_objects([...all object names...])` to update positions. The call AUTOMATICALLY merges fresh detections into `pos_left` / `pos_right` in-place AND preserves Turn 2 point labels (e.g. "grasp center", "top placement point") — no `updated = ...` / conditional update boilerplate. Skip re-detection only after the very last subtask.
+   - **CRITICAL**: After `skills.detect_objects(...)`, you MUST **re-extract ALL local variables** from `pos_left` / `pos_right` (e.g., `grasp_pt = pos_left["obj"]["points"]["grasp center"]`). The dict entries are updated in-place, but previously extracted variables still reference the OLD values.
 5. Always start with `skills.move_to_initial_state()`, end with `skills.move_to_initial_state()` then `skills.move_to_free_state()`.
 6. Use `approach_height = 0.20` for approach/retreat movements.
 7. ALWAYS pass `left_skill_description`/`right_skill_description` and `left_verification_question`/`right_verification_question` for every arm that is NOT `"wait"`.

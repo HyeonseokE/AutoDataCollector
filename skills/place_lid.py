@@ -48,7 +48,7 @@ from skills.move_linear import move_linear
 def place_lid(
     skills,
     place_position: Union[List[float], np.ndarray],
-    pull_distance: float = 0.01,
+    pull_distance: float = 0.02,
     gripper_open_ratio: float = 0.7,
     target_name: Optional[str] = None,
     skill_description: Optional[str] = None,
@@ -85,7 +85,7 @@ def place_lid(
 
     descend_position = [float(place_position[0]), float(place_position[1]), place_z]
     push_distance = pull_distance               # +x 로 push 하는 거리 (= pull_distance)
-    pull_back_distance = pull_distance / 2.0    # -x 로 되돌아오는 거리 (= pull_distance / 2)
+    pull_back_distance = 0.005                  # -x 로 되돌아오는 거리 (고정 0.5cm)
     push_position = [descend_position[0] + push_distance, descend_position[1], place_z]
     release_position = [push_position[0] - pull_back_distance, descend_position[1], place_z]
 

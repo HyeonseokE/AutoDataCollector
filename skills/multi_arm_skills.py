@@ -28,11 +28,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Union
 
-from skills.skills_lerobot import LeRobotSkills
+from skills.skills_lerobot import LeRobotSkills, extract_point_labels, merge_detected
 
 
 # Sentinel value for "no movement" on one arm
 WAIT = "wait"
+
+# Arm sub-dict keys in dual-arm positions / current_positions / target_positions.
+ARM_KEYS = ("left_arm", "right_arm")
 
 
 class MultiArmSkills:
@@ -106,6 +109,10 @@ class MultiArmSkills:
         )
 
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="multi_arm")
+
+        # Caller positions reference for detect_objects auto-merge / label
+        # preservation. Set by TaskRunner.execute() per task.
+        self._exec_positions: Optional[Dict] = None
 
     def _log(self, message: str):
         if self.verbose:
@@ -1043,14 +1050,32 @@ class MultiArmSkills:
             timeout: 검출 타임아웃
             point_labels: 물체별 포인트 라벨 딕셔너리 (Turn 2 라벨 재사용)
                          {"red block": ["grasp center", "top surface center"], ...}
+                         명시되지 않은 경우, task_runner 가 인젝션한 호출자
+                         positions 에서 라벨을 자동 추출.
 
         Returns:
             {"left_arm": {obj: {"position": [...], ...}, ...},
              "right_arm": {obj: {"position": [...], ...}, ...}}
+            추가로, task_runner 인젝션이 활성화된 경우 호출자 ``positions``
+            dict 도 in-place 로 갱신된다 (멀티암 dual-arm 구조 그대로).
         """
+        exec_positions = self._exec_positions
+
         # 저장된 point_labels가 있으면 자동 사용 (Turn 2 라벨 재사용)
         if point_labels is None:
             point_labels = getattr(self, '_point_labels', None)
+
+        # 호출자 positions 에서 라벨 자동 추출. dual-arm 분리 dict 우선,
+        # 없으면 flat dict 로 fallback.
+        if point_labels is None and exec_positions is not None:
+            for arm_key in ARM_KEYS:
+                arm_dict = exec_positions.get(arm_key)
+                if isinstance(arm_dict, dict) and arm_dict:
+                    point_labels = extract_point_labels(arm_dict, queries)
+                    if point_labels:
+                        break
+            else:
+                point_labels = extract_point_labels(exec_positions, queries) or None
 
         # Run detection via left_arm (camera + VLM)
         raw = self.left_arm.detect_objects(queries, timeout=timeout, point_labels=point_labels)
@@ -1089,6 +1114,17 @@ class MultiArmSkills:
                     }
                 else:
                     dual[arm_key][obj_name] = info.copy()
+
+        # 호출자 positions in-place merge: dual-arm 분리 dict 면 각 arm sub-dict
+        # 에, flat dict 면 left_arm 결과를 통째 merge.
+        if exec_positions is not None:
+            if any(k in exec_positions for k in ARM_KEYS):
+                for arm_key in ARM_KEYS:
+                    arm_dict = exec_positions.get(arm_key)
+                    if isinstance(arm_dict, dict):
+                        merge_detected(arm_dict, dual[arm_key])
+            else:
+                merge_detected(exec_positions, dual["left_arm"])
 
         return dual
 

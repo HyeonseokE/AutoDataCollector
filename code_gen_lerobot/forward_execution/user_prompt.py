@@ -467,14 +467,16 @@ if __name__ == "__main__":
 6. **Re-detection (MANDATORY between subtasks)**: BEFORE entering each subtask after the first, re-detect THAT subtask's pick AND place targets to refresh their positions. The previous subtask may have changed the scene in ways that affect the next target — opening a lid uncovers contents, settling shifts an object, lighting/shadow shifts after arm motion. Pattern:
    ```python
    skills.move_to_initial_state()  # clear arm from camera view first
-   updated = skills.detect_objects(["next_pick_target", "next_place_target"])
-   if updated.get("next_pick_target") and updated["next_pick_target"].get("position"):
-       pick_pos = updated["next_pick_target"]["position"]
-   if updated.get("next_place_target") and updated["next_place_target"].get("position"):
-       place_pos = updated["next_place_target"]["position"]
+   # detect_objects() automatically merges fresh detections INTO the global
+   # `positions` dict in-place AND preserves Turn 2 point labels (e.g.
+   # "top placement point", "grasp center"). Objects that fail re-detection
+   # keep their previous values. No `updated = ...` / conditional update.
+   skills.detect_objects(["next_pick_target", "next_place_target"])
+   pick_pos = positions["next_pick_target"]["position"]      # re-extract
+   place_pos = positions["next_place_target"]["points"]["top placement point"]
    ```
    - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. For those, keep the initial positions instead.
-   - **CRITICAL**: After `detect_objects`, you MUST **re-assign ALL local variables** extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
+   - **CRITICAL**: After `detect_objects`, you MUST **re-extract ALL local variables** from the `positions` dict. The dict entries are updated in-place, but previously extracted variables still reference the OLD values.
    - **NOTE**: `detect_objects` takes ONLY one positional argument (a list of object names). Do NOT pass `skill_description` or other kwargs.
 7. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 8. **Integrated gripper motion**:
@@ -648,11 +650,13 @@ skills.execute_place_object(target_pos, is_table=True, gripper_open_ratio=0.7, t
 skills.clear_subtask()
 
 # Re-detect Subtask 2's targets — pick=B, place=A (A is the just-placed surface to stack on).
-# NOTE: detect_objects takes ONLY one argument (list of object names). Do NOT pass skill_description or other kwargs.
+# detect_objects() merges results into the global `positions` dict in-place
+# AND preserves Turn 2 point labels. NOTE: takes ONLY one positional arg
+# (list of names) — do NOT pass skill_description or other kwargs.
 skills.move_to_initial_state()  # clear arm from camera view first
-updated = skills.detect_objects(["A", "B"])
-if updated.get("A") and updated["A"].get("position"): a_pos = updated["A"]["position"]
-if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
+skills.detect_objects(["A", "B"])
+a_pos = positions["A"]["position"]   # re-extract after auto-merge
+b_pos = positions["B"]["position"]
 
 # Subtask 2: 2nd object — pick → place
 skills.set_subtask("pick B and place on A")
@@ -662,9 +666,9 @@ skills.clear_subtask()
 
 # Re-detect Subtask 3's targets — pick=C, place=B (newly placed; need updated position).
 skills.move_to_initial_state()
-updated = skills.detect_objects(["B", "C"])
-if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
-if updated.get("C") and updated["C"].get("position"): c_pos = updated["C"]["position"]
+skills.detect_objects(["B", "C"])
+b_pos = positions["B"]["position"]
+c_pos = positions["C"]["position"]
 
 # Subtask 3: 3rd object — pick → place
 skills.set_subtask("pick C and place on B")
@@ -688,12 +692,11 @@ skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_
 skills.clear_subtask()
 
 # Re-detect Subtask 2's targets — pick=B, place=plate_2.
-b_pos = positions["B"]["position"]            # initial-detection fallback
-plate2_pos = positions["plate_2"]["position"] # initial-detection fallback
+# detect_objects() merges into `positions` in-place; failed detections keep prev value.
 skills.move_to_initial_state()
-updated = skills.detect_objects(["B", "plate_2"])
-if updated.get("B") and updated["B"].get("position"): b_pos = updated["B"]["position"]
-if updated.get("plate_2") and updated["plate_2"].get("position"): plate2_pos = updated["plate_2"]["position"]
+skills.detect_objects(["B", "plate_2"])
+b_pos = positions["B"]["position"]
+plate2_pos = positions["plate_2"]["position"]
 
 # Subtask 2
 skills.set_subtask("place B on plate_2")
@@ -738,14 +741,16 @@ if __name__ == "__main__":
 6. **Re-detection (MANDATORY between subtasks)**: BEFORE entering each subtask after the first, re-detect THAT subtask's pick AND place targets to refresh their positions. The previous subtask may have changed the scene in ways that affect the next target — opening a lid uncovers contents, settling shifts an object, lighting/shadow shifts after arm motion. Pattern:
    ```python
    skills.move_to_initial_state()  # clear arm from camera view first
-   updated = skills.detect_objects(["next_pick_target", "next_place_target"])
-   if updated.get("next_pick_target") and updated["next_pick_target"].get("position"):
-       pick_pos = updated["next_pick_target"]["position"]
-   if updated.get("next_place_target") and updated["next_place_target"].get("position"):
-       place_pos = updated["next_place_target"]["position"]
+   # detect_objects() automatically merges fresh detections INTO the global
+   # `positions` dict in-place AND preserves Turn 2 point labels (e.g.
+   # "top placement point", "grasp center"). Objects that fail re-detection
+   # keep their previous values. No `updated = ...` / conditional update.
+   skills.detect_objects(["next_pick_target", "next_place_target"])
+   pick_pos = positions["next_pick_target"]["position"]      # re-extract
+   place_pos = positions["next_place_target"]["points"]["top placement point"]
    ```
    - **CRITICAL (identical objects)**: NEVER re-detect objects that look identical to already-placed objects. The VLM cannot distinguish them and will confuse labels. For those, keep the initial positions instead.
-   - **CRITICAL**: After `detect_objects`, you MUST **re-assign ALL local variables** extracted from the positions dict. `update()` replaces dict entries, but previously extracted variables still reference the OLD values.
+   - **CRITICAL**: After `detect_objects`, you MUST **re-extract ALL local variables** from the `positions` dict. The dict entries are updated in-place, but previously extracted variables still reference the OLD values.
    - **NOTE**: `detect_objects` takes ONLY one positional argument (a list of object names). Do NOT pass `skill_description` or other kwargs.
 7. **ALWAYS** `gripper_open_ratio=0.7` in `execute_place_object()`.
 8. **Integrated gripper motion**:

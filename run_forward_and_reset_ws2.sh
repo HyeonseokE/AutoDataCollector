@@ -92,7 +92,10 @@ ROBOT_IDS=(0)
 # RESET_INSTRUCTION=""
 
 # arrange
-INSTRUCTION="pick the red block and place it on the blue dish."
+# INSTRUCTION="pick the red block and place it on the blue dish."
+# RESET_INSTRUCTION=""
+
+INSTRUCTION="Arrange red, green, blue blocks along the purple line from top to bottom."
 RESET_INSTRUCTION=""
 
 ## stack3
@@ -119,8 +122,8 @@ RESET_INSTRUCTION=""
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=10
-NUM_RANDOM_SEEDS=1   # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=100
+NUM_RANDOM_SEEDS=20   # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, all_wo_center, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)

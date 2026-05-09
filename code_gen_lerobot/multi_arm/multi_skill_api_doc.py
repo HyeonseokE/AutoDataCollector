@@ -162,6 +162,15 @@ MULTI_ARM_API_DOC = '''**Available Robot API** (the `skills` object is already c
 
     def detect_objects(self, queries: list[str], timeout: float = 5.0) -> dict:
         """Re-detect objects and return updated positions for both arms.
+
+        SIDE EFFECT: Automatically merges fresh detections into the global
+        `pos_left` / `pos_right` (or `cur_left` / `cur_right`) dicts in-place
+        AND preserves Turn 2 point labels (e.g. "top placement point",
+        "grasp center"). Objects whose detection fails simply keep their
+        previous values — no `updated = ...` / conditional update boilerplate.
+
         Returns: {"left_arm": {obj: {"position": [...], ...}}, "right_arm": {...}}
+        (Mirrors what was merged into the caller dicts; usually read from
+        `pos_left` / `pos_right` directly.)
         """
 '''

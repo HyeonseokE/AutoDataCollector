@@ -100,9 +100,14 @@ class CuroboBackend:
         self.cfg = config
         self.urdf = str(urdf)
 
-        if not Path(config.robot_cfg_path).exists():
+        # Curobo's internal robot-loader resolves relative paths against its
+        # OWN content/configs/robot/ directory, not the caller's cwd — so a
+        # relative path that "exists" by Path.exists() can still fail inside
+        # MotionPlannerCfg.create(robot=...). Always resolve to absolute here.
+        robot_cfg_abs = str(Path(config.robot_cfg_path).resolve())
+        if not Path(robot_cfg_abs).exists():
             raise FileNotFoundError(
-                f"curobo robot config missing: {config.robot_cfg_path}"
+                f"curobo robot config missing: {robot_cfg_abs}"
             )
 
         # Orientation retry ratios for IK. Mid-arc first (most physically
@@ -119,7 +124,7 @@ class CuroboBackend:
         self._batch_size = int(config.max_batch_size)
         self._cspace_batch = 2 * self._batch_size
         mp_cfg = MotionPlannerCfg.create(
-            robot=str(config.robot_cfg_path),
+            robot=robot_cfg_abs,
             num_trajopt_seeds=config.num_trajopt_seeds,
             num_ik_seeds=config.num_ik_seeds,
             random_seed=123,

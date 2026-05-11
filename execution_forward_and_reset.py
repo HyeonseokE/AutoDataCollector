@@ -454,12 +454,20 @@ class ForwardAndResetPipeline(BasePipeline):
                 from perturbation.skill_level import get_curobo_backend
                 CuroboBackend, CuroboBackendConfig = get_curobo_backend()
                 # YAML may specify a custom curobo robot config path; fall back
-                # to the auto-generated default under robot_configs/curobo/
+                # to the auto-generated default under robot_configs/curobo/.
+                # Relative paths MUST be resolved to absolute here — curobo's
+                # internal robot-loader otherwise tries to resolve them against
+                # its own content/configs/robot/ directory, producing nonsense
+                # paths like ".../src/nvidia-curobo/.../robot_configs/curobo/X.yml".
+                project_root = Path(self.recording_config).resolve().parent.parent
                 default_curobo_cfg = str(
-                    Path(self.recording_config).resolve().parent.parent
-                    / "robot_configs" / "curobo" / f"{robot_id}.yml"
+                    project_root / "robot_configs" / "curobo" / f"{robot_id}.yml"
                 )
                 curobo_cfg_path = skill_raw.get("curobo_robot_cfg_path") or default_curobo_cfg
+                _cp = Path(curobo_cfg_path)
+                if not _cp.is_absolute():
+                    _cp = project_root / _cp
+                curobo_cfg_path = str(_cp.resolve())
                 if not Path(curobo_cfg_path).exists():
                     print(
                         f"[Skill Perturbation] curobo robot config missing: "

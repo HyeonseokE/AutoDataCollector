@@ -111,7 +111,8 @@ def lerobot_code_gen_prompt(
        | `execute_place_object(place_position, ...)` | Descend to place position with saved pitch, open gripper 70% | place_position, is_table, gripper_open_ratio, target_name |
        | `execute_place_lid(place_position, ...)` | Lid-specific place: descend → drag -x 2cm → release. Use INSTEAD OF execute_place_object when seating a lid on a container | place_position, pull_distance, gripper_open_ratio, target_name |
        | `execute_press(position, ...)` | 2-phase press: descend to contact, then press with torque limit | position, press_depth, contact_height, hold_time, target_name |
-       | `execute_push(start_position, end_position, ...)` | Descend → run-up → linear push → retreat (all-in-one) | start_position, end_position, push_height, object_name |
+       | `execute_pull(start_position, distance, ...)` | **OPENING** drawer/door — pulls -x by `distance` m. Grasp → drag → release → retreat-with-close | start_position, distance, object_name |
+       | `execute_push(start_position, distance, ...)` | **CLOSING** drawer/door — pushes +x by `distance + 3cm` (internal margin). Push (gripper open) → retreat | start_position, distance, object_name |
 
        **execute_pick_object**: Call from pick_approach position. Moves TCP to pick height (internally 2.5cm below object top), closes gripper, and **saves current pitch**.
          - **IMPORTANT**: Pass the object position as-is from the positions dictionary. The function internally handles the grasp offset.
@@ -141,6 +142,25 @@ def lerobot_code_gen_prompt(
          - Moves in a straight line (not an arc). Close gripper BEFORE calling.
          - **Push distance guide**: 3–5cm is usually sufficient. Do NOT use large distances (e.g., 10cm+) unless explicitly instructed.
          - **World frame directions**: +x = forward (away from robot), -x = backward (toward robot), +y = right, -y = left.
+
+       **execute_pull** — for **OPENING** drawer/door/articulated handle.
+         - Args: `start_position` (handle grasp point), `distance` (meters; -x direction is fixed).
+         - **Extract `distance` from the user instruction**. Examples:
+           - "Open the drawer 5cm" → `distance=0.05`
+           - "Open the top drawer 10cm" → `distance=0.10`
+           - "Pull the cabinet door open 8cm" → `distance=0.08`
+           - If no distance specified in the instruction, use a reasonable default (drawer: 0.10, cabinet door: 0.12).
+         - Pre: approach above start with `gripper_action="open"` (gripper open during approach).
+         - Internal: descend → grasp → linear pull -x `distance` → release → retreat (gripper closing during last 30%).
+
+       **execute_push** — for **CLOSING** drawer/door — open jaws push handle from inside.
+         - Args: `start_position` (handle current open position), `distance` (meters; +x direction is fixed).
+         - The caller passes the **same distance the drawer was opened by**. The skill internally pushes `distance + 3cm` to ensure full closure.
+         - **Extract `distance` from the user instruction OR use the same value as the open instruction**. Example: if forward opened with 10cm → close with `distance=0.10` (skill pushes 12cm internally).
+         - Pre: approach above start with `gripper_action="open"` (gripper STAYS open during push — acts as paddle).
+         - Internal: descend → linear push +x `distance + 3cm` → retreat-with-close.
+
+       **For both**: DO NOT use `execute_pick_object` + `execute_place_object` for drawers/doors. `execute_pick_object` auto-lifts the handle, and `execute_place_object(is_table=True)` descends to z=0 (the floor). Always use `execute_pull` (open) and `execute_push` (close).
 
        **Pitch Handling**: Pitch is automatically saved at pick and restored at place. No need for maintain_pitch during movement.
 
@@ -195,6 +215,46 @@ def lerobot_code_gen_prompt(
        skills.gripper_close()
        skills.move_to_position([push_start[0], push_start[1], approach_height], target_name="object_name")
        skills.execute_push(push_start, push_end, push_height=push_start[2] * 0.3, object_name="object_name")
+
+       # ─── OPEN drawer/door — execute_pull(start, distance) ───
+       # `distance` extracted from the user instruction (e.g., "Open the drawer 10cm" → 0.10).
+       # Direction fixed -x. Skill descends + grasps + drags -x distance + releases + retreats.
+       OPEN_DISTANCE = 0.10   # ← from "Open the top drawer 10cm" instruction
+       handle = positions["top drawer handle"]["points"]["grasp center"]
+
+       skills.move_to_position(
+           [handle[0], handle[1], approach_height],
+           target_name="top drawer handle",
+           gripper_action="open", gripper_start_fraction=0.3,
+           skill_description="Approach drawer handle and open gripper",
+           verification_question="Is gripper above handle and open?",
+       )
+       skills.execute_pull(
+           handle, distance=OPEN_DISTANCE,
+           object_name="top drawer",
+           skill_description="Pull the drawer open",
+           verification_question="Is the drawer pulled open?",
+       )
+
+       # ─── CLOSE drawer/door — execute_push(start, distance) ───
+       # `distance` should match the open distance. Skill internally pushes distance + 3cm
+       # to ensure full closure. Gripper stays OPEN (set by approach), acts as paddle.
+       CLOSE_DISTANCE = OPEN_DISTANCE   # match the opening; skill adds +3cm internally
+       open_handle = positions["top drawer handle"]["points"]["grasp center"]   # current (open) position
+
+       skills.move_to_position(
+           [open_handle[0], open_handle[1], approach_height],
+           target_name="top drawer handle",
+           gripper_action="open", gripper_start_fraction=0.3,
+           skill_description="Approach drawer handle (gripper open to push)",
+           verification_question="Is gripper above handle and open?",
+       )
+       skills.execute_push(
+           open_handle, distance=CLOSE_DISTANCE,
+           object_name="top drawer",
+           skill_description="Push the drawer closed",
+           verification_question="Is the drawer fully closed?",
+       )
 
        # PRESS pattern (close gripper first, approach, press, retreat):
        press_obj = positions["object_with_button"]

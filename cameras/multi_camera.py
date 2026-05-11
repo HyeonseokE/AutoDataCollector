@@ -183,9 +183,18 @@ class MultiCameraManager:
 
         return obs_dict
 
+    # GIL contention + 로봇 control loop 으로 인한 transient 지연을 흡수하기 위해
+    # 200ms (camera default) 보다 너그러운 timeout 사용.
+    _ASYNC_READ_TIMEOUT_MS = 500
+    # 단일 카메라 fail 시 dummy 대신 직전 frame 을 재사용하기 위한 캐시.
+    _last_known_images: Dict[str, np.ndarray] = {}
+
     def async_read_all(self) -> Dict[str, np.ndarray]:
         """
         모든 카메라에서 async_read로 이미지 읽기 (병렬)
+
+        하나가 timeout 나도 전체 dict 가 누락 안 되도록, 마지막으로 성공한
+        frame 을 캐시해뒀다가 fallback 으로 사용 (dummy 검정 frame 대신).
 
         Returns:
             Dict[str, np.ndarray]: {camera_name: image}
@@ -193,13 +202,20 @@ class MultiCameraManager:
         if not self._is_connected:
             raise RuntimeError("[MultiCamera] Not connected")
 
+        timeout_ms = self._ASYNC_READ_TIMEOUT_MS
+
         if len(self.cameras) <= 1:
             images = {}
             for name, camera in self.cameras.items():
                 try:
-                    images[name] = camera.async_read()
+                    images[name] = camera.async_read(timeout_ms=timeout_ms)
+                    self._last_known_images[name] = images[name]
                 except Exception as e:
-                    print(f"  [ERROR] async_read {name}: {e}")
+                    if name in self._last_known_images:
+                        images[name] = self._last_known_images[name]
+                        print(f"  [WARN] async_read {name}: {e} → using cached frame")
+                    else:
+                        print(f"  [ERROR] async_read {name}: {e} (no cached frame)")
             return images
 
         # 2대 이상: 병렬 캡처
@@ -208,15 +224,20 @@ class MultiCameraManager:
         images = {}
         with ThreadPoolExecutor(max_workers=len(self.cameras)) as executor:
             futures = {
-                executor.submit(camera.async_read): name
+                executor.submit(camera.async_read, timeout_ms=timeout_ms): name
                 for name, camera in self.cameras.items()
             }
             for future in as_completed(futures):
                 name = futures[future]
                 try:
                     images[name] = future.result()
+                    self._last_known_images[name] = images[name]
                 except Exception as e:
-                    print(f"  [ERROR] async_read {name}: {e}")
+                    if name in self._last_known_images:
+                        images[name] = self._last_known_images[name]
+                        print(f"  [WARN] async_read {name}: {e} → using cached frame")
+                    else:
+                        print(f"  [ERROR] async_read {name}: {e} (no cached frame)")
 
         return images
 

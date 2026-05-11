@@ -98,7 +98,7 @@ ROBOT_IDS=(2)
 # RESET_INSTRUCTION=""
 
 # arrange task
-INSTRUCTION="Arrange red, green, blue blocks along the purple line from top to bottom."
+INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
 RESET_INSTRUCTION=""
 
 # ## distribute chocolate pies to each plate
@@ -130,7 +130,7 @@ NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배
 # all_wo_center: all 에서 이미지 중앙 세로 타원 (160 x 320 px) 영역만 제외
 #                (위↔아래 1열 정렬 같은 task 에서 reset 위치가 중앙 라인에 떨어지지 않게 함)
 # top-left 등:   테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(all_center) 
+RESETSPACE_PER_ROBOT=(all) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -149,7 +149,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
+RESUME_SESSION="./results/completed_logs/cap_stack_RGBblock_on_bluedish_10fps"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

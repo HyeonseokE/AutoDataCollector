@@ -84,9 +84,13 @@ ROBOT_IDS=(0)
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
 
 ### ==================== [single arm task] ==================
-## pick and place
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# RESET_INSTRUCTION=""
+## drawer open
+# INSTRUCTION="Open the top drawer 7cm."
+# RESET_INSTRUCTION="Close the top drawer 7cm."
+
+## close pot
+INSTRUCTION="OClose the pot’s lid."
+RESET_INSTRUCTION=""
 
 # INSTRUCTION="stack the blocks in the order of red and blue"
 # RESET_INSTRUCTION=""
@@ -95,8 +99,8 @@ ROBOT_IDS=(0)
 # INSTRUCTION="pick the red block and place it on the blue dish."
 # RESET_INSTRUCTION=""
 
-INSTRUCTION="Arrange red, green, blue blocks along the purple line from top to bottom."
-RESET_INSTRUCTION=""
+# INSTRUCTION="Arrange red, green, blue blocks along the purple line from top to bottom."
+# RESET_INSTRUCTION=""
 
 ## stack3
 # INSTRUCTION="stack the blocks in the order of red and green, blue."
@@ -151,7 +155,7 @@ RECORD_DATASET=true
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
 # RESUME_SESSION="./results/distribute_chocolatepies"
-RESUME_SESSION=""
+RESUME_SESSION="./results/completed_logs/cap_close_pot_10fps"
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

@@ -1236,6 +1236,7 @@ class ForwardAndResetPipeline(BasePipeline):
         save_dir: Optional[str] = None,
         use_timestamp_subdir: bool = True,
         skip_reset: bool = False,
+        skip_forward: bool = False,
         reset_target_positions: Optional[Dict] = None,
         pre_reset_callback=None,
         post_judge_callback=None,
@@ -1326,507 +1327,550 @@ class ForwardAndResetPipeline(BasePipeline):
             # Forward 로깅 시작
             forward_logger.start()
 
-            # ================================================================
-            # PHASE 1: FORWARD EXECUTION
-            # ================================================================
-            print(f"\n{GREEN}{BOLD}" + self._log("FORWARD EXECUTION") + f"{RESET}")
-            print(GREEN + "-" * 70 + RESET)
-
-            if self.multi_turn:
-                # ============================================================
-                # Multi-turn: Detection 스킵, 이미지만 캡처하여 VLM에 전달
-                # VLM이 Turn 1에서 직접 물체를 식별함
-                # ============================================================
-
-                # Step 1: 이미지 캡처 (Detection 없이)
-                print(f"\n{YELLOW}" + self._log("Capturing image for VLM (no detection)...", step="Step 1/6") + f"{RESET}")
-
-                # 카메라 초기화
-                if not self.camera and not (self.camera_manager and self.camera_manager.is_connected):
-                    if not self.initialize_camera():
-                        print(f"{RED}[Error] Camera initialization failed{RESET}")
-                        return result
-                # camera_manager 연결됐지만 self.camera가 None이면 꺼내서 설정
-                if not self.camera and self.camera_manager and self.camera_manager.is_connected:
-                    pc = self._get_pipeline_camera()
-                    pc.camera_manager = self.camera_manager
-                    cam = pc.get_realsense()
-                    if cam is not None:
-                        self.camera = cam
-
+            if skip_forward:
+                # forward 외부에서 이미 수행 (forward_ma 의 MA-style forward 등). reset 에 필요한
+                # 초기 이미지 + detection 만 수행하고 forward 로깅 종료 후 reset 단계로 진행.
+                print(f"\n{YELLOW}[PHASE 1+2] FORWARD + JUDGE - Skipped (skip_forward=True){RESET}")
+                result['judge']['prediction'] = 'SKIPPED'
+                result['forward']['execution_success'] = False
+                if not (self.camera_manager and getattr(self.camera_manager, "is_connected", False)):
+                    if self.camera is None:
+                        ok = self.initialize_camera()
+                        if not ok:
+                            print(f"  {YELLOW}[skip_forward] camera busy — waiting 3s and retrying...{RESET}")
+                            time.sleep(3.0)
+                            self.initialize_camera()
+                        time.sleep(0.3)
                 self.initial_image = self.capture_frame()
-
-                # 캡처 실패 시 카메라 재초기화 후 재시도
-                if self.initial_image is None:
-                    print(f"  {YELLOW}[Warning] Capture failed, reinitializing camera...{RESET}")
-                    pc = self._get_pipeline_camera()
-                    pc.camera_manager = self.camera_manager
-                    if pc.force_recovery():
-                        self.camera = pc.camera
-                        self.camera_manager = pc.camera_manager
-                        time.sleep(0.5)
-                        self.initial_image = self.capture_frame()
-
-                if self.initial_image is None:
-                    print(f"{RED}[Error] Failed to capture image{RESET}")
-                    return result
-
-                self.initial_image_resolution = (self.initial_image.shape[1], self.initial_image.shape[0])
-                print(f"  Image captured ({self.initial_image_resolution[0]}x{self.initial_image_resolution[1]})")
-
-                # [즉시 저장] Initial 이미지
-                initial_path = Path(forward_dir) / "initial_state.jpg"
-                cv2.imwrite(str(initial_path), self.initial_image)
-                self.forward_initial_image_path = str(initial_path)
-                print(f"  Image saved: {initial_path}")
-
-                # Detection 없이 빈 positions
-                self.detected_positions = {}
-                result['forward']['positions'] = self.detected_positions
-
-                # Step 2: (스킵 — Step 1에서 이미 캡처됨)
-
-                # Step 3: Forward 코드 생성 (multi-turn)
-                # 코드 재사용: 캐싱된 코드가 있으면 T0~T2(검출)만 수행, T3(코드생성) 스킵
-                use_cached = self.cached_forward_code is not None
-                if use_cached:
-                    print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code, T3 skipped)...", step="Step 3/6") + f"{RESET}")
-                    # T0~T2만 수행 (positions 갱신) — point 라벨도 강제
-                    self.generate_forward_code(
-                        instruction, self.detected_positions,
-                        image_path=str(initial_path),
-                        skip_codegen=True,
-                        canonical_labels=self.cached_forward_keys,
-                        canonical_point_labels=getattr(self, '_cached_point_labels', None),
+                if self.initial_image is not None:
+                    self.initial_image_resolution = (self.initial_image.shape[1], self.initial_image.shape[0])
+                    initial_path = Path(forward_dir) / "initial_state.jpg"
+                    cv2.imwrite(str(initial_path), self.initial_image)
+                    self.forward_initial_image_path = str(initial_path)
+                    print(f"  Initial image captured for reset: {initial_path}")
+                print(f"\n  [skip_forward] Detecting initial positions for reset...")
+                try:
+                    self.detected_positions = self.run_detection(
+                        queries=objects,
+                        timeout=detection_timeout,
+                        visualize=visualize_detection,
                     )
-                    # key 일치 확인
-                    if self._can_reuse_code(self.cached_forward_code, self.cached_forward_keys, self.detected_positions):
-                        self.generated_code = self.cached_forward_code
-                        print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET}")
+                except Exception as _det_e:
+                    print(f"  {RED}[skip_forward] detection failed: {_det_e}{RESET}")
+                    self.detected_positions = {}
+                result['forward']['positions'] = self.detected_positions
+                if self.first_episode_positions is None and self.detected_positions:
+                    import copy
+                    self.first_episode_positions = copy.deepcopy(self.detected_positions)
+                    print(f"  {GREEN}[First Episode] Initial positions saved for 'original' reset mode{RESET}")
+                    if hasattr(self, 'session_dir') and self.session_dir:
+                        fp_path = Path(self.session_dir) / "first_episode_positions.json"
+                        with open(fp_path, 'w', encoding='utf-8') as f:
+                            json.dump(self.first_episode_positions, f, indent=2, ensure_ascii=False)
+                forward_log_path = forward_logger.stop()
+                print(f"\n  Forward log saved to: {forward_log_path}")
+            else:
+                # ================================================================
+                # PHASE 1: FORWARD EXECUTION
+                # ================================================================
+                print(f"\n{GREEN}{BOLD}" + self._log("FORWARD EXECUTION") + f"{RESET}")
+                print(GREEN + "-" * 70 + RESET)
+
+                if self.multi_turn:
+                    # ============================================================
+                    # Multi-turn: Detection 스킵, 이미지만 캡처하여 VLM에 전달
+                    # VLM이 Turn 1에서 직접 물체를 식별함
+                    # ============================================================
+
+                    # Step 1: 이미지 캡처 (Detection 없이)
+                    print(f"\n{YELLOW}" + self._log("Capturing image for VLM (no detection)...", step="Step 1/6") + f"{RESET}")
+
+                    # 카메라 초기화
+                    if not self.camera and not (self.camera_manager and self.camera_manager.is_connected):
+                        if not self.initialize_camera():
+                            print(f"{RED}[Error] Camera initialization failed{RESET}")
+                            return result
+                    # camera_manager 연결됐지만 self.camera가 None이면 꺼내서 설정
+                    if not self.camera and self.camera_manager and self.camera_manager.is_connected:
+                        pc = self._get_pipeline_camera()
+                        pc.camera_manager = self.camera_manager
+                        cam = pc.get_realsense()
+                        if cam is not None:
+                            self.camera = cam
+
+                    self.initial_image = self.capture_frame()
+
+                    # 캡처 실패 시 카메라 재초기화 후 재시도
+                    if self.initial_image is None:
+                        print(f"  {YELLOW}[Warning] Capture failed, reinitializing camera...{RESET}")
+                        pc = self._get_pipeline_camera()
+                        pc.camera_manager = self.camera_manager
+                        if pc.force_recovery():
+                            self.camera = pc.camera
+                            self.camera_manager = pc.camera_manager
+                            time.sleep(0.5)
+                            self.initial_image = self.capture_frame()
+
+                    if self.initial_image is None:
+                        print(f"{RED}[Error] Failed to capture image{RESET}")
+                        return result
+
+                    self.initial_image_resolution = (self.initial_image.shape[1], self.initial_image.shape[0])
+                    print(f"  Image captured ({self.initial_image_resolution[0]}x{self.initial_image_resolution[1]})")
+
+                    # [즉시 저장] Initial 이미지
+                    initial_path = Path(forward_dir) / "initial_state.jpg"
+                    cv2.imwrite(str(initial_path), self.initial_image)
+                    self.forward_initial_image_path = str(initial_path)
+                    print(f"  Image saved: {initial_path}")
+
+                    # Detection 없이 빈 positions
+                    self.detected_positions = {}
+                    result['forward']['positions'] = self.detected_positions
+
+                    # Step 2: (스킵 — Step 1에서 이미 캡처됨)
+
+                    # Step 3: Forward 코드 생성 (multi-turn)
+                    # 코드 재사용: 캐싱된 코드가 있으면 T0~T2(검출)만 수행, T3(코드생성) 스킵
+                    use_cached = self.cached_forward_code is not None
+                    if use_cached:
+                        print(f"\n{YELLOW}" + self._log(f"Detection only (reusing cached code, T3 skipped)...", step="Step 3/6") + f"{RESET}")
+                        # T0~T2만 수행 (positions 갱신) — point 라벨도 강제
+                        self.generate_forward_code(
+                            instruction, self.detected_positions,
+                            image_path=str(initial_path),
+                            skip_codegen=True,
+                            canonical_labels=self.cached_forward_keys,
+                            canonical_point_labels=getattr(self, '_cached_point_labels', None),
+                        )
+                        # key 일치 확인
+                        if self._can_reuse_code(self.cached_forward_code, self.cached_forward_keys, self.detected_positions):
+                            self.generated_code = self.cached_forward_code
+                            print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET}")
+                        else:
+                            missing = set(self.cached_forward_keys) - set(self.detected_positions.keys())
+                            print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET}")
+                            self.cached_forward_code = None
+                            self.cached_forward_keys = []
+                            self.generated_code = self.generate_forward_code(
+                                instruction, self.detected_positions,
+                                image_path=str(initial_path),
+                            )
                     else:
-                        missing = set(self.cached_forward_keys) - set(self.detected_positions.keys())
-                        print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET}")
-                        self.cached_forward_code = None
-                        self.cached_forward_keys = []
+                        print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, multi-turn)...", step="Step 3/6") + f"{RESET}")
                         self.generated_code = self.generate_forward_code(
                             instruction, self.detected_positions,
                             image_path=str(initial_path),
                         )
+
                 else:
-                    print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, multi-turn)...", step="Step 3/6") + f"{RESET}")
-                    self.generated_code = self.generate_forward_code(
-                        instruction, self.detected_positions,
-                        image_path=str(initial_path),
+                    # ============================================================
+                    # Single-turn: 기존 Grounding DINO Detection → 코드 생성
+                    # ============================================================
+
+                    # Step 1: 객체 검출
+                    # Note: Recording 카메라가 있으면 run_detection에서 자동 공유
+                    print(f"\n{YELLOW}" + self._log(f"Detecting objects: {objects}", step="Step 1/6") + f"{RESET}")
+                    if visualize_detection:
+                        print("  (Visualization mode)")
+                    else:
+                        if not self.initialize_camera():
+                            print(f"{RED}[Error] Camera initialization failed{RESET}")
+                            return result
+
+                    self.detected_positions = self.run_detection(
+                        queries=objects,
+                        timeout=detection_timeout,
+                        visualize=visualize_detection,
                     )
+                    result['forward']['positions'] = self.detected_positions
 
-            else:
-                # ============================================================
-                # Single-turn: 기존 Grounding DINO Detection → 코드 생성
-                # ============================================================
+                    # [즉시 저장] Detection 이미지
+                    if self.detection_image is not None:
+                        detection_path = Path(forward_dir) / "detection_result.jpg"
+                        cv2.imwrite(str(detection_path), self.detection_image)  # Already BGR
+                        print(f"  Detection image saved: {detection_path}")
 
-                # Step 1: 객체 검출
-                # Note: Recording 카메라가 있으면 run_detection에서 자동 공유
-                print(f"\n{YELLOW}" + self._log(f"Detecting objects: {objects}", step="Step 1/6") + f"{RESET}")
-                if visualize_detection:
-                    print("  (Visualization mode)")
-                else:
-                    if not self.initialize_camera():
-                        print(f"{RED}[Error] Camera initialization failed{RESET}")
+                    # 검출 결과 검증 1: 객체 미발견 체크
+                    not_found = [k for k, v in self.detected_positions.items() if v is None]
+                    if not_found:
+                        print(f"{RED}[Error] Objects not detected: {not_found}{RESET}")
                         return result
 
-                self.detected_positions = self.run_detection(
-                    queries=objects,
-                    timeout=detection_timeout,
-                    visualize=visualize_detection,
-                )
+                    # 첫 에피소드의 검출 위치 저장 (original reset mode용)
+                    if self.first_episode_positions is None:
+                        import copy
+                        self.first_episode_positions = copy.deepcopy(self.detected_positions)
+                        print(f"  {GREEN}[First Episode] Initial positions saved for 'original' reset mode{RESET}")
+
+                    # 검출 결과 검증 2: Workspace 범위 체크
+                    print(f"\n{YELLOW}" + self._log("Checking workspace bounds...", tag="Validation") + f"{RESET}")
+                    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+                    from lerobot_cap.workspace import BaseWorkspace
+
+                    workspace = BaseWorkspace()
+                    print(f"  Workspace: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
+
+                    critical_error = False
+                    for obj_name, obj_info in self.detected_positions.items():
+                        if obj_info is None:
+                            continue
+                        pos = obj_info.get("position") if isinstance(obj_info, dict) else obj_info
+                        if pos is None:
+                            continue
+                        position_m = np.array([pos[0], pos[1], pos[2]])
+
+                        if not workspace.is_reachable(position_m):
+                            print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
+                            print(f"{RED}  Outside reach limits: [{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m{RESET}")
+                            critical_error = True
+                        else:
+                            print(f"  {GREEN}✓ '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m - OK{RESET}")
+
+                    if critical_error:
+                        print(f"\n{RED}[Error] Critical workspace violation detected. Terminating pipeline.{RESET}")
+                        return result
+
+                    # Step 2: Initial 이미지 캡처
+                    print(f"\n{YELLOW}" + self._log("Capturing initial state...", step="Step 2/6") + f"{RESET}")
+                    if self.initial_image is None:
+                        self.initial_image = self.capture_frame()
+                    if self.initial_image is not None:
+                        # 해상도 저장 (Judge용)
+                        self.initial_image_resolution = (self.initial_image.shape[1], self.initial_image.shape[0])
+                        print(f"  Initial image captured ({self.initial_image_resolution[0]}x{self.initial_image_resolution[1]})")
+                        # [즉시 저장] Initial 이미지
+                        initial_path = Path(forward_dir) / "initial_state.jpg"
+                        cv2.imwrite(str(initial_path), self.initial_image)  # Already BGR
+                        self.forward_initial_image_path = str(initial_path)
+                        print(f"  Initial image saved: {initial_path}")
+
+                    # Step 3: Forward 코드 생성 (single-turn)
+                    # 코드 재사용: 캐싱된 코드가 있고 key 일치하면 스킵
+                    if self._can_reuse_code(self.cached_forward_code, self.cached_forward_keys, self.detected_positions):
+                        self.generated_code = self.cached_forward_code
+                        print(f"\n{YELLOW}" + self._log(f"Reusing cached code (single-turn, T3 skipped)...", step="Step 3/6") + f"{RESET}")
+                        print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET}")
+                    else:
+                        if self.cached_forward_code is not None:
+                            missing = set(self.cached_forward_keys) - set(self.detected_positions.keys())
+                            print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET}")
+                            self.cached_forward_code = None
+                            self.cached_forward_keys = []
+                        print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, single-turn)...", step="Step 3/6") + f"{RESET}")
+                        self.generated_code = self.generate_forward_code(
+                            instruction,
+                            self.detected_positions,
+                        )
+                result['forward']['code'] = self.generated_code
                 result['forward']['positions'] = self.detected_positions
 
-                # [즉시 저장] Detection 이미지
-                if self.detection_image is not None:
-                    detection_path = Path(forward_dir) / "detection_result.jpg"
-                    cv2.imwrite(str(detection_path), self.detection_image)  # Already BGR
-                    print(f"  Detection image saved: {detection_path}")
-
-                # 검출 결과 검증 1: 객체 미발견 체크
-                not_found = [k for k, v in self.detected_positions.items() if v is None]
-                if not_found:
-                    print(f"{RED}[Error] Objects not detected: {not_found}{RESET}")
-                    return result
-
                 # 첫 에피소드의 검출 위치 저장 (original reset mode용)
-                if self.first_episode_positions is None:
+                # multi-turn에서도 detected_positions가 갱신된 후 저장
+                if self.first_episode_positions is None and self.detected_positions:
                     import copy
                     self.first_episode_positions = copy.deepcopy(self.detected_positions)
-                    print(f"  {GREEN}[First Episode] Initial positions saved for 'original' reset mode{RESET}")
+                    GREEN_TMP = "\033[92m"
+                    RESET_TMP = "\033[0m"
+                    print(f"  {GREEN_TMP}[First Episode] Initial positions saved for 'original' reset mode{RESET_TMP}")
+                    for name, info in self.detected_positions.items():
+                        if isinstance(info, dict) and "position" in info:
+                            pos = info["position"]
+                            print(f"    + {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
 
-                # 검출 결과 검증 2: Workspace 범위 체크
-                print(f"\n{YELLOW}" + self._log("Checking workspace bounds...", tag="Validation") + f"{RESET}")
-                sys.path.insert(0, str(PROJECT_ROOT / "src"))
-                from lerobot_cap.workspace import BaseWorkspace
+                    # seed_01_setup 즉시 저장 (forward detection 직후)
+                    session_dir_path = Path(save_dir).parent if not use_timestamp_subdir else Path(result_dir)
+                    seed1_dir = session_dir_path / "seed_01_setup"
+                    seed1_dir.mkdir(parents=True, exist_ok=True)
+                    with open(str(seed1_dir / "seed_positions.json"), 'w') as f:
+                        json.dump({"positions": self.first_episode_positions}, f, indent=2, default=str)
+                    print(f"  [SeedGen] seed_01 (initial) saved: {seed1_dir / 'seed_positions.json'}")
 
-                workspace = BaseWorkspace()
-                print(f"  Workspace: reach=[{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m")
+                # [즉시 저장] Generated code
+                code_path = Path(forward_dir) / "generated_code.py"
+                code_path.write_text(self.generated_code)
+                print(f"  Generated code saved: {code_path}")
 
-                critical_error = False
-                for obj_name, obj_info in self.detected_positions.items():
-                    if obj_info is None:
-                        continue
-                    pos = obj_info.get("position") if isinstance(obj_info, dict) else obj_info
-                    if pos is None:
-                        continue
-                    position_m = np.array([pos[0], pos[1], pos[2]])
+                # [즉시 저장] Multi-turn info + visualizations (if available)
+                if self.multi_turn and self.multi_turn_info:
+                    from pipeline.save_logs import save_multi_turn_info, save_turn_visualizations
+                    save_multi_turn_info(forward_dir, self.multi_turn_info, phase="forward")
+                    save_turn_visualizations(forward_dir, self.multi_turn_info, self.initial_image, phase="forward")
 
-                    if not workspace.is_reachable(position_m):
-                        print(f"{RED}[CRITICAL] Object '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m{RESET}")
-                        print(f"{RED}  Outside reach limits: [{workspace.min_reach:.2f}, {workspace.max_reach:.2f}]m{RESET}")
-                        critical_error = True
-                    else:
-                        print(f"  {GREEN}✓ '{obj_name}' at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})m - OK{RESET}")
+                print("\n" + "-" * 40)
+                print("Generated Forward Code (preview):")
+                print("-" * 40)
+                code_preview = self.generated_code[:600]
+                if len(self.generated_code) > 600:
+                    code_preview += "\n... (truncated)"
+                print(code_preview)
+                print("-" * 40)
 
-                if critical_error:
-                    print(f"\n{RED}[Error] Critical workspace violation detected. Terminating pipeline.{RESET}")
-                    return result
-
-                # Step 2: Initial 이미지 캡처
-                print(f"\n{YELLOW}" + self._log("Capturing initial state...", step="Step 2/6") + f"{RESET}")
-                if self.initial_image is None:
-                    self.initial_image = self.capture_frame()
-                if self.initial_image is not None:
-                    # 해상도 저장 (Judge용)
-                    self.initial_image_resolution = (self.initial_image.shape[1], self.initial_image.shape[0])
-                    print(f"  Initial image captured ({self.initial_image_resolution[0]}x{self.initial_image_resolution[1]})")
-                    # [즉시 저장] Initial 이미지
-                    initial_path = Path(forward_dir) / "initial_state.jpg"
-                    cv2.imwrite(str(initial_path), self.initial_image)  # Already BGR
-                    self.forward_initial_image_path = str(initial_path)
-                    print(f"  Initial image saved: {initial_path}")
-
-                # Step 3: Forward 코드 생성 (single-turn)
-                # 코드 재사용: 캐싱된 코드가 있고 key 일치하면 스킵
-                if self._can_reuse_code(self.cached_forward_code, self.cached_forward_keys, self.detected_positions):
-                    self.generated_code = self.cached_forward_code
-                    print(f"\n{YELLOW}" + self._log(f"Reusing cached code (single-turn, T3 skipped)...", step="Step 3/6") + f"{RESET}")
-                    print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET}")
+                # Step 4: Code Verification (LLM 기반 코드 검증)
+                # 캐시된 코드를 재사용하는 경우 검증 스킵 (이미 이전에 검증됨)
+                code_was_cached = (self.cached_forward_code is not None
+                                   and self.generated_code == self.cached_forward_code)
+                if code_was_cached:
+                    print(f"\n{YELLOW}" + self._log("Skipping verification (cached code, already verified)...", step="Step 4/6", tag="Verify") + f"{RESET}")
                 else:
-                    if self.cached_forward_code is not None:
-                        missing = set(self.cached_forward_keys) - set(self.detected_positions.keys())
-                        print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET}")
-                        self.cached_forward_code = None
-                        self.cached_forward_keys = []
-                    print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, single-turn)...", step="Step 3/6") + f"{RESET}")
-                    self.generated_code = self.generate_forward_code(
-                        instruction,
-                        self.detected_positions,
-                    )
-            result['forward']['code'] = self.generated_code
-            result['forward']['positions'] = self.detected_positions
+                    print(f"\n{YELLOW}" + self._log(f"Verifying generated code via LLM ({self.llm_model})...", step="Step 4/6", tag="Verify") + f"{RESET}")
+                    from verification import verify_generated_code
 
-            # 첫 에피소드의 검출 위치 저장 (original reset mode용)
-            # multi-turn에서도 detected_positions가 갱신된 후 저장
-            if self.first_episode_positions is None and self.detected_positions:
-                import copy
-                self.first_episode_positions = copy.deepcopy(self.detected_positions)
-                GREEN_TMP = "\033[92m"
-                RESET_TMP = "\033[0m"
-                print(f"  {GREEN_TMP}[First Episode] Initial positions saved for 'original' reset mode{RESET_TMP}")
-                for name, info in self.detected_positions.items():
-                    if isinstance(info, dict) and "position" in info:
-                        pos = info["position"]
-                        print(f"    + {name}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]")
+                    max_verification_retries = 2
+                    for verify_attempt in range(1, max_verification_retries + 1):
+                        passed, reason = verify_generated_code(
+                            instruction=instruction,
+                            generated_code=self.generated_code,
+                            object_positions=self.detected_positions,
+                            llm_model=self.llm_model,
+                        )
 
-                # seed_01_setup 즉시 저장 (forward detection 직후)
-                session_dir_path = Path(save_dir).parent if not use_timestamp_subdir else Path(result_dir)
-                seed1_dir = session_dir_path / "seed_01_setup"
-                seed1_dir.mkdir(parents=True, exist_ok=True)
-                with open(str(seed1_dir / "seed_positions.json"), 'w') as f:
-                    json.dump({"positions": self.first_episode_positions}, f, indent=2, default=str)
-                print(f"  [SeedGen] seed_01 (initial) saved: {seed1_dir / 'seed_positions.json'}")
+                        if passed:
+                            print(f"  {GREEN}[Verify] PASS{RESET}")
+                            break
+                        else:
+                            print(f"  {RED}[Verify] FAIL (attempt {verify_attempt}/{max_verification_retries}): {reason}{RESET}")
 
-            # [즉시 저장] Generated code
-            code_path = Path(forward_dir) / "generated_code.py"
-            code_path.write_text(self.generated_code)
-            print(f"  Generated code saved: {code_path}")
+                            if verify_attempt < max_verification_retries:
+                                # 코드 재생성
+                                print(f"  {YELLOW}[Verify] Regenerating code...{RESET}")
+                                if self.multi_turn:
+                                    self.generated_code = self.generate_forward_code(
+                                        instruction, self.detected_positions,
+                                        image_path=self.forward_initial_image_path,
+                                    )
+                                else:
+                                    self.generated_code = self.generate_forward_code(
+                                        instruction, self.detected_positions,
+                                    )
+                                result['forward']['code'] = self.generated_code
 
-            # [즉시 저장] Multi-turn info + visualizations (if available)
-            if self.multi_turn and self.multi_turn_info:
-                from pipeline.save_logs import save_multi_turn_info, save_turn_visualizations
-                save_multi_turn_info(forward_dir, self.multi_turn_info, phase="forward")
-                save_turn_visualizations(forward_dir, self.multi_turn_info, self.initial_image, phase="forward")
-
-            print("\n" + "-" * 40)
-            print("Generated Forward Code (preview):")
-            print("-" * 40)
-            code_preview = self.generated_code[:600]
-            if len(self.generated_code) > 600:
-                code_preview += "\n... (truncated)"
-            print(code_preview)
-            print("-" * 40)
-
-            # Step 4: Code Verification (LLM 기반 코드 검증)
-            # 캐시된 코드를 재사용하는 경우 검증 스킵 (이미 이전에 검증됨)
-            code_was_cached = (self.cached_forward_code is not None
-                               and self.generated_code == self.cached_forward_code)
-            if code_was_cached:
-                print(f"\n{YELLOW}" + self._log("Skipping verification (cached code, already verified)...", step="Step 4/6", tag="Verify") + f"{RESET}")
-            else:
-                print(f"\n{YELLOW}" + self._log(f"Verifying generated code via LLM ({self.llm_model})...", step="Step 4/6", tag="Verify") + f"{RESET}")
-                from verification import verify_generated_code
-
-                max_verification_retries = 2
-                for verify_attempt in range(1, max_verification_retries + 1):
-                    passed, reason = verify_generated_code(
-                        instruction=instruction,
-                        generated_code=self.generated_code,
-                        object_positions=self.detected_positions,
-                        llm_model=self.llm_model,
-                    )
-
-                    if passed:
-                        print(f"  {GREEN}[Verify] PASS{RESET}")
-                        break
-                    else:
-                        print(f"  {RED}[Verify] FAIL (attempt {verify_attempt}/{max_verification_retries}): {reason}{RESET}")
-
-                        if verify_attempt < max_verification_retries:
-                            # 코드 재생성
-                            print(f"  {YELLOW}[Verify] Regenerating code...{RESET}")
-                            if self.multi_turn:
-                                self.generated_code = self.generate_forward_code(
-                                    instruction, self.detected_positions,
-                                    image_path=self.forward_initial_image_path,
-                                )
+                                # 재생성된 코드 저장
+                                code_path = Path(forward_dir) / "generated_code.py"
+                                code_path.write_text(self.generated_code)
+                                print(f"  {YELLOW}[Verify] Regenerated code saved: {code_path}{RESET}")
                             else:
-                                self.generated_code = self.generate_forward_code(
-                                    instruction, self.detected_positions,
-                                )
-                            result['forward']['code'] = self.generated_code
+                                # 최대 재시도 도달 — 현재 코드로 진행
+                                print(f"  {YELLOW}[Verify] Max retries reached, proceeding with current code{RESET}")
 
-                            # 재생성된 코드 저장
-                            code_path = Path(forward_dir) / "generated_code.py"
-                            code_path.write_text(self.generated_code)
-                            print(f"  {YELLOW}[Verify] Regenerated code saved: {code_path}{RESET}")
-                        else:
-                            # 최대 재시도 도달 — 현재 코드로 진행
-                            print(f"  {YELLOW}[Verify] Max retries reached, proceeding with current code{RESET}")
+                # Step 5: Forward 코드 실행
+                print(f"\n{YELLOW}" + self._log(f"Executing forward code on Robot {self.robot_id}...", step="Step 5/6") + f"{RESET}")
 
-            # Step 5: Forward 코드 실행
-            print(f"\n{YELLOW}" + self._log(f"Executing forward code on Robot {self.robot_id}...", step="Step 5/6") + f"{RESET}")
+                # 레코딩 모드: 에피소드 시작
+                if self.record_dataset:
+                    self._start_episode_recording(task=instruction)
 
-            # 레코딩 모드: 에피소드 시작
-            if self.record_dataset:
-                self._start_episode_recording(task=instruction)
+                import builtins
+                builtins._current_execution_dir = forward_dir
+                builtins._scene_summary = self.multi_turn_info.get("turn0_response", "") if self.multi_turn_info else ""
 
-            import builtins
-            builtins._current_execution_dir = forward_dir
-            builtins._scene_summary = self.multi_turn_info.get("turn0_response", "") if self.multi_turn_info else ""
+                forward_success = self.execute_code(self.generated_code, self.detected_positions)
+                result['forward']['execution_success'] = forward_success
 
-            forward_success = self.execute_code(self.generated_code, self.detected_positions)
-            result['forward']['execution_success'] = forward_success
+                if forward_success:
+                    print(f"  {GREEN}Forward execution SUCCESS{RESET}")
+                else:
+                    print(f"  {RED}Forward execution FAILED{RESET}")
 
-            if forward_success:
-                print(f"  {GREEN}Forward execution SUCCESS{RESET}")
-            else:
-                print(f"  {RED}Forward execution FAILED{RESET}")
-
-            # VLM pixel move 시각화 (pixel 좌표로 직접 이동한 경우)
-            try:
-                from skills.skills_lerobot import LeRobotSkills
-                if (LeRobotSkills._last_instance
-                        and hasattr(LeRobotSkills._last_instance, 'pixel_move_log')
-                        and LeRobotSkills._last_instance.pixel_move_log):
-                    grasp_img_path = str(Path(forward_dir) / "turn2_grasp_points.jpg")
-                    if os.path.isfile(grasp_img_path):
-                        self._visualize_pixel_moves(
-                            grasp_img_path,
-                            LeRobotSkills._last_instance.pixel_move_log,
-                            str(Path(forward_dir) / "pixel_moves_overlay.jpg"),
-                        )
-            except Exception as e:
-                print(f"  Warning: pixel move visualization failed: {e}")
-
-            # Update llm_cost with detect_objects token usage
-            try:
-                runner = self._get_task_runner()
-                from pipeline.save_logs import update_llm_cost_with_detect_usage
-                update_llm_cost_with_detect_usage(forward_dir, runner.skills)
-            except Exception as e:
-                print(f"  Warning: detect_objects cost merge failed: {e}")
-
-            # Step 5: Context 저장
-            print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 6/6") + f"{RESET}")
-            from pipeline.save_logs import save_execution_context as _save_ec
-            _save_ec(forward_dir, instruction, self.detected_positions,
-                     self.generated_code, forward_success, robot_id=self.robot_id)
-
-            # ================================================================
-            # PHASE 2: JUDGE (EVALUATION)
-            # ================================================================
-            print(f"\n{MAGENTA}{BOLD}" + self._log("JUDGE (Forward Evaluation)") + f"{RESET}")
-            print(MAGENTA + "-" * 70 + RESET)
-
-            # Step 1: Final 이미지 캡처
-            print(f"\n{YELLOW}" + self._log("Capturing final state...", step="Step 1/3", tag="Judge") + f"{RESET}")
-            time.sleep(1.0)
-            self.capture_final_image()
-            if self.final_image is not None:
-                print("  Final image captured")
-                final_path = Path(forward_dir) / "final_state.jpg"
-                cv2.imwrite(str(final_path), self.final_image)
-                print(f"  Final image saved: {final_path}")
-
-            # Save batch_info early (before judge) so resume can detect this episode
-            batch_idx = getattr(self, '_current_batch_index', 0)
-            slot = getattr(self, '_current_slot', 0)
-            episode_root = str(Path(forward_dir).parent)
-            batch_info = {
-                "batch_seed_index": batch_idx + 1,
-                "slot": slot,
-                "judge": "PENDING",
-            }
-            bi_path = Path(episode_root) / "batch_info.json"
-            bi_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(bi_path, 'w') as f:
-                json.dump(batch_info, f, indent=2)
-
-            # Step 2: Judge 실행
-            judge_prediction = "UNCERTAIN"
-            print(f"\n{YELLOW}" + self._log(f"Running VLM Judge ({self.judge_model})...", step="Step 2/3", tag="Judge") + f"{RESET}")
-            if self.initial_image is not None and self.final_image is not None:
-                image_resolution = self.final_image_resolution or self.initial_image_resolution
-                judge_result = self._run_forward_judge(
-                    instruction=instruction,
-                    initial_image=self.initial_image,
-                    final_image=self.final_image,
-                    object_positions=self.detected_positions,
-                    executed_code=self.generated_code,
-                    image_resolution=image_resolution,
-                )
-                result['judge'] = judge_result
-
-                judge_prediction = judge_result.get('prediction', 'UNCERTAIN')
-                reasoning = judge_result.get('reasoning', '')
-
-                pred_color = GREEN if judge_prediction == "TRUE" else RED if judge_prediction == "FALSE" else YELLOW
-                print(f"  Prediction: {pred_color}{judge_prediction}{RESET}")
-                print(f"  Reasoning: {reasoning[:100]}...")
-                # Judge 비용을 llm_cost.json에 추가
+                # VLM pixel move 시각화 (pixel 좌표로 직접 이동한 경우)
                 try:
-                    from judge.vlm import _call_gemini_vlm
-                    judge_usage = getattr(_call_gemini_vlm, '_last_usage', None)
-                    if judge_usage:
-                        cost_path = Path(forward_dir) / "llm_cost.json"
-                        if cost_path.exists():
-                            with open(cost_path) as f:
-                                cost_data = json.load(f)
-                        else:
-                            cost_data = {"phase": "forward"}
-                        cost_data["judge"] = {
-                            "model": judge_usage.get("model", self.judge_model),
-                            "inference_time_s": judge_usage.get("inference_time_s", 0),
-                            "input_tokens": judge_usage.get("in", 0),
-                            "output_tokens": judge_usage.get("out", 0),
-                            "total_tokens": judge_usage.get("total", 0),
-                        }
-                        # total에 judge 비용 합산
-                        if "total" in cost_data:
-                            cost_data["total"]["inference_time_s"] = round(
-                                cost_data["total"]["inference_time_s"] + judge_usage.get("inference_time_s", 0), 2)
-                            cost_data["total"]["input_tokens"] += judge_usage.get("in", 0)
-                            cost_data["total"]["output_tokens"] += judge_usage.get("out", 0)
-                            cost_data["total"]["total_tokens"] += judge_usage.get("total", 0)
-                        with open(cost_path, 'w') as f:
-                            json.dump(cost_data, f, indent=2)
-                except Exception:
-                    pass
-            else:
-                print(f"  {YELLOW}Skipped (missing images){RESET}")
+                    from skills.skills_lerobot import LeRobotSkills
+                    if (LeRobotSkills._last_instance
+                            and hasattr(LeRobotSkills._last_instance, 'pixel_move_log')
+                            and LeRobotSkills._last_instance.pixel_move_log):
+                        grasp_img_path = str(Path(forward_dir) / "turn2_grasp_points.jpg")
+                        if os.path.isfile(grasp_img_path):
+                            self._visualize_pixel_moves(
+                                grasp_img_path,
+                                LeRobotSkills._last_instance.pixel_move_log,
+                                str(Path(forward_dir) / "pixel_moves_overlay.jpg"),
+                            )
+                except Exception as e:
+                    print(f"  Warning: pixel move visualization failed: {e}")
 
-            # 레코딩 모드: Judge 결과에 따라 에피소드 저장/폐기
-            # - TRUE   : 명확히 성공 → 저장
-            # - UNCERTAIN: 판단 불가 (VLM 503/타임아웃 등 API 실패 포함) → 저장 (수동 검토)
-            # - FALSE  : 명확히 실패 → 폐기
-            # API 실패로 인한 데이터 손실 방지를 위해 UNCERTAIN은 보존.
-            if self.record_dataset:
-                should_discard = judge_prediction == "FALSE"
-                # _end_episode_recording이 save_episode 전에 buffer snapshot을 떠서 반환
-                episode_df = self._end_episode_recording(discard=should_discard)
+                # Update llm_cost with detect_objects token usage
+                try:
+                    runner = self._get_task_runner()
+                    from pipeline.save_logs import update_llm_cost_with_detect_usage
+                    update_llm_cost_with_detect_usage(forward_dir, runner.skills)
+                except Exception as e:
+                    print(f"  Warning: detect_objects cost merge failed: {e}")
 
-                if not should_discard and episode_df is not None:
-                    # Skill recording 시각화 저장 (성공한 에피소드만)
-                    # snapshot이 저장 직전 buffer에서 캡처되므로 parquet footer 미완성 문제 없음
-                    try:
-                        from record_dataset.visualize_skills import generate_skill_visualizations
-                        saved_viz = generate_skill_visualizations(
-                            dataframe=episode_df,
-                            save_dir=forward_dir,
-                            episode_index=None,  # snapshot은 단일 episode만 포함
-                        )
-                        if saved_viz:
-                            print(f"  Skill visualizations saved: {len(saved_viz)} files")
-                    except Exception as e:
-                        import traceback
-                        print(f"  Warning: Skill visualization failed: {e}")
-                        traceback.print_exc()
+                # Step 5: Context 저장
+                print(f"\n{YELLOW}" + self._log("Saving execution context...", step="Step 6/6") + f"{RESET}")
+                from pipeline.save_logs import save_execution_context as _save_ec
+                _save_ec(forward_dir, instruction, self.detected_positions,
+                         self.generated_code, forward_success, robot_id=self.robot_id)
 
-                # Step 3: Judge UI 표시 (타임아웃 적용)
-                print(f"\n{YELLOW}" + self._log(f"Displaying result ({self.judge_timeout_ms/1000:.1f}s timeout)...", step="Step 3/3", tag="Judge") + f"{RESET}")
+                # ================================================================
+                # PHASE 2: JUDGE (EVALUATION)
+                # ================================================================
+                print(f"\n{MAGENTA}{BOLD}" + self._log("JUDGE (Forward Evaluation)") + f"{RESET}")
+                print(MAGENTA + "-" * 70 + RESET)
+
+                # Step 1: Final 이미지 캡처
+                print(f"\n{YELLOW}" + self._log("Capturing final state...", step="Step 1/3", tag="Judge") + f"{RESET}")
+                time.sleep(1.0)
+                self.capture_final_image()
+                if self.final_image is not None:
+                    print("  Final image captured")
+                    final_path = Path(forward_dir) / "final_state.jpg"
+                    cv2.imwrite(str(final_path), self.final_image)
+                    print(f"  Final image saved: {final_path}")
+
+                # Save batch_info early (before judge) so resume can detect this episode
+                batch_idx = getattr(self, '_current_batch_index', 0)
+                slot = getattr(self, '_current_slot', 0)
+                episode_root = str(Path(forward_dir).parent)
+                batch_info = {
+                    "batch_seed_index": batch_idx + 1,
+                    "slot": slot,
+                    "judge": "PENDING",
+                }
+                bi_path = Path(episode_root) / "batch_info.json"
+                bi_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(bi_path, 'w') as f:
+                    json.dump(batch_info, f, indent=2)
+
+                # Step 2: Judge 실행
+                judge_prediction = "UNCERTAIN"
+                print(f"\n{YELLOW}" + self._log(f"Running VLM Judge ({self.judge_model})...", step="Step 2/3", tag="Judge") + f"{RESET}")
                 if self.initial_image is not None and self.final_image is not None:
-                    from judge import save_judge_log
-
-                    result_image = self.show_judge_ui(
+                    image_resolution = self.final_image_resolution or self.initial_image_resolution
+                    judge_result = self._run_forward_judge(
                         instruction=instruction,
-                        prediction=result['judge'].get('prediction', 'UNCERTAIN'),
-                        reasoning=result['judge'].get('reasoning', ''),
-                        positions=self.detected_positions,
-                    )
-
-                    # Judge 로그 저장 (forward 폴더에)
-                    result['saved_files'] = save_judge_log(
-                        save_dir=forward_dir,
                         initial_image=self.initial_image,
                         final_image=self.final_image,
-                        instruction=instruction,
-                        prediction=result['judge'].get('prediction', 'UNCERTAIN'),
-                        reasoning=result['judge'].get('reasoning', ''),
                         object_positions=self.detected_positions,
                         executed_code=self.generated_code,
-                        result_image=result_image,
-                        detection_image=self.detection_image,
+                        image_resolution=image_resolution,
                     )
-            # 코드 캐시 갱신: 실행 성공 + Judge!=FALSE이면 캐싱
-            # 한 번이라도 TRUE가 나온 코드는 유지 (Judge=FALSE로 무효화하지 않음)
-            judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
-            should_cache = forward_success and judge_pred != 'FALSE'
-            if should_cache:
-                if self.cached_forward_code is None:
-                    self.cached_forward_code = self.generated_code
-                    self.cached_forward_keys = self._extract_position_keys(self.generated_code)
-                    # point labels 캐시: {obj: [label1, label2, ...]}
-                    self._cached_point_labels = {}
-                    for name, info in self.detected_positions.items():
-                        if isinstance(info, dict) and "points" in info:
-                            self._cached_point_labels[name] = list(info["points"].keys())
-                    print(f"  {GREEN}[CodeReuse] Forward code cached (keys: {self.cached_forward_keys}){RESET}")
-                    if self._cached_point_labels:
-                        print(f"  {GREEN}[CodeReuse] Point labels cached: {self._cached_point_labels}{RESET}")
-            elif not forward_success:
-                # 실행 자체가 실패한 경우만 캐시 무효화 (코드 자체의 문제)
-                # Judge=FALSE는 detection/환경 문제일 수 있으므로 이전 성공 코드 유지
-                if self.cached_forward_code is not None:
-                    print(f"  {YELLOW}[CodeReuse] Cache invalidated (execution failed){RESET}")
-                self.cached_forward_code = None
-                self.cached_forward_keys = []
-                self._cached_point_labels = None
-            elif judge_pred == 'FALSE' and self.cached_forward_code is not None:
-                print(f"  {YELLOW}[CodeReuse] Judge=FALSE but keeping cached code (previously validated){RESET}")
+                    result['judge'] = judge_result
 
-            # Forward 로깅 종료
-            forward_log_path = forward_logger.stop()
-            print(f"\n  Forward log saved to: {forward_log_path}")
+                    judge_prediction = judge_result.get('prediction', 'UNCERTAIN')
+                    reasoning = judge_result.get('reasoning', '')
 
-            # Post-judge 콜백 (batch_info 저장 등, reset 전에 실행)
-            if post_judge_callback is not None:
-                post_judge_callback(result)
+                    pred_color = GREEN if judge_prediction == "TRUE" else RED if judge_prediction == "FALSE" else YELLOW
+                    print(f"  Prediction: {pred_color}{judge_prediction}{RESET}")
+                    print(f"  Reasoning: {reasoning[:100]}...")
+                    # Judge 비용을 llm_cost.json에 추가
+                    try:
+                        from judge.vlm import _call_gemini_vlm
+                        judge_usage = getattr(_call_gemini_vlm, '_last_usage', None)
+                        if judge_usage:
+                            cost_path = Path(forward_dir) / "llm_cost.json"
+                            if cost_path.exists():
+                                with open(cost_path) as f:
+                                    cost_data = json.load(f)
+                            else:
+                                cost_data = {"phase": "forward"}
+                            cost_data["judge"] = {
+                                "model": judge_usage.get("model", self.judge_model),
+                                "inference_time_s": judge_usage.get("inference_time_s", 0),
+                                "input_tokens": judge_usage.get("in", 0),
+                                "output_tokens": judge_usage.get("out", 0),
+                                "total_tokens": judge_usage.get("total", 0),
+                            }
+                            # total에 judge 비용 합산
+                            if "total" in cost_data:
+                                cost_data["total"]["inference_time_s"] = round(
+                                    cost_data["total"]["inference_time_s"] + judge_usage.get("inference_time_s", 0), 2)
+                                cost_data["total"]["input_tokens"] += judge_usage.get("in", 0)
+                                cost_data["total"]["output_tokens"] += judge_usage.get("out", 0)
+                                cost_data["total"]["total_tokens"] += judge_usage.get("total", 0)
+                            with open(cost_path, 'w') as f:
+                                json.dump(cost_data, f, indent=2)
+                    except Exception:
+                        pass
+                else:
+                    print(f"  {YELLOW}Skipped (missing images){RESET}")
+
+                # 레코딩 모드: Judge 결과에 따라 에피소드 저장/폐기
+                # - TRUE   : 명확히 성공 → 저장
+                # - UNCERTAIN: 판단 불가 (VLM 503/타임아웃 등 API 실패 포함) → 저장 (수동 검토)
+                # - FALSE  : 명확히 실패 → 폐기
+                # API 실패로 인한 데이터 손실 방지를 위해 UNCERTAIN은 보존.
+                if self.record_dataset:
+                    should_discard = judge_prediction == "FALSE"
+                    # _end_episode_recording이 save_episode 전에 buffer snapshot을 떠서 반환
+                    episode_df = self._end_episode_recording(discard=should_discard)
+
+                    if not should_discard and episode_df is not None:
+                        # Skill recording 시각화 저장 (성공한 에피소드만)
+                        # snapshot이 저장 직전 buffer에서 캡처되므로 parquet footer 미완성 문제 없음
+                        try:
+                            from record_dataset.visualize_skills import generate_skill_visualizations
+                            saved_viz = generate_skill_visualizations(
+                                dataframe=episode_df,
+                                save_dir=forward_dir,
+                                episode_index=None,  # snapshot은 단일 episode만 포함
+                            )
+                            if saved_viz:
+                                print(f"  Skill visualizations saved: {len(saved_viz)} files")
+                        except Exception as e:
+                            import traceback
+                            print(f"  Warning: Skill visualization failed: {e}")
+                            traceback.print_exc()
+
+                    # Step 3: Judge UI 표시 (타임아웃 적용)
+                    print(f"\n{YELLOW}" + self._log(f"Displaying result ({self.judge_timeout_ms/1000:.1f}s timeout)...", step="Step 3/3", tag="Judge") + f"{RESET}")
+                    if self.initial_image is not None and self.final_image is not None:
+                        from judge import save_judge_log
+
+                        result_image = self.show_judge_ui(
+                            instruction=instruction,
+                            prediction=result['judge'].get('prediction', 'UNCERTAIN'),
+                            reasoning=result['judge'].get('reasoning', ''),
+                            positions=self.detected_positions,
+                        )
+
+                        # Judge 로그 저장 (forward 폴더에)
+                        result['saved_files'] = save_judge_log(
+                            save_dir=forward_dir,
+                            initial_image=self.initial_image,
+                            final_image=self.final_image,
+                            instruction=instruction,
+                            prediction=result['judge'].get('prediction', 'UNCERTAIN'),
+                            reasoning=result['judge'].get('reasoning', ''),
+                            object_positions=self.detected_positions,
+                            executed_code=self.generated_code,
+                            result_image=result_image,
+                            detection_image=self.detection_image,
+                        )
+                # 코드 캐시 갱신: 실행 성공 + Judge!=FALSE이면 캐싱
+                # 한 번이라도 TRUE가 나온 코드는 유지 (Judge=FALSE로 무효화하지 않음)
+                judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
+                should_cache = forward_success and judge_pred != 'FALSE'
+                if should_cache:
+                    if self.cached_forward_code is None:
+                        self.cached_forward_code = self.generated_code
+                        self.cached_forward_keys = self._extract_position_keys(self.generated_code)
+                        # point labels 캐시: {obj: [label1, label2, ...]}
+                        self._cached_point_labels = {}
+                        for name, info in self.detected_positions.items():
+                            if isinstance(info, dict) and "points" in info:
+                                self._cached_point_labels[name] = list(info["points"].keys())
+                        print(f"  {GREEN}[CodeReuse] Forward code cached (keys: {self.cached_forward_keys}){RESET}")
+                        if self._cached_point_labels:
+                            print(f"  {GREEN}[CodeReuse] Point labels cached: {self._cached_point_labels}{RESET}")
+                elif not forward_success:
+                    # 실행 자체가 실패한 경우만 캐시 무효화 (코드 자체의 문제)
+                    # Judge=FALSE는 detection/환경 문제일 수 있으므로 이전 성공 코드 유지
+                    if self.cached_forward_code is not None:
+                        print(f"  {YELLOW}[CodeReuse] Cache invalidated (execution failed){RESET}")
+                    self.cached_forward_code = None
+                    self.cached_forward_keys = []
+                    self._cached_point_labels = None
+                elif judge_pred == 'FALSE' and self.cached_forward_code is not None:
+                    print(f"  {YELLOW}[CodeReuse] Judge=FALSE but keeping cached code (previously validated){RESET}")
+
+                # Forward 로깅 종료
+                forward_log_path = forward_logger.stop()
+                print(f"\n  Forward log saved to: {forward_log_path}")
+
+                # Post-judge 콜백 (batch_info 저장 등, reset 전에 실행)
+                if post_judge_callback is not None:
+                    post_judge_callback(result)
 
             # ================================================================
             # PHASE 3: RESET EXECUTION
@@ -3197,6 +3241,7 @@ class ForwardAndResetPipeline(BasePipeline):
         visualize_detection: bool = False,
         save_dir: Optional[str] = None,
         skip_reset: bool = False,
+        skip_forward: bool = False,
     ) -> Dict:
         """새 세션: 모든 에피소드를 순차 실행. 실패해도 멈추지 않고 계속 진행.
 
@@ -3291,7 +3336,8 @@ class ForwardAndResetPipeline(BasePipeline):
                     detection_timeout=detection_timeout,
                     visualize_detection=visualize_detection,
                     save_dir=episode_dir, use_timestamp_subdir=False,
-                    skip_reset=skip_reset, reset_target_positions=reset_target,
+                    skip_reset=skip_reset, skip_forward=skip_forward,
+                    reset_target_positions=reset_target,
                     pre_reset_callback=pre_reset_cb,
                     post_judge_callback=_post_judge,
                 )
@@ -3637,6 +3683,12 @@ def main():
         action="store_true",
         help="Skip reset execution phase"
     )
+    parser.add_argument(
+        "--skip-forward",
+        action="store_true",
+        help="Skip forward+judge phase (only run reset+reset_judge). Used by forward_ma which performs forward externally and delegates reset to AC."
+    )
+
 
     parser.add_argument(
         "--num-random-seeds",
@@ -3870,6 +3922,7 @@ def main():
             visualize_detection=args.visualize_detection,
             save_dir=args.save,
             skip_reset=args.skip_reset,
+            skip_forward=args.skip_forward,
         )
 
     # 종료 코드 결정 (성공률 기반)

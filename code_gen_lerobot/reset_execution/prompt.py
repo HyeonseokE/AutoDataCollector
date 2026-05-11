@@ -503,11 +503,17 @@ target_positions = {{
 | `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
 | `execute_pick_object(object_position, ...)` | Descend to pick, close gripper, save pitch | object_position, object_name |
 | `execute_place_object(place_position, ...)` | Descend to place with saved pitch, open gripper | place_position, is_table, gripper_open_ratio, target_name |
+| `execute_pull(start, distance, ...)` | **OPENING** drawer/door — pulls -x by `distance` m. Grasp + drag + release + retreat | start_position, distance, object_name |
+| `execute_push(start, distance, ...)` | **CLOSING** drawer/door — pushes +x by `distance + 3cm` (margin). Push (gripper open) + retreat | start_position, distance, object_name |
 
 **execute_pick_object**: Pass the object position as-is. The function internally handles the grasp height offset.
 **execute_place_object**: Pass the target position as-is. The function internally calculates the correct release height.
   - is_table=True: place on table, is_table=False: place on another object
   - **ALWAYS use `gripper_open_ratio=0.7`**
+
+**execute_pull** (OPENING drawer/door): pass `start_position` (handle grasp point) and `distance` (meters, extracted from instruction). Direction fixed -x. Approach with `gripper_action="open"`. Skill: descend → grasp → drag → release → retreat.
+
+**execute_push** (CLOSING drawer/door): pass `start_position` (current handle position, after drawer is open — re-detect) and `distance` (meters; same value as the open distance). The skill internally pushes `distance + 3cm` for full closure. Direction fixed +x. Approach with `gripper_action="open"` (open jaws push from inside). Skill: descend → linear push → retreat.
 
 ### **SUBTASK + RE-DETECTION PATTERN** (MANDATORY at every subtask boundary)
 

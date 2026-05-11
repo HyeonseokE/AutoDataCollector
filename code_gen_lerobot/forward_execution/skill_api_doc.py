@@ -226,32 +226,58 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             True if press action completed successfully.
         """
 
-    def execute_push(self, start_position: list[float], end_position: list[float],
-                     push_height: float = 0.01, duration: float = None,
-                     object_name: str = None) -> bool:
-        """Pushes an object in a straight line using Cartesian linear motion.
-        Must be called AFTER closing the gripper and moving to approach position above start.
-        Internally handles everything after approach:
-          1. Descends to pre-contact position (3cm behind start in opposite push direction)
-          2. Moves linearly through start to end (run-up + push in one straight line)
-          3. Retreats to approach_height (20cm) after push
-        No need for a separate retreat move after calling this method.
+    def execute_push(self, start_position: list[float], distance: float,
+                     duration: float = None, object_name: str = None) -> bool:
+        """CLOSE a drawer/door — push handle by `distance + 3cm` in +x.
+
+        Pre: caller approached above start at approach_height with gripper OPEN
+        (via `gripper_action="open"`). The open jaws act as a paddle pushing the
+        handle from inside.
+
+        The caller passes the **same distance the drawer was opened by** (or extracts
+        from the user instruction). The skill internally pushes `distance + 3cm` so
+        the drawer is fully closed (overshoot margin). Direction is fixed at +x.
+
+        Internally: descend (over-descent + sag bypass for handle z) → linear push
+        +x by (distance + 3cm) at handle z (pitch locked) → retreat-with-close.
+        Motor torque is limited during the push (compliance — protects motor and
+        drawer when the close stop is reached).
 
         Args:
-            start_position: Contact point [x, y, z] in meters — the interaction point
-                where the gripper first touches the object (e.g., object's left edge
-                for a left-to-right push). The z value is used as reference for object height.
-            end_position: Push end position [x, y, z] in meters.
-                Determines push direction and distance in the xy plane.
-            push_height: Height of the end-effector during the push in meters (default 0.01).
-                Set to approximately 1/3 of the object height for good contact.
-                Too low risks table collision; too high misses the object.
-            duration: Push movement duration in seconds. None for auto-calculation based on distance.
-            object_name: Name of the object being pushed for subgoal labeling.
-                Example: "bread", "red block".
+            start_position: Current handle position (in open state) [x, y, z] meters.
+            distance: Nominal close distance (meters); typically equals the opening
+                distance. The skill internally pushes distance + 0.03m. Example: if
+                forward opened with 10cm → close with distance=0.10 (skill pushes 12cm).
+            duration: Push movement duration (seconds, None = auto from distance).
+            object_name: Object label for subgoal recording.
 
         Returns:
-            True if push completed successfully.
+            True if push completed.
+        """
+
+    def execute_pull(self, start_position: list[float], distance: float,
+                     duration: float = None, object_name: str = None) -> bool:
+        """OPEN a drawer/door — pull handle by `distance` meters in -x direction.
+
+        Pre: caller approached above start at approach_height with gripper OPEN
+        (via `gripper_action="open"`).
+
+        The caller passes `distance` (typically extracted from the user instruction,
+        e.g., "Open the drawer 10cm" → 0.10). Direction is fixed at -x (toward
+        robot base).
+
+        Internally: descend → close gripper (grasp) → linear pull -x by `distance`
+        at handle z (pitch locked) → open gripper (release) → retreat-with-close.
+
+        Args:
+            start_position: Handle grasp point [x, y, z] meters.
+            distance: Pull distance (meters, e.g., 0.10 = 10cm). Positive value;
+                direction is fixed at -x.
+            duration: Pull movement duration (seconds, None = auto from distance).
+            object_name: Object label for subgoal recording.
+
+        Returns:
+            True if pull completed successfully.
         """
 
     def detect_objects(self, queries: list[str], timeout: float = 5.0,

@@ -1535,6 +1535,7 @@ class LeRobotSkills:
         gripper_end_fraction: float = 1.0,
         gripper_open_ratio: float = 1.0,
         is_transit: bool = True,
+        disable_sag: bool = False,
     ) -> bool:
         """
         Move end-effector to target position with orientation constraints.
@@ -1617,15 +1618,20 @@ class LeRobotSkills:
         if self.frame != "base_link":
             self._log(f"  -> base_link: [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
 
-        # Gravity sag pre-compensation: raise IK target z to offset expected droop
+        # Gravity sag pre-compensation: raise IK target z to offset expected droop.
+        # disable_sag=True 로 호출 시 우회 — payload 없이 핸들/edge 에 정확히 닿아야
+        # 하는 케이스 (drawer pull descent 등) 에서 base_sag (payload-fit) 가 over-
+        # correction 을 일으키는 문제를 회피.
         ik_target_position = target_position.copy()
-        if self.gravity_sag is not None:
+        if self.gravity_sag is not None and not disable_sag:
             sag_offset = self.gravity_sag.compute_offset(target_position)
             ik_target_position[2] += sag_offset  # always apply; only logging is gated below
             if sag_offset > 0.001:  # Only log when meaningful (> 1mm)
                 reach = np.sqrt(target_position[0] ** 2 + target_position[1] ** 2)
                 self._log(f"  [Gravity Sag] reach={reach:.3f}m, z={target_position[2]:.3f}m "
                           f"→ z_offset=+{sag_offset * 1000:.1f}mm")
+        elif disable_sag and self.gravity_sag is not None:
+            self._log(f"  [Gravity Sag] BYPASSED (disable_sag=True)")
 
         # 1st filter: Geometric reachability check (fast O(1) check)
         kinematics = active_planner.kinematics
@@ -1802,23 +1808,24 @@ class LeRobotSkills:
                     f"(seed={chosen.seed}, wp={chosen.waypoints.shape[0]}, "
                     f"cost={chosen.cost:.3f}) chosen from {len(cands)} candidates"
                 )
-                # Replace trajectory.joint_positions and re-time. Use a higher
-                # max_velocity than the cartesian-line planner uses so that
-                # long-cost OMPL detours (RRTConnect cost ~3) don't drag at
-                # 3s+ duration — speed is constant, duration varies with cost
-                # but stays roughly proportional to path length.
-                from lerobot_cap.planning.interpolation import time_parameterize_trajectory
+                # Replace trajectory.joint_positions with the OMPL waypoints
+                # and time-parameterize them at a CONSTANT joint velocity so
+                # the speed is identical across algorithms — duration scales
+                # purely with path length (cost). We do this manually instead
+                # of calling time_parameterize_trajectory because that helper
+                # has a min-segment-time clamp tied to max_segment_length /
+                # max_acceleration that, combined with OMPL's dense output,
+                # forces total duration ≈ N_waypoints × min_dt — i.e. duration
+                # ∝ waypoint count instead of cost. That made RRTConnect
+                # (169 wp) ~3× slower than BITstar (56 wp) at identical cost.
                 new_joints = np.asarray(chosen.waypoints, dtype=float)
                 planner_max_v = float(getattr(active_planner, "max_velocity", 1.0))
-                planner_max_a = float(getattr(active_planner, "max_acceleration", 2.0))
-                # OMPL_VELOCITY_FACTOR > 1 keeps motion brisk regardless of
-                # path length. Could be exposed in yaml later if per-task
-                # tuning is needed. Acceleration scales together so the
-                # velocity-ramp profile stays consistent.
+                # Constant velocity used for ALL OMPL transits, every algorithm.
                 OMPL_VELOCITY_FACTOR = 1.5
                 ompl_max_v = OMPL_VELOCITY_FACTOR * planner_max_v
-                ompl_max_a = OMPL_VELOCITY_FACTOR * planner_max_a
-                new_ts, _ = time_parameterize_trajectory(new_joints, ompl_max_v, ompl_max_a)
+                seg_lens = np.linalg.norm(np.diff(new_joints, axis=0), axis=1)
+                seg_times = seg_lens / max(ompl_max_v, 1e-6)
+                new_ts = np.concatenate([[0.0], np.cumsum(seg_times)])
                 trajectory.joint_positions = new_joints
                 trajectory.timestamps = new_ts
                 # ee_positions cached array no longer matches; clear so executor
@@ -2442,46 +2449,96 @@ class LeRobotSkills:
             skill_description=skill_description,
         )
 
-    def execute_push(
+    def execute_pull(
         self,
         start_position: Union[List[float], np.ndarray],
-        end_position: Union[List[float], np.ndarray],
-        push_height: float = 0.01,
-        run_up_distance: float = 0.03,
-        approach_height: float = 0.20,
+        distance: float,
         duration: Optional[float] = None,
         object_name: Optional[str] = None,
         skill_description: Optional[str] = None,
         verification_question: Optional[str] = None,
     ) -> bool:
         """
-        Push an object in a straight line (Cartesian linear path).
+        Pull a handle by `distance` meters in -x direction. For OPENING drawers/doors.
 
-        Call after closing gripper and moving to approach position above start.
-        Internally: descends to pre-contact (run-up offset behind start),
-        moves linearly through start to end, then retreats to approach_height.
+        The distance is provided by the caller (typically extracted by the LLM
+        from the user instruction, e.g., "open the drawer 10cm"). Direction is
+        fixed at -x (toward robot base).
+
+        Pre: EE above start at approach_height with gripper OPEN.
+        Internally: descend → close gripper (grasp) → linear pull (-x, distance,
+        z held, pitch locked) → open gripper (release) → retreat-with-close.
 
         Args:
-            start_position: contact point [x, y, z] (interaction point, e.g. object edge)
-            end_position: push end [x, y, z] in current frame (meters)
-            push_height: EE height during push (meters, default 1cm)
-            run_up_distance: pre-contact offset behind start (meters, default 3cm)
-            approach_height: retreat height after push (meters, default 20cm)
-            duration: push movement time (seconds, None=auto based on distance)
-            object_name: object label for recording
-            skill_description: skill label for recording
+            start_position: handle grasp point [x, y, z] (meters).
+            distance: pull distance (meters, e.g., 0.10 = 10cm). Positive value;
+                direction is -x.
+            duration: pull movement time (seconds, None=auto from distance).
+            object_name / skill_description / verification_question: recording labels.
+
+        Returns:
+            True if pull completed.
         """
-        from skills.push_object import push_object
-        return push_object(
+        from skills.pull_object import pull_object
+        return pull_object(
             self,
             start_position=start_position,
-            end_position=end_position,
-            push_height=push_height,
-            run_up_distance=run_up_distance,
-            approach_height=approach_height,
+            distance=distance,
             duration=duration,
             object_name=object_name,
             skill_description=skill_description,
+            verification_question=verification_question,
+        )
+
+    def execute_push(
+        self,
+        start_position: Union[List[float], np.ndarray],
+        distance: float,
+        duration: Optional[float] = None,
+        object_name: Optional[str] = None,
+        skill_description: Optional[str] = None,
+        verification_question: Optional[str] = None,
+    ) -> bool:
+        """
+        Push a handle by `distance + 3cm` in +x direction. For CLOSING drawers/doors.
+
+        The caller passes the same distance the drawer was opened by; the skill
+        adds +3cm internally so the drawer is fully closed (overshoot margin).
+        Direction is fixed at +x (away from robot base).
+
+        Gripper-state agnostic — caller is responsible for setting gripper state
+        before calling (typically OPEN during approach so open jaws act as paddle
+        pushing the handle from inside).
+
+        Pre: EE above start at approach_height with appropriate gripper state.
+        Internally: descend (over-descent + sag bypass for handle z) → linear push
+        (+x, distance+3cm, pitch locked) → retreat-with-close. Motor torque is
+        limited during the push for compliance (drawer-stop protection).
+
+        Args:
+            start_position: handle position (current open state) [x, y, z] meters.
+            distance: nominal close distance (meters); typically equals the
+                opening distance. The skill internally pushes distance+0.03m.
+            duration: push movement time (seconds, None=auto from distance).
+            object_name / skill_description / verification_question: recording labels.
+
+        Returns:
+            True if push completed.
+
+        Note: Block pushing (general lateral push of an object on the table) is
+        NOT exposed via this wrapper. If you need that, import the underlying
+        ``skills.push_object.push_object()`` function directly with explicit
+        end_position / push_height / run_up_distance args.
+        """
+        from skills.push_object import push_object_handle_close
+        return push_object_handle_close(
+            self,
+            start_position=start_position,
+            distance=distance,
+            duration=duration,
+            object_name=object_name,
+            skill_description=skill_description,
+            verification_question=verification_question,
         )
 
     # ========== High-Level Skills: Each high-level skill is composed of primitive skills ==========

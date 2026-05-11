@@ -145,7 +145,14 @@ class DatasetRecorder:
 
             dataset_path = self.root if self.root else HF_LEROBOT_HOME / self.repo_id
 
-            if self.resume and dataset_path.exists():
+            # 완전성 체크: 핵심 meta 파일들이 모두 있어야 정상 resume 가능.
+            # 이전 run 의 init 실패로 meta/info.json 만 남고 tasks.parquet 없는
+            # broken state 면 path 는 존재하지만 LeRobotDataset 가 load_metadata
+            # 에서 FileNotFoundError → HF fallback → 404 의 자가-악화 루프 발생.
+            def _has_complete_meta(p):
+                return (p / "meta" / "info.json").exists() and (p / "meta" / "tasks.parquet").exists()
+
+            if self.resume and dataset_path.exists() and _has_complete_meta(dataset_path):
                 # Resume: open existing dataset for append (upstream lerobot v0.5.1 API)
                 print(f"[DatasetRecorder] Resume mode: opening existing dataset")
                 print(f"  Path: {dataset_path}")
@@ -157,7 +164,7 @@ class DatasetRecorder:
                     self._dataset.start_image_writer(num_threads=self.image_writer_threads)
                 self._episode_count = self._dataset.num_episodes
                 print(f"[DatasetRecorder] Resumed: {self._episode_count} existing episodes")
-            elif dataset_path.exists():
+            elif dataset_path.exists() and _has_complete_meta(dataset_path):
                 raise AssertionError(
                     f"\n"
                     f"========================================\n"
@@ -172,7 +179,12 @@ class DatasetRecorder:
                     f"========================================"
                 )
             else:
-                # 새 데이터셋 생성
+                # 새 데이터셋 생성. broken partial cache (meta dir 만 있고 tasks.parquet 없음)
+                # 가 있다면 먼저 제거 — 안 그러면 LeRobotDataset.create() 가 path 충돌로 fail.
+                if dataset_path.exists():
+                    import shutil
+                    print(f"[DatasetRecorder] Removing broken/partial cache: {dataset_path}")
+                    shutil.rmtree(dataset_path)
                 print(f"[DatasetRecorder] Creating dataset: {self.repo_id}")
                 print(f"  FPS: {self.fps}")
                 print(f"  Robot type: {self.robot_type}")

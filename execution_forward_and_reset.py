@@ -486,6 +486,9 @@ class ForwardAndResetPipeline(BasePipeline):
                     junction_smooth_k=int(skill_raw.get("curobo_junction_smooth_k", 5)),
                     fixed_joint_indices=tuple(skill_raw.get("fixed_joint_indices") or ()),
                     arm_joint_count=int(skill_raw.get("arm_joint_count", 5)),
+                    max_vias_per_candidate=int(
+                        skill_raw.get("curobo_max_vias_per_candidate", 1)
+                    ),
                 )
                 client = CuroboBackend(urdf=urdf_path, config=cb_cfg)
                 self._skill_planner_client = client

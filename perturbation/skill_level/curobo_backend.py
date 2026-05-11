@@ -75,6 +75,14 @@ class CuroboBackendConfig:
     junction_smooth_k: int = 5
     fixed_joint_indices: Sequence[int] = ()
     arm_joint_count: int = 5
+    # Maximum number of via-points each candidate trajectory may use.
+    #   0 → direct-only (no vias, ablation)
+    #   1 → at most one via per candidate (backward-compat, default)
+    #   2 → mix of K=0/1/2 vias per candidate (random K → richer path
+    #       topology diversity across one plan_batch). N × (K_max+1)
+    #       plan_cspace batch + N × K_max IK batch, so VRAM grows ~1.5×
+    #       per K_max step.
+    max_vias_per_candidate: int = 1
 
 
 class CuroboBackend:
@@ -126,19 +134,35 @@ class CuroboBackend:
         self._slerp_ratios = (0.5, 0.3, 0.7, 0.0, 1.0)
         self._n_goalset = len(self._slerp_ratios)
 
-        # _batch_size  : user-facing N (# of candidates).
-        # _cspace_batch: internal merged batch for plan_cspace = 2 × N because
-        #                we concatenate (seg1: start→via*) ⊕ (seg2: via*→goal)
-        #                into ONE GPU call instead of two.
+        # Multi-via geometry:
+        #   _max_vias     = K_max (config.max_vias_per_candidate). 0 disables
+        #                   the via path entirely. 1 = single via per cand
+        #                   (legacy). 2 = mix of K=0/1/2 per cand (random K).
+        #   _max_segments = K_max + 1. Every candidate is padded to this many
+        #                   plan_cspace segments so the CUDA graph captures a
+        #                   fixed shape; dummies (goal→goal no-ops) fill the
+        #                   slack.
+        #   _batch_size   = user-facing N (# of candidates per plan_batch).
+        #   _cspace_batch = N × _max_segments. One GPU call services every
+        #                   real segment + all dummies in a single pass.
+        #   _ik_batch     = N × K_max. Upper bound on via-points across all
+        #                   candidates (each cand has at most K_max vias).
+        #                   Padded to fixed size for IK CUDA graph stability.
+        self._max_vias = max(0, int(config.max_vias_per_candidate))
+        self._max_segments = self._max_vias + 1
         self._batch_size = int(config.max_batch_size)
-        self._cspace_batch = 2 * self._batch_size
+        self._cspace_batch = self._batch_size * self._max_segments
+        self._ik_batch = self._batch_size * max(1, self._max_vias)
+        # MotionPlannerCfg.max_batch_size covers BOTH plan_cspace and IK
+        # solver paths internally → set to the larger of the two.
+        mp_max_batch = max(self._cspace_batch, self._ik_batch)
         mp_cfg = MotionPlannerCfg.create(
             robot=robot_cfg_abs,
             num_trajopt_seeds=config.num_trajopt_seeds,
             num_ik_seeds=config.num_ik_seeds,
             random_seed=123,
             use_cuda_graph=config.use_cuda_graph,
-            max_batch_size=self._cspace_batch,
+            max_batch_size=mp_max_batch,
             max_goalset=self._n_goalset,
         )
         self._planner = MotionPlanner(mp_cfg)
@@ -261,48 +285,101 @@ class CuroboBackend:
             if idx < self._n_dof:
                 goal_full[idx] = start_full[idx]
 
-        # 1) Compute via_xyz batch and IK-resolve to via_qpos (skip i=0 which
-        #    uses goal_qpos directly to play the role of "direct" candidate).
-        #    FK for start+goal goes through a SINGLE batched compute_kinematics.
+        # 1) FK for start + goal in one batched compute_kinematics call.
         (start_ee, start_quat), (goal_ee, goal_quat) = self._compute_ee_xyz_quat_batch(
             [start_full, goal_full]
         )
 
-        via_xyz_list: list[np.ndarray] = [None]  # placeholder for slot 0 (direct)
-        for k in range(1, n):
-            via_xyz_list.append(self._sample_via_xyz(start_ee, goal_ee, rng))
+        # 2) Per-candidate K_via assignment.
+        #   slot 0     : K=0 (direct) — one guaranteed baseline path.
+        #   slots 1..n-1: K ~ Uniform({1, ..., max_vias}) — never zero, so
+        #                 every non-baseline candidate has at least one via
+        #                 and is structurally different from the direct path.
+        #   If max_vias == 0 (ablation), all candidates are direct.
+        K_via_per_cand: list[int] = [0]
+        if self._max_vias == 0:
+            K_via_per_cand.extend([0] * (n - 1))
+        else:
+            for _ in range(1, n):
+                K_via_per_cand.append(
+                    int(rng.integers(1, self._max_vias + 1))
+                )
 
-        # Batched IK for slots 1..n-1 (slot 0 uses goal_qpos itself).
-        # (n-1) vias × len(slerp_ratios) orientations are submitted as a
-        # single flat batch — one GPU call instead of up to 5×(n-1)
-        # sequential calls. Per-via first-success picking happens on CPU
-        # after the batch returns.
-        via_qpos_list: list[Optional[np.ndarray]] = [None] * n
-        via_qpos_list[0] = goal_full.copy()
-        if n > 1:
+        # 3) For each candidate, pre-sample its (t, lat, vert) param tuples
+        #    (stratified t) and convert to via xyz.
+        via_xyz_per_cand: list[list[np.ndarray]] = []
+        for i in range(n):
+            K = K_via_per_cand[i]
+            params = self._sample_via_params_stratified(K, rng)
+            via_xyz_per_cand.append([
+                self._compute_via_xyz(start_ee, goal_ee, t, lat, vert)
+                for (t, lat, vert) in params
+            ])
+
+        # 4) Batched IK for ALL vias across ALL candidates in one GPU call.
+        #    Flatten to (via_xyz, (cand_idx, via_idx_in_cand)), pad to
+        #    self._ik_batch for CUDA graph stability, run goalset IK.
+        flat_via_xyz: list[np.ndarray] = []
+        flat_via_loc: list[tuple[int, int]] = []
+        for i in range(n):
+            for j, xyz in enumerate(via_xyz_per_cand[i]):
+                flat_via_xyz.append(xyz)
+                flat_via_loc.append((i, j))
+
+        via_qpos_per_cand: list[list[np.ndarray]] = [[] for _ in range(n)]
+        if flat_via_xyz and self._max_vias > 0:
+            # _ik_solve_batched pads internally to self._ik_batch for CUDA
+            # graph stability; we just pass the real via list.
             via_solutions = self._ik_solve_batched(
-                via_xyz_list[1:], start_quat, goal_quat, seed_q=start_full,
+                flat_via_xyz, start_quat, goal_quat, seed_q=start_full,
             )
             mid_q = (start_full + goal_full) / 2.0
-            for k in range(1, n):
-                q_via = via_solutions[k - 1]
+            for k_flat, (i_cand, _j_via) in enumerate(flat_via_loc):
+                q_via = via_solutions[k_flat]
                 if q_via is None:
-                    via_qpos_list[k] = mid_q.copy()
+                    q_via = mid_q.copy()
                 else:
                     for idx in self._fixed_idx:
                         if idx < self._n_dof:
                             q_via[idx] = start_full[idx]
-                    via_qpos_list[k] = q_via
+                via_qpos_per_cand[i_cand].append(q_via)
 
-        # 2-3) Merge seg1 + seg2 into ONE batched plan_cspace call of size 2N.
-        # Layout of the merged batch (length self._cspace_batch = 2N):
-        #   slots [0       .. N  )  → seg1: start          → via_qpos_list
-        #   slots [N       .. 2N )  → seg2: via_qpos_list  → goal
-        # Unused tail slots (when user n < self._batch_size) get padded with
-        # trivial start→start no-ops so the CUDA graph's fixed shape holds.
-        merged_start: list[np.ndarray] = [start_full] * n + list(via_qpos_list)
-        merged_goal: list[np.ndarray] = list(via_qpos_list) + [goal_full] * n
-        # Padding to fill (2 × self._batch_size) - 2N slots.
+        # 5) Build the merged plan_cspace batch.
+        #    Each candidate contributes exactly self._max_segments slots:
+        #      K real segments (start→v1, v1→v2, ..., v_K→goal)
+        #      + (max_vias - K) dummy goal→goal no-ops at the tail.
+        #    Layout (flat, row-major): candidate i occupies slots
+        #    [i*max_seg .. (i+1)*max_seg).
+        merged_start: list[np.ndarray] = []
+        merged_goal: list[np.ndarray] = []
+        for i in range(n):
+            K = K_via_per_cand[i]
+            vqs = via_qpos_per_cand[i]
+            if K == 0:
+                # Direct: 1 real segment, max_vias dummies.
+                merged_start.append(start_full)
+                merged_goal.append(goal_full)
+                for _ in range(self._max_vias):
+                    merged_start.append(goal_full)
+                    merged_goal.append(goal_full)
+            else:
+                # start → v1
+                merged_start.append(start_full)
+                merged_goal.append(vqs[0])
+                # v_{j-1} → v_j
+                for j in range(1, K):
+                    merged_start.append(vqs[j - 1])
+                    merged_goal.append(vqs[j])
+                # v_K → goal
+                merged_start.append(vqs[-1])
+                merged_goal.append(goal_full)
+                # Tail dummies
+                for _ in range(self._max_vias - K):
+                    merged_start.append(goal_full)
+                    merged_goal.append(goal_full)
+
+        # Pad to self._cspace_batch (when user n < self._batch_size) with
+        # all-start no-ops. Keeps the CUDA graph's batch dimension fixed.
         pad = self._cspace_batch - len(merged_start)
         if pad > 0:
             merged_start.extend([start_full] * pad)
@@ -310,38 +387,39 @@ class CuroboBackend:
 
         t0 = time.time()
         merged_batch = self._plan_cspace_batch(merged_start, merged_goal)
-        merged_time = time.time() - t0
+        plan_time = time.time() - t0
         if merged_batch is None:
             return []
-        seg1_batch = merged_batch[:n]
-        seg2_batch = merged_batch[n : 2 * n]
-        seg1_time = merged_time / 2.0   # split for reporting
-        seg2_time = merged_time / 2.0
 
-        # 4) Per-candidate assembly
+        # 6) Per-candidate assembly — concat the K+1 real segments and
+        #    iteratively spline-smooth each junction.
         candidates: list[TrajectoryCandidate] = []
+        seg_k = self.cfg.junction_smooth_k
         for i in range(n):
-            seg1 = seg1_batch[i] if seg1_batch is not None else None
-            if seg1 is None:
+            K = K_via_per_cand[i]
+            base = i * self._max_segments
+            real_segs: list[np.ndarray] = []
+            for j in range(K + 1):
+                seg = merged_batch[base + j]
+                if seg is None:
+                    real_segs = []  # any failed real segment ⇒ skip candidate
+                    break
+                real_segs.append(seg)
+            if not real_segs:
                 continue
-            if i == 0:
-                # Direct path: seg1 only, no junction smoothing.
-                full_wp = seg1
-                algo_name = "curobo:direct"
-            else:
-                seg2 = seg2_batch[i] if seg2_batch is not None else None
-                if seg2 is None:
-                    continue  # via candidate failed seg2
-                full_wp = self._smooth_junction(seg1, seg2, k=self.cfg.junction_smooth_k)
-                algo_name = f"curobo:via{i-1}"
 
-            # Step 5: enforce fixed joints across the full trajectory (post-lock).
+            # Stitch: concat seg[0], smooth-junction with seg[1], etc.
+            full_wp = real_segs[0]
+            for next_seg in real_segs[1:]:
+                full_wp = self._smooth_junction(full_wp, next_seg, k=seg_k)
+
             full_wp = self._apply_fixed_joint_lock(full_wp, start_full)
+            algo_name = "curobo:direct" if K == 0 else f"curobo:via{K}_s{i}"
 
             candidates.append(self._make_candidate(
                 full_wp, algo=algo_name,
                 seed=int(rng.integers(0, 2**31 - 1)),
-                plan_time_s=(seg1_time + seg2_time) / n,
+                plan_time_s=plan_time / max(n, 1),
             ))
 
         return candidates
@@ -390,54 +468,81 @@ class CuroboBackend:
         """Single-config FK convenience wrapper around the batched call."""
         return self._compute_ee_xyz_quat_batch([qpos_full])[0]
 
-    def _sample_via_xyz(
+    def _compute_via_xyz(
         self,
         start_ee: np.ndarray,
         goal_ee: np.ndarray,
-        rng: np.random.Generator,
+        t: float,
+        lat: float,
+        vert: float,
     ) -> np.ndarray:
-        """Continuous random via-point sampling.
+        """Compute via xyz from explicit (t, lat, vert) parameters.
 
-        Parametrization::
-
-            via = (1-t)·start_ee + t·goal_ee + lat·perp_lat + vert·perp_vert
-
-        where (t, lat, vert) are independently sampled from continuous
-        distributions per call (see module-level VIA_T_MIN/MAX,
-        VIA_VERT_MIN_RATIO/MAX_RATIO constants). No discrete mode index —
-        each call to this method produces a genuinely unique via location.
+        Pure function — no RNG inside. Multi-via candidates pre-sample K
+        parameter tuples via ``_sample_via_params_stratified`` and convert
+        each to xyz in one pass. Splitting sampling from geometry lets the
+        stratified-t logic enforce minimum spacing along the line.
         """
-        # 1. Fraction along the line (NOT clipped to 0.5/midpoint — anywhere
-        #    in [VIA_T_MIN, VIA_T_MAX]). t closer to endpoints produces
-        #    asymmetric paths (long approach + short retreat or vice versa).
-        t = float(rng.uniform(VIA_T_MIN, VIA_T_MAX))
         via_base = (1.0 - t) * start_ee + t * goal_ee
-
         line = goal_ee - start_ee
         line_len = float(np.linalg.norm(line))
         if line_len < 1e-6:
             return via_base + np.array([0.0, self.cfg.via_offset_mag, 0.0])
         line_dir = line / line_len
-
-        # Build perpendicular basis (project world-y and world-z onto plane ⊥ line).
         perp_lat = np.array([0.0, 1.0, 0.0]) - np.dot([0.0, 1.0, 0.0], line_dir) * line_dir
         if np.linalg.norm(perp_lat) < 1e-6:
             perp_lat = np.array([1.0, 0.0, 0.0]) - np.dot([1.0, 0.0, 0.0], line_dir) * line_dir
         perp_lat /= max(np.linalg.norm(perp_lat), 1e-9)
         perp_vert = np.array([0.0, 0.0, 1.0]) - np.dot([0.0, 0.0, 1.0], line_dir) * line_dir
         perp_vert /= max(np.linalg.norm(perp_vert), 1e-9)
-
-        # 2. Lateral offset — symmetric uniform [-mag, +mag] (left/right equal).
-        mag = self.cfg.via_offset_mag
-        lat = float(rng.uniform(-mag, +mag))
-
-        # 3. Vertical offset — uniform [+0.3·mag, +1.2·mag], biased upward
-        #    because the 5-DoF arm reaches above-line vias far more reliably.
-        vert = float(rng.uniform(
-            VIA_VERT_MIN_RATIO * mag, VIA_VERT_MAX_RATIO * mag,
-        ))
-
         return via_base + lat * perp_lat + vert * perp_vert
+
+    def _sample_via_params_stratified(
+        self,
+        K: int,
+        rng: np.random.Generator,
+    ) -> list[tuple[float, float, float]]:
+        """Sample K (t, lat, vert) tuples for a single candidate.
+
+        t is **stratified**: [VIA_T_MIN, VIA_T_MAX] is split into K equal
+        sub-intervals and one t is sampled from each. Guarantees minimum
+        spacing (VIA_T_MAX-VIA_T_MIN)/K between consecutive vias — prevents
+        the degenerate "two vias on top of each other" case which would
+        defeat the multi-via point entirely.
+
+        lat ~ Uniform(-mag, +mag); vert ~ Uniform(0.3·mag, 1.2·mag) —
+        identical distributions to the single-via case so the per-via
+        envelope shape is the same regardless of K.
+
+        Returns list of K tuples already sorted by t (ascending).
+        """
+        if K <= 0:
+            return []
+        bin_edges = np.linspace(VIA_T_MIN, VIA_T_MAX, K + 1)
+        mag = self.cfg.via_offset_mag
+        out: list[tuple[float, float, float]] = []
+        for k in range(K):
+            t = float(rng.uniform(bin_edges[k], bin_edges[k + 1]))
+            lat = float(rng.uniform(-mag, +mag))
+            vert = float(rng.uniform(
+                VIA_VERT_MIN_RATIO * mag, VIA_VERT_MAX_RATIO * mag,
+            ))
+            out.append((t, lat, vert))
+        return out
+
+    def _sample_via_xyz(
+        self,
+        start_ee: np.ndarray,
+        goal_ee: np.ndarray,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """Single-via convenience wrapper — sample one via and return its
+        xyz. Kept for backward compatibility (test scripts, legacy K=1
+        path). Internally just _sample_via_params_stratified(K=1) +
+        _compute_via_xyz."""
+        params = self._sample_via_params_stratified(1, rng)
+        t, lat, vert = params[0]
+        return self._compute_via_xyz(start_ee, goal_ee, t, lat, vert)
 
     @staticmethod
     def _slerp_quat(q1: np.ndarray, q2: np.ndarray, t: float) -> np.ndarray:
@@ -498,10 +603,22 @@ class CuroboBackend:
         ≈ 6× IK stage speedup. batch_size stays at n_via so we don't blow
         past ``max_batch_size`` and we don't need a larger graph capture.
         """
-        n_via = len(via_xyz_list)
-        if n_via == 0:
+        n_real = len(via_xyz_list)
+        if n_real == 0:
             return []
         G = len(self._slerp_ratios)
+
+        # Pad to self._ik_batch so the IK CUDA graph captures a fixed
+        # B = self._ik_batch shape and stays stable across calls of
+        # varying real n_via. Dummies = first real via repeated (cheap,
+        # always solvable since we know the first via is at least
+        # geometrically valid); their solutions are dropped.
+        target_B = max(n_real, getattr(self, "_ik_batch", n_real))
+        if n_real < target_B:
+            padded = list(via_xyz_list) + [via_xyz_list[0]] * (target_B - n_real)
+        else:
+            padded = list(via_xyz_list)
+        n_via = len(padded)
 
         # Pre-compute all G slerp quats once (independent of via).
         quat_g = np.stack(
@@ -511,7 +628,7 @@ class CuroboBackend:
             ],
             axis=0,
         )  # (G, 4)
-        xyz_b = np.asarray(via_xyz_list, dtype=np.float32).reshape(n_via, 3)
+        xyz_b = np.asarray(padded, dtype=np.float32).reshape(n_via, 3)
 
         # Broadcast to (n_via, G, ·): each via paired with every slerp quat.
         xyz_bg = np.broadcast_to(xyz_b[:, None, :], (n_via, G, 3)).copy()
@@ -537,15 +654,16 @@ class CuroboBackend:
             result = self._planner.ik_solver.solve_pose(goal, current_state=seed_state)
         except Exception as e:
             print(f"[CuroboBackend] batched IK failed: {e}", flush=True)
-            return [None] * n_via
+            return [None] * n_real
         if result is None:
-            return [None] * n_via
+            return [None] * n_real
 
         success = result.success.detach().cpu().numpy().reshape(-1)
         solution = result.solution.detach().cpu().numpy().reshape(n_via, -1)
 
+        # Truncate to n_real — drop padded dummy results.
         out: list[Optional[np.ndarray]] = []
-        for i in range(n_via):
+        for i in range(n_real):
             if i < len(success) and bool(success[i]):
                 out.append(solution[i].astype(float))
             else:

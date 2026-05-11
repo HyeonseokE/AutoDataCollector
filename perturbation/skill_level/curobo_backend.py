@@ -168,12 +168,18 @@ class CuroboBackend:
         start_qpos: np.ndarray,
         goal_qpos: np.ndarray,
         n: int,
+        seed: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> list[TrajectoryCandidate]:
+        """Plan N transit candidates. Duck-types ``PlanServiceClient.plan_batch``
+        so production code (skills_lerobot) can pass ``seed=int`` interchangeably
+        with either backend. Tests may pass ``rng=`` directly.
+        """
         if not self.cfg.enabled or n <= 0:
             return []
         n = min(int(n), self._batch_size)
-        rng = rng if rng is not None else np.random.default_rng()
+        if rng is None:
+            rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
 
         start_full = self._to_full_qpos(start_qpos)
         goal_full = self._to_full_qpos(goal_qpos)

@@ -162,6 +162,15 @@ class CuroboBackend:
         # is needed; with use_cuda_graph=True, the first plan_batch call pays
         # the one-time capture cost and subsequent calls reuse the graph.
 
+        # Cleanup hook: belt-and-suspenders for the pipeline teardown path.
+        # close() also runs via _teardown_skill_perturbation under normal
+        # shutdown; atexit fires under exceptions / interpreter exit / when
+        # SIGINT fires before the pipeline's own signal handler was installed.
+        # SIGKILL is unhandleable — only the driver can reclaim that memory.
+        self._closed = False
+        import atexit as _atexit
+        _atexit.register(self._atexit_close)
+
     # ── Public API ─────────────────────────────────────────────────────────
 
     @property
@@ -170,19 +179,25 @@ class CuroboBackend:
 
     def close(self) -> None:
         """Release GPU resources held by curobo (CUDA graphs, trajopt/IK
-        solver state, kinematics tables).
+        solver state, kinematics tables). **Idempotent** — safe to call
+        multiple times (pipeline teardown + atexit may both fire).
 
         Process exit normally reclaims VRAM on its own, but two cases need
         explicit cleanup:
           (a) Long-lived parent processes that spin up + tear down backends
               between sessions (e.g. multi-task data collection pipelines).
-          (b) Crashes / SIGKILL during plan_batch — CUDA graph memory and
-              cached allocator buffers can otherwise leak until reboot.
+          (b) Hard kills / unhandled exceptions during plan_batch — CUDA
+              graph memory and cached allocator buffers can otherwise leak
+              until reboot. (SIGKILL is unhandleable; only the CUDA driver
+              can reclaim that memory.)
 
         Duck-types ``PlanServiceClient.close`` so the pipeline's
         ``_teardown_skill_perturbation`` can call it uniformly.
         """
-        torch = self._torch
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        torch = getattr(self, "_torch", None)
         # Drop references to GPU-resident objects first so torch's caching
         # allocator knows they're collectable.
         for attr in (
@@ -194,9 +209,20 @@ class CuroboBackend:
                 except Exception:
                     pass
         # Force the allocator to release reserved-but-unallocated blocks.
+        if torch is not None:
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+
+    def _atexit_close(self) -> None:
+        """atexit-safe wrapper around close(). Swallows all exceptions
+        because exits during interpreter shutdown may have torch / curobo
+        modules already partially torn down — we just want a best-effort
+        free, never a noisy traceback on the way out."""
         try:
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            self.close()
         except Exception:
             pass
 

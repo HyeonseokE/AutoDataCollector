@@ -29,6 +29,14 @@ from perturbation.skill_level.client import (
     PlanServiceClient,
     PlanServiceError,
 )
+# Curobo backend — direct (no daemon) GPU-accelerated planner with via-point
+# diversity. Import is lazy via a function so users without curobo installed
+# can still use the OMPL path.
+def get_curobo_backend():
+    from perturbation.skill_level.curobo_backend import (
+        CuroboBackend, CuroboBackendConfig,
+    )
+    return CuroboBackend, CuroboBackendConfig
 
 __all__ = [
     "DEFAULT_ALGORITHMS",
@@ -40,4 +48,5 @@ __all__ = [
     "build_workspace_objects",
     "PlanServiceClient",
     "PlanServiceError",
+    "get_curobo_backend",
 ]

@@ -142,6 +142,7 @@ class ParallelEnsemble:
                 fallback_to_straight_line=config.fallback_to_straight_line,
                 move_group_link=config.move_group_link,
                 workspace=config.workspace,
+                fixed_joint_indices=tuple(config.fixed_joint_indices or ()),
             )),
         )
         # Verify workers are alive — Pool defers errors otherwise.
@@ -157,7 +158,10 @@ class ParallelEnsemble:
         """Submit ``n`` plan calls in parallel and return the successes.
 
         Algorithm + seed for each call are RNG-driven, so the same ``rng``
-        state produces the same batch.
+        state produces the same batch. Has a hard wall-clock budget so a
+        single pathological OMPL call can't hang the daemon indefinitely —
+        on timeout we abandon the in-flight pool (workers continue but their
+        results are discarded) and return whatever finished cleanly.
         """
         if not self.cfg.enabled or n <= 0:
             return []
@@ -172,7 +176,19 @@ class ParallelEnsemble:
             args_list.append((algo, seed, np.asarray(start_qpos, dtype=float),
                               np.asarray(goal_qpos, dtype=float)))
 
-        results = self._pool.map(_worker_plan, args_list)
+        # Hard wall-clock budget. Each worker's .solve() is bounded by
+        # config.planning_time; we still cap total wall to (planning_time × 2 + 2s)
+        # so one stuck worker can't block the next plan request.
+        wall_budget = max(2.0, self.cfg.planning_time * 2.0 + 2.0)
+        async_result = self._pool.map_async(_worker_plan, args_list)
+        try:
+            results = async_result.get(timeout=wall_budget)
+        except mp.TimeoutError:
+            # Pool workers may still be running; we leave them alone and
+            # discard the in-flight result. The pool stays usable because the
+            # remaining workers will finish eventually and only this batch is
+            # abandoned. Caller falls back to cartesian for this transit.
+            return []
         return [r for r in results if r is not None]
 
     def close(self) -> None:

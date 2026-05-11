@@ -58,6 +58,12 @@ class PlannerEnsembleConfig:
     # Optional WorkspaceConfig for collision world. Pass via dict for picklability
     # (workers receive their own copy when ParallelEnsemble forwards it).
     workspace: Optional[dict] = None
+    # Move-group joint indices to FIX at the start value during planning.
+    # SO-101 default: [4] = wrist_roll, matching the cartesian-IK behavior
+    # (maintain_wrist_roll=True). Setting this keeps gripper rotation steady
+    # during transit and removes unnecessary wiggle from recorded actions.
+    # Empty list = plan full DoF.
+    fixed_joint_indices: Sequence[int] = ()
 
 
 class PlannerEnsemble:
@@ -103,6 +109,26 @@ class PlannerEnsemble:
         self._move_idx = self._planner_mp.move_group_joint_indices
         self._dof = len(self._move_idx)
         self._joint_limits = self._planner_mp.joint_limits[self._move_idx]
+        # Index partition for fixed-joint planning. ``_active_idx`` are the joint
+        # indices (within the move-group, 0..dof-1) that OMPL plans over;
+        # ``_fixed_idx`` are held constant at the start value. We validate
+        # against the move-group dof so that out-of-range entries (or 5/6 dof
+        # mixups) are caught early.
+        _all = list(range(self._dof))
+        _fixed = sorted({int(i) for i in (config.fixed_joint_indices or ())})
+        for i in _fixed:
+            if i < 0 or i >= self._dof:
+                raise ValueError(
+                    f"fixed_joint_indices contains {i} but move-group dof is {self._dof}"
+                )
+        self._fixed_idx = _fixed
+        self._active_idx = [i for i in _all if i not in self._fixed_idx]
+        self._active_dof = len(self._active_idx)
+        if self._active_dof < 2:
+            raise ValueError(
+                f"fixed_joint_indices reduced planning dof to {self._active_dof}; "
+                f"need at least 2 active joints"
+            )
         self._space = self._build_state_space()
         self._algo_factory = self._resolve_algo_factory(config.algorithms)
 
@@ -157,11 +183,20 @@ class PlannerEnsemble:
         return q[self._move_idx]
 
     def _build_state_space(self):
-        space = self._ob.RealVectorStateSpace(self._dof)
-        bounds = self._ob.RealVectorBounds(self._dof)
-        for i, (lo, hi) in enumerate(self._joint_limits):
-            bounds.setLow(i, float(lo))
-            bounds.setHigh(i, float(hi))
+        """Build the OMPL state space over the ACTIVE joints only.
+
+        Fixed joints are not represented in the OMPL state; they are filled
+        in at validity-check time and at result-expansion time using the
+        start qpos. This keeps the search space smaller and prevents
+        accidental wiggle in joints we intend to hold constant (e.g.
+        wrist_roll on SO-101).
+        """
+        space = self._ob.RealVectorStateSpace(self._active_dof)
+        bounds = self._ob.RealVectorBounds(self._active_dof)
+        for new_i, joint_i in enumerate(self._active_idx):
+            lo, hi = self._joint_limits[joint_i]
+            bounds.setLow(new_i, float(lo))
+            bounds.setHigh(new_i, float(hi))
         space.setBounds(bounds)
         return space
 
@@ -177,16 +212,24 @@ class PlannerEnsemble:
             factories[n] = getattr(og, n)
         return factories
 
-    def _make_state_validity_checker(self):
-        """Closure: maps joint qpos → mplib collision check. Returns a callable
-        suitable for ``SpaceInformation.setStateValidityChecker``.
+    def _make_state_validity_checker(self, fixed_values: np.ndarray):
+        """Closure: maps an OMPL (active-only) state → full move-group qpos
+        with fixed joints filled in, then runs mplib's collision check.
+
+        ``fixed_values`` is a length-``self._dof`` array whose entries at
+        positions in ``self._fixed_idx`` hold the constant value to use for
+        those joints (typically taken from the start qpos).
         """
         planner_mp = self._planner_mp
-        move_idx = self._move_idx
+        active_idx = self._active_idx
+        active_dof = self._active_dof
         dof = self._dof
+        fixed_template = np.asarray(fixed_values, dtype=float).copy()
 
         def is_valid(state) -> bool:
-            q = np.array([state[i] for i in range(dof)])
+            q = fixed_template.copy()
+            for new_i in range(active_dof):
+                q[active_idx[new_i]] = state[new_i]
             full = planner_mp.pad_move_group_qpos(q)
             planner_mp.robot.set_qpos(full, True)
             return len(planner_mp.planning_world.check_collision()) == 0
@@ -202,16 +245,33 @@ class PlannerEnsemble:
         if algo not in self._algo_factory:
             raise ValueError(f"algorithm {algo!r} not in configured pool")
 
+        # Project start/goal onto the active-joint subspace. Fixed joints are
+        # held at the start value; if the goal disagrees, we accept the start
+        # value (the goal is reached for active joints; fixed joints stay put).
+        start = np.asarray(start, dtype=float)
+        goal = np.asarray(goal, dtype=float)
+        if start.shape[0] != self._dof or goal.shape[0] != self._dof:
+            raise ValueError(
+                f"start/goal must have shape ({self._dof},); got "
+                f"{start.shape} / {goal.shape}"
+            )
+        active_idx = self._active_idx
+        fixed_idx = self._fixed_idx
+        start_active = start[active_idx]
+        goal_active = goal[active_idx]
+        # Snapshot of fixed-joint values used during plan + result expansion
+        fixed_values_full = start.copy()  # length = dof
+
         si = ob.SpaceInformation(self._space)
-        si.setStateValidityChecker(self._make_state_validity_checker())
+        si.setStateValidityChecker(self._make_state_validity_checker(fixed_values_full))
         si.setup()
 
         pdef = ob.ProblemDefinition(si)
         s0 = self._space.allocState()
         sg = self._space.allocState()
-        for i in range(self._dof):
-            s0[i] = float(start[i])
-            sg[i] = float(goal[i])
+        for new_i in range(self._active_dof):
+            s0[new_i] = float(start_active[new_i])
+            sg[new_i] = float(goal_active[new_i])
         pdef.setStartAndGoalStates(s0, sg)
 
         ou.RNG.setSeed(seed)  # best-effort; OMPL's first-call-only restriction noted
@@ -229,9 +289,15 @@ class PlannerEnsemble:
         n = path.getStateCount()
         if n < 2:
             return None
-        wp = np.array([
-            [path.getState(i)[j] for j in range(self._dof)] for i in range(n)
+        # Read out the OMPL path in active-joint space, then expand to full DoF
+        # by broadcasting the fixed-joint values across all waypoints. Result
+        # shape is (n, dof) — the controller still receives full-DoF waypoints.
+        active_wp = np.array([
+            [path.getState(i)[j] for j in range(self._active_dof)] for i in range(n)
         ])
+        wp = np.broadcast_to(fixed_values_full, (n, self._dof)).copy()
+        for new_i, joint_i in enumerate(active_idx):
+            wp[:, joint_i] = active_wp[:, new_i]
         wp = self._densify(wp, self.cfg.waypoint_density)
         cost = float(np.linalg.norm(np.diff(wp, axis=0), axis=1).sum())
         return TrajectoryCandidate(

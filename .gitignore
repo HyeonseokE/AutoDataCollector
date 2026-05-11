@@ -74,3 +74,9 @@ models/**/*.pth
 
 # mplib auto-generated SRDF (first-run, ~3min, derived from URDF)
 *_mplib.srdf
+
+# Curobo source (installed via pip -e from github, not part of repo)
+src/nvidia-curobo/
+
+# Editor / IDE backup files
+*.bak_*

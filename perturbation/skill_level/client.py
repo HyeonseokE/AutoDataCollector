@@ -56,7 +56,11 @@ DEFAULT_SOCKET_PATH = f"/tmp/lerobot_planner_{os.getuid()}.sock"
 
 # Spawn / connect timeouts
 _SPAWN_TIMEOUT_S = 30.0   # generous: includes mplib first-time SRDF generation
-_RECV_TIMEOUT_S = 60.0    # plan_batch with planning_time=0.5s, n=8 → < 5s
+# Per-request recv timeout — bounds how long the client waits on one daemon
+# response. Daemon's plan_batch has its OWN wall-budget (planning_time × 2 + 2s)
+# and returns empty on internal timeout, so this just needs to cover daemon
+# round-trip plus a small slack. 8s is plenty for default 0.5s planning_time.
+_RECV_TIMEOUT_S = 8.0
 
 
 class PlanServiceError(RuntimeError):

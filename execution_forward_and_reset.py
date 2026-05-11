@@ -378,6 +378,16 @@ class ForwardAndResetPipeline(BasePipeline):
         if not skill_raw.get("enabled", False):
             return
 
+        # Backend choice (yaml key `perturbation.skill.backend`):
+        #   - "ompl"   (default): OMPL via mplib_env subprocess daemon.
+        #   - "curobo": GPU-accelerated curobo, in-process (no daemon).
+        # Both expose the same plan_batch(start, goal, n, rng) signature so
+        # skills_lerobot.set_skill_planner_client treats them identically.
+        backend_name = str(skill_raw.get("backend", "ompl")).lower()
+        if backend_name not in ("ompl", "curobo"):
+            print(f"[Skill Perturbation] unknown backend {backend_name!r}; defaulting to ompl")
+            backend_name = "ompl"
+
         try:
             from perturbation.skill_level import PlanServiceClient
         except Exception as e:
@@ -416,6 +426,7 @@ class ForwardAndResetPipeline(BasePipeline):
             planning_time=float(skill_raw.get("planning_time", 0.5)),
             waypoint_density=float(skill_raw.get("waypoint_density", 0.02)),
             workspace=skill_raw.get("workspace") or None,
+            fixed_joint_indices=tuple(skill_raw.get("fixed_joint_indices") or ()),
         )
         # Normalize workspace nested types (yaml gives lists; the dataclass
         # defaults are tuples, but mplib accepts both).
@@ -438,40 +449,87 @@ class ForwardAndResetPipeline(BasePipeline):
         socket_path = f"/tmp/lerobot_planner_{_os.getuid()}_{robot_id}.sock"
 
         try:
-            client = PlanServiceClient(
-                urdf=urdf_path,
-                config=planner_cfg,
-                socket_path=socket_path,
-                n_workers=int(skill_raw.get("n_workers", 4)),
-                autospawn=True,
-            )
-            self._skill_planner_client = client
-            self._skills.set_skill_planner_client(
-                client, n_candidates=int(skill_raw.get("n_candidates", 4)),
-            )
-            print(
-                f"[Skill Perturbation] OMPL ensemble ENABLED "
-                f"(algos={planner_cfg['algorithms']}, n_candidates={skill_raw.get('n_candidates', 4)}, "
-                f"socket={socket_path})"
-            )
+            if backend_name == "curobo":
+                # ── curobo backend: in-process, no daemon, no IPC. ───────────
+                from perturbation.skill_level import get_curobo_backend
+                CuroboBackend, CuroboBackendConfig = get_curobo_backend()
+                # YAML may specify a custom curobo robot config path; fall back
+                # to the auto-generated default under robot_configs/curobo/
+                default_curobo_cfg = str(
+                    Path(self.recording_config).resolve().parent.parent
+                    / "robot_configs" / "curobo" / f"{robot_id}.yml"
+                )
+                curobo_cfg_path = skill_raw.get("curobo_robot_cfg_path") or default_curobo_cfg
+                if not Path(curobo_cfg_path).exists():
+                    print(
+                        f"[Skill Perturbation] curobo robot config missing: "
+                        f"{curobo_cfg_path}\n  Generate via: "
+                        f"python -m curobo.examples.getting_started.build_robot_model "
+                        f"--urdf {urdf_path} --output {curobo_cfg_path}"
+                    )
+                    return
+                cb_cfg = CuroboBackendConfig(
+                    enabled=True,
+                    robot_cfg_path=curobo_cfg_path,
+                    num_trajopt_seeds=int(skill_raw.get("curobo_num_trajopt_seeds", 4)),
+                    num_ik_seeds=int(skill_raw.get("curobo_num_ik_seeds", 16)),
+                    use_cuda_graph=bool(skill_raw.get("curobo_use_cuda_graph", False)),
+                    via_offset_mag=float(skill_raw.get("curobo_via_offset_mag", 0.10)),
+                    junction_smooth_k=int(skill_raw.get("curobo_junction_smooth_k", 5)),
+                    fixed_joint_indices=tuple(skill_raw.get("fixed_joint_indices") or ()),
+                    arm_joint_count=int(skill_raw.get("arm_joint_count", 5)),
+                )
+                client = CuroboBackend(urdf=urdf_path, config=cb_cfg)
+                self._skill_planner_client = client
+                self._skills.set_skill_planner_client(
+                    client, n_candidates=int(skill_raw.get("n_candidates", 4)),
+                )
+                print(
+                    f"[Skill Perturbation] CUROBO backend ENABLED "
+                    f"(robot_cfg={curobo_cfg_path}, n_candidates={skill_raw.get('n_candidates', 4)})"
+                )
+            else:
+                # ── OMPL backend (default): subprocess daemon. ───────────────
+                client = PlanServiceClient(
+                    urdf=urdf_path,
+                    config=planner_cfg,
+                    socket_path=socket_path,
+                    n_workers=int(skill_raw.get("n_workers", 4)),
+                    autospawn=True,
+                )
+                self._skill_planner_client = client
+                self._skills.set_skill_planner_client(
+                    client, n_candidates=int(skill_raw.get("n_candidates", 4)),
+                )
+                print(
+                    f"[Skill Perturbation] OMPL ensemble ENABLED "
+                    f"(algos={planner_cfg['algorithms']}, n_candidates={skill_raw.get('n_candidates', 4)}, "
+                    f"socket={socket_path})"
+                )
             # Apply pending per-episode seed (mirror subgoal setup). The RNG
             # check in skills_lerobot.move_to_position swap requires this.
             pending = getattr(self, "_pending_perturbation_seed", None)
             if pending is not None:
                 self._skills.set_perturbation_rng(pending)
         except Exception as e:
-            print(f"[Skill Perturbation] Failed to start daemon: {e}")
+            print(f"[Skill Perturbation] Failed to init backend {backend_name!r}: {e}")
             self._skill_planner_client = None
 
     def _teardown_skill_perturbation(self) -> None:
-        """Cleanly shut down the PlanServiceClient and its daemon."""
+        """Shut down whichever backend was attached (OMPL daemon or curobo).
+
+        Both backends are duck-typed; we call ``close()`` if it exists
+        (PlanServiceClient does, CuroboBackend doesn't — GPU resources are
+        reclaimed when the process exits).
+        """
         client = getattr(self, "_skill_planner_client", None)
         if client is None:
             return
-        try:
-            client.close()
-        except Exception:
-            pass
+        if hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
         self._skill_planner_client = None
         if hasattr(self, "_skills") and self._skills is not None:
             try:

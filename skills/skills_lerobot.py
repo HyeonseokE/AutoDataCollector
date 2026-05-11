@@ -1823,8 +1823,37 @@ class LeRobotSkills:
                 # Constant velocity used for ALL OMPL transits, every algorithm.
                 OMPL_VELOCITY_FACTOR = 1.5
                 ompl_max_v = OMPL_VELOCITY_FACTOR * planner_max_v
+                # EE Cartesian velocity cap (m/s). The straight-path case
+                # (BITstar/PRMstar) is joint-velocity-bound and produces a
+                # natural EE speed of roughly (joint_max_v) × (typical Jacobian
+                # magnitude) ≈ 1.5 rad/s × 0.10 m/rad = 0.15 m/s. Setting the
+                # EE cap above this would let curved (RRTConnect-style) paths
+                # whose EE arc is longer than the joint motion run FASTER in
+                # m/s than straight paths — which is the very mismatch the
+                # cap was supposed to eliminate. So we set the cap AT the
+                # natural straight-path EE speed: both bindings active
+                # simultaneously, EE speed identical across all algorithms.
+                OMPL_MAX_EE_VELOCITY = 0.15  # m/s
                 seg_lens = np.linalg.norm(np.diff(new_joints, axis=0), axis=1)
-                seg_times = seg_lens / max(ompl_max_v, 1e-6)
+                # Joint-velocity bound: t_joint = joint_seg_len / max_joint_vel
+                t_joint = seg_lens / max(ompl_max_v, 1e-6)
+                # EE-velocity bound: t_ee = ||diff(ee_xyz)|| / max_ee_vel
+                try:
+                    ee_xyz = np.asarray([
+                        active_planner.kinematics.get_ee_position(np.asarray(q, dtype=float))
+                        for q in new_joints
+                    ])
+                    ee_seg_lens = np.linalg.norm(np.diff(ee_xyz, axis=0), axis=1)
+                    t_ee = ee_seg_lens / max(OMPL_MAX_EE_VELOCITY, 1e-6)
+                except Exception as _e:
+                    self._log(f"  [Skill Perturbation] FK for EE-vel cap failed ({_e}); joint-only")
+                    t_ee = np.zeros_like(t_joint)
+                # Each segment gets the LONGER duration (i.e., the more
+                # conservative of the two limits). Where Jacobian is well-
+                # conditioned, joint binding wins; where Jacobian is bad,
+                # EE binding kicks in and the joint slows down to keep EE
+                # under the Cartesian cap.
+                seg_times = np.maximum(t_joint, t_ee)
                 new_ts = np.concatenate([[0.0], np.cumsum(seg_times)])
                 trajectory.joint_positions = new_joints
                 trajectory.timestamps = new_ts

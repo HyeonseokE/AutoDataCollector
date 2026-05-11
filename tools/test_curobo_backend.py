@@ -91,7 +91,7 @@ def main() -> int:
     s_ee, s_q = backend._compute_ee_xyz_quat(start_full)
     g_ee, g_q = backend._compute_ee_xyz_quat(goal_full)
     rng_t = np.random.default_rng(11)
-    via_xyzs = [backend._sample_via_xyz(s_ee, g_ee, k, rng_t) for k in range(3)]
+    via_xyzs = [backend._sample_via_xyz(s_ee, g_ee, rng_t) for _ in range(3)]
 
     # (a) Old path: 3 separate IK calls (each goalset=5 internally).
     t0 = time.time()

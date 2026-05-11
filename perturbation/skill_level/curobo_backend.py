@@ -36,20 +36,29 @@ import numpy as np
 from perturbation.skill_level.planner import TrajectoryCandidate
 
 
-# Each preset is (line_dir_scale, perp_lateral_scale, perp_vertical_scale).
-# Magnitudes are multiplied by ``CuroboBackendConfig.via_offset_mag`` (m).
+# Via-point sampling is fully continuous (no discrete mode table). Each via
+# is parameterized by three random scalars per candidate:
 #
-# Order matters: when ``plan_batch(n)`` is called with n < len(VIA_OFFSETS),
-# only the FIRST (n-1) modes are used (after the direct candidate). We put
-# the most reliably-reachable modes first (vertical / near-direct), since
-# SO-101's 5-DoF arm has limited lateral-orientation feasibility — large
-# perpendicular offsets often fail IK regardless of orientation guess.
-VIA_OFFSETS = (
-    (0.0,  0.00, +1.20),   # high arc (purely vertical — most reachable)
-    (0.0, -0.60, +0.50),   # left + medium-high
-    (0.0, +0.60, +0.50),   # right + medium-high
-    (0.0,  0.00, +0.30),   # mild arc (small vertical perturbation)
-)
+#   t    ∈ [VIA_T_MIN, VIA_T_MAX]        — fraction along start→goal line
+#                                          (default 0.2..0.8 — not too close
+#                                          to either endpoint so the via
+#                                          actually bends the trajectory)
+#   lat  ∈ [-mag, +mag]                   — perpendicular lateral displacement
+#                                          (left/right of the line, uniform —
+#                                          symmetric so neither side is favored)
+#   vert ∈ [+0.3·mag, +1.2·mag]           — vertical displacement (biased
+#                                          upward — SO-101 5-DoF reaches
+#                                          above-the-line trajectories
+#                                          much more reliably than below)
+#
+# This replaces the previous 4-entry hardcoded VIA_OFFSETS table, which
+# clipped diversity at N>4 (modes wrapped via modulo with only small RNG
+# noise). Continuous sampling provides O(N) genuinely distinct via
+# locations across the full reachable arc.
+VIA_T_MIN = 0.2
+VIA_T_MAX = 0.8
+VIA_VERT_MIN_RATIO = 0.3   # of via_offset_mag
+VIA_VERT_MAX_RATIO = 1.2
 
 
 @dataclass
@@ -261,8 +270,7 @@ class CuroboBackend:
 
         via_xyz_list: list[np.ndarray] = [None]  # placeholder for slot 0 (direct)
         for k in range(1, n):
-            mode_idx = (k - 1) % len(VIA_OFFSETS)
-            via_xyz_list.append(self._sample_via_xyz(start_ee, goal_ee, mode_idx, rng))
+            via_xyz_list.append(self._sample_via_xyz(start_ee, goal_ee, rng))
 
         # Batched IK for slots 1..n-1 (slot 0 uses goal_qpos itself).
         # (n-1) vias × len(slerp_ratios) orientations are submitted as a
@@ -325,7 +333,7 @@ class CuroboBackend:
                 if seg2 is None:
                     continue  # via candidate failed seg2
                 full_wp = self._smooth_junction(seg1, seg2, k=self.cfg.junction_smooth_k)
-                algo_name = f"curobo:via{(i-1) % len(VIA_OFFSETS)}"
+                algo_name = f"curobo:via{i-1}"
 
             # Step 5: enforce fixed joints across the full trajectory (post-lock).
             full_wp = self._apply_fixed_joint_lock(full_wp, start_full)
@@ -386,27 +394,50 @@ class CuroboBackend:
         self,
         start_ee: np.ndarray,
         goal_ee: np.ndarray,
-        mode_idx: int,
         rng: np.random.Generator,
     ) -> np.ndarray:
-        midpoint = (start_ee + goal_ee) / 2.0
+        """Continuous random via-point sampling.
+
+        Parametrization::
+
+            via = (1-t)·start_ee + t·goal_ee + lat·perp_lat + vert·perp_vert
+
+        where (t, lat, vert) are independently sampled from continuous
+        distributions per call (see module-level VIA_T_MIN/MAX,
+        VIA_VERT_MIN_RATIO/MAX_RATIO constants). No discrete mode index —
+        each call to this method produces a genuinely unique via location.
+        """
+        # 1. Fraction along the line (NOT clipped to 0.5/midpoint — anywhere
+        #    in [VIA_T_MIN, VIA_T_MAX]). t closer to endpoints produces
+        #    asymmetric paths (long approach + short retreat or vice versa).
+        t = float(rng.uniform(VIA_T_MIN, VIA_T_MAX))
+        via_base = (1.0 - t) * start_ee + t * goal_ee
+
         line = goal_ee - start_ee
         line_len = float(np.linalg.norm(line))
         if line_len < 1e-6:
-            return midpoint + np.array([0.0, self.cfg.via_offset_mag, 0.0])
+            return via_base + np.array([0.0, self.cfg.via_offset_mag, 0.0])
         line_dir = line / line_len
-        # Build perpendicular basis (project world-y and world-z onto plane ⊥ line)
+
+        # Build perpendicular basis (project world-y and world-z onto plane ⊥ line).
         perp_lat = np.array([0.0, 1.0, 0.0]) - np.dot([0.0, 1.0, 0.0], line_dir) * line_dir
         if np.linalg.norm(perp_lat) < 1e-6:
             perp_lat = np.array([1.0, 0.0, 0.0]) - np.dot([1.0, 0.0, 0.0], line_dir) * line_dir
         perp_lat /= max(np.linalg.norm(perp_lat), 1e-9)
         perp_vert = np.array([0.0, 0.0, 1.0]) - np.dot([0.0, 0.0, 1.0], line_dir) * line_dir
         perp_vert /= max(np.linalg.norm(perp_vert), 1e-9)
-        d_line, d_lat, d_vert = VIA_OFFSETS[mode_idx]
+
+        # 2. Lateral offset — symmetric uniform [-mag, +mag] (left/right equal).
         mag = self.cfg.via_offset_mag
-        offset = (d_line * mag) * line_dir + (d_lat * mag) * perp_lat + (d_vert * mag) * perp_vert
-        offset += rng.normal(0.0, 0.003, size=3)
-        return midpoint + offset
+        lat = float(rng.uniform(-mag, +mag))
+
+        # 3. Vertical offset — uniform [+0.3·mag, +1.2·mag], biased upward
+        #    because the 5-DoF arm reaches above-line vias far more reliably.
+        vert = float(rng.uniform(
+            VIA_VERT_MIN_RATIO * mag, VIA_VERT_MAX_RATIO * mag,
+        ))
+
+        return via_base + lat * perp_lat + vert * perp_vert
 
     @staticmethod
     def _slerp_quat(q1: np.ndarray, q2: np.ndarray, t: float) -> np.ndarray:

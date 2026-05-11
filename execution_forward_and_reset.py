@@ -526,9 +526,9 @@ class ForwardAndResetPipeline(BasePipeline):
     def _teardown_skill_perturbation(self) -> None:
         """Shut down whichever backend was attached (OMPL daemon or curobo).
 
-        Both backends are duck-typed; we call ``close()`` if it exists
-        (PlanServiceClient does, CuroboBackend doesn't — GPU resources are
-        reclaimed when the process exits).
+        Both backends expose ``close()`` (PlanServiceClient terminates its
+        daemon subprocess; CuroboBackend drops planner state + frees CUDA
+        graph memory). Called between pipeline sessions and on Ctrl+C.
         """
         client = getattr(self, "_skill_planner_client", None)
         if client is None:

@@ -168,6 +168,38 @@ class CuroboBackend:
     def dof(self) -> int:
         return self._n_arm
 
+    def close(self) -> None:
+        """Release GPU resources held by curobo (CUDA graphs, trajopt/IK
+        solver state, kinematics tables).
+
+        Process exit normally reclaims VRAM on its own, but two cases need
+        explicit cleanup:
+          (a) Long-lived parent processes that spin up + tear down backends
+              between sessions (e.g. multi-task data collection pipelines).
+          (b) Crashes / SIGKILL during plan_batch — CUDA graph memory and
+              cached allocator buffers can otherwise leak until reboot.
+
+        Duck-types ``PlanServiceClient.close`` so the pipeline's
+        ``_teardown_skill_perturbation`` can call it uniformly.
+        """
+        torch = self._torch
+        # Drop references to GPU-resident objects first so torch's caching
+        # allocator knows they're collectable.
+        for attr in (
+            "_planner", "_default_full", "_interp_dt",
+        ):
+            if hasattr(self, attr):
+                try:
+                    setattr(self, attr, None)
+                except Exception:
+                    pass
+        # Force the allocator to release reserved-but-unallocated blocks.
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+
     def plan_batch(
         self,
         start_qpos: np.ndarray,

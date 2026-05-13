@@ -56,6 +56,7 @@ def setup_preselective_filter(
     buffer_cfg = section.get("buffer") or {}
     selector_cfg = section.get("selector") or {}
     adapter_cfg = section.get("adapter") or {}
+    debug_verbose = bool(section.get("debug_verbose", False))
 
     # ---- Load SmolVLA policy + preprocessor via lerobot factory ----
     checkpoint = policy_cfg.get("checkpoint")
@@ -64,7 +65,11 @@ def setup_preselective_filter(
             "preselective_filter.policy.checkpoint is required when enabled"
         )
     device = policy_cfg.get("device", "cuda")
+    print(
+        f"[preselective_filter] loading SmolVLA checkpoint='{checkpoint}' device={device} ..."
+    )
     policy, preprocessor = _load_smolvla(checkpoint, device)
+    print("[preselective_filter] SmolVLA loaded")
 
     # ---- Build adapter ----
     adapter = SmolVLAAdapter(
@@ -74,6 +79,7 @@ def setup_preselective_filter(
             n_fm_mc_samples=int(adapter_cfg.get("n_fm_mc_samples", 8)),
             z_pool=str(adapter_cfg.get("z_pool", "mean")),
             device=device,
+            debug_verbose=debug_verbose,
         ),
     )
 
@@ -83,19 +89,24 @@ def setup_preselective_filter(
         raise ValueError(
             "preselective_filter.buffer.root is required when enabled"
         )
-    buffer = JsonlBufferStore(root=Path(buffer_root))
+    buffer = JsonlBufferStore(root=Path(buffer_root), debug_verbose=debug_verbose)
+    print(f"[preselective_filter] buffer root={buffer_root}")
 
     # ---- Build selector ----
-    selector = Selector(
-        policy=adapter,
-        buffer=buffer,
-        config=SelectorConfig(
-            alpha=float(selector_cfg.get("alpha", 0.5)),
-            lam=float(selector_cfg.get("lam", 0.5)),
-            n_vla_samples=int(selector_cfg.get("n_vla_samples", 8)),
-            max_modes=selector_cfg.get("max_modes"),  # None or int
-            context_k=int(selector_cfg.get("context_k", 8)),
-        ),
+    sel_config = SelectorConfig(
+        alpha=float(selector_cfg.get("alpha", 0.5)),
+        lam=float(selector_cfg.get("lam", 0.5)),
+        n_vla_samples=int(selector_cfg.get("n_vla_samples", 8)),
+        max_modes=selector_cfg.get("max_modes"),  # None or int
+        context_k=int(selector_cfg.get("context_k", 8)),
+        debug_verbose=debug_verbose,
+    )
+    selector = Selector(policy=adapter, buffer=buffer, config=sel_config)
+    print(
+        f"[preselective_filter] Selector ready: "
+        f"α={sel_config.alpha} λ={sel_config.lam} "
+        f"M={sel_config.n_vla_samples} k={sel_config.context_k} "
+        f"N_b={adapter.config.n_fm_mc_samples} debug_verbose={debug_verbose}"
     )
     return selector
 

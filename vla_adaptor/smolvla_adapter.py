@@ -15,6 +15,7 @@ Implementation notes:
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,7 @@ class SmolVLAAdapterConfig:
     n_fm_mc_samples: int = 8   # N_b — (ε, t) Monte Carlo samples for L_FM
     z_pool: str = "mean"       # decision #2a — only "mean" supported in v1
     device: str = "cuda"
+    debug_verbose: bool = False  # P1 logging — per-call timing + L_FM range
 
 
 class SmolVLAAdapter:
@@ -89,6 +91,7 @@ class SmolVLAAdapter:
         """Returns (L_FM averaged over N_b MC samples, mean-pooled z, mean-pooled c_m)."""
         device = self.config.device
         N_b = self.config.n_fm_mc_samples
+        t_start = time.perf_counter() if self.config.debug_verbose else 0.0
 
         # 1. Build a batch with a single sample, then preprocess (tokenize, etc.)
         batch = self._build_single_sample_batch(context, action_chunk)
@@ -116,6 +119,13 @@ class SmolVLAAdapter:
         prefix_embs = self._captured["prefix_embs"]  # (N_b, prefix_len, H_expert)
         c_m = prefix_embs.mean(dim=(0, 1)).float().cpu().numpy()
 
+        if self.config.debug_verbose:
+            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            print(
+                f"[preselective_filter]   forward_fm N_b={N_b}: {elapsed_ms:.1f}ms "
+                f"L_FM={l_fm:.4f} z_dim={z.shape[0]} c_m_dim={c_m.shape[0]}"
+            )
+
         return FMOutput(l_fm=l_fm, z=z, c_m=c_m)
 
     # ------------------------------------------------------------------
@@ -127,6 +137,7 @@ class SmolVLAAdapter:
     ) -> list[ActionChunk]:
         """Returns n_samples action chunks ~ π₀(·|context) via batched denoising."""
         device = self.config.device
+        t_start = time.perf_counter() if self.config.debug_verbose else 0.0
 
         # 1. Build single-sample batch + preprocess
         batch = self._build_single_sample_batch(context, action_chunk=None)
@@ -152,7 +163,16 @@ class SmolVLAAdapter:
 
         # 5. Strip padding to real action_dim (max_action_dim is zero-padded)
         chunks = chunks[..., : cfg.max_action_dim]
-        return [c.float().cpu().numpy() for c in chunks]
+        out = [c.float().cpu().numpy() for c in chunks]
+
+        if self.config.debug_verbose:
+            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            print(
+                f"[preselective_filter]   sample_actions M={n_samples}: "
+                f"{elapsed_ms:.1f}ms chunk_shape={out[0].shape}"
+            )
+
+        return out
 
     # ------------------------------------------------------------------
     # Helpers

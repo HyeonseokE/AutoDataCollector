@@ -89,24 +89,41 @@ def _deserialize_entry(obj: dict) -> BufferEntry:
 class JsonlBufferStore:
     """BufferStore implementation backed by per-skill jsonl files."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, debug_verbose: bool = False) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.debug_verbose = debug_verbose
 
     def _path(self, skill_id: SkillId) -> Path:
         # skill_id may contain characters unsafe for filenames; sanitize lightly.
         safe = str(skill_id).replace("/", "_").replace(" ", "_")
         return self.root / f"{safe}.jsonl"
 
+    def _count_lines(self, path: Path) -> int:
+        if not path.exists():
+            return 0
+        with path.open("rb") as f:
+            return sum(1 for _ in f)
+
     def append(self, entry: BufferEntry) -> None:
         path = self._path(entry.context.skill_id)
         line = json.dumps(_serialize_entry(entry), ensure_ascii=False)
         with path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
+        if self.debug_verbose:
+            total = self._count_lines(path)
+            print(
+                f"[preselective_filter]   buffer.append skill={entry.context.skill_id} "
+                f"→ {path.name} (now {total} entries)"
+            )
 
     def query_skill(self, skill_id: SkillId) -> list[BufferEntry]:
         path = self._path(skill_id)
         if not path.exists():
+            if self.debug_verbose:
+                print(
+                    f"[preselective_filter]   buffer.query_skill({skill_id}) → 0 (no file)"
+                )
             return []
         out: list[BufferEntry] = []
         with path.open("r", encoding="utf-8") as f:
@@ -115,6 +132,10 @@ class JsonlBufferStore:
                 if not line:
                     continue
                 out.append(_deserialize_entry(json.loads(line)))
+        if self.debug_verbose:
+            print(
+                f"[preselective_filter]   buffer.query_skill({skill_id}) → {len(out)} entries"
+            )
         return out
 
     def nearest_by_context(
@@ -148,4 +169,11 @@ class JsonlBufferStore:
         idx = np.argpartition(cos_dist, top_k - 1)[:top_k]
         # Sort the top_k indices by distance ascending
         idx = idx[np.argsort(cos_dist[idx])]
-        return [entries[i] for i in idx]
+        result = [entries[i] for i in idx]
+        if self.debug_verbose:
+            top_d = float(cos_dist[idx[0]])
+            print(
+                f"[preselective_filter]   buffer.nearest_by_context(skill={skill_id}, k={k}) "
+                f"→ {len(result)} entries (top_cosine_dist={top_d:.4f})"
+            )
+        return result

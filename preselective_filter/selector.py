@@ -31,6 +31,7 @@ class SelectorConfig:
     max_modes: int | None = None  # R — mode-set clustering target; None = identity
     context_k: int = 8            # k — context-kNN size for AC_buffer
     eps: float = 1e-8
+    debug_verbose: bool = False   # P1 logging — per-candidate ScoreReport dump
 
 
 class Selector:
@@ -115,6 +116,34 @@ class Selector:
         # 5. Final score + argmax
         scores = [float(ig[i] * ac[i]) for i in range(K)]
         chosen_index = int(np.argmax(scores))
+
+        # P0 — always-on summary (one line per skill step)
+        cold_n = not buffer_entries
+        cold_ac = not neighbors
+        cold_tag = ""
+        if cold_n and cold_ac:
+            cold_tag = " [cold:N+AC_buf]"
+        elif cold_n:
+            cold_tag = " [cold:N_buf]"
+        elif cold_ac:
+            cold_tag = " [cold:AC_buf]"
+        print(
+            f"[preselective_filter] skill={skill_id} K={K} → chose idx={chosen_index} "
+            f"(score={scores[chosen_index]:.4f}){cold_tag}"
+        )
+
+        # P1 — verbose per-candidate dump
+        if cfg.debug_verbose:
+            for i in range(K):
+                marker = " *" if i == chosen_index else ""
+                print(
+                    f"[preselective_filter]   idx={i}: "
+                    f"U={u_values[i]:.3f}→{u_norm[i]:.3f} "
+                    f"N={n_values[i]:.3f}→{n_norm[i]:.3f} | IG={ig[i]:.3f} | "
+                    f"dM={d_model[i]:.3f}→{ac_model[i]:.3f} "
+                    f"dB={d_buffer[i]:.3f}→{ac_buffer[i]:.3f} | AC={ac[i]:.3f} | "
+                    f"score={scores[i]:.4f}{marker}"
+                )
 
         # 6. Per-candidate reports
         reports = [

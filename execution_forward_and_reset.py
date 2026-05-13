@@ -311,6 +311,10 @@ class ForwardAndResetPipeline(BasePipeline):
         # Skill-level perturbation (OMPL ensemble via daemon). Same gating as
         # subgoal — the daemon only spawns when skill.enabled == true.
         self._setup_skill_perturbation_on_skills()
+        # Method 3: pre-selective acquisition. Wraps the RNG candidate pick
+        # with an IG·AC selector backed by SmolVLA + a per-skill jsonl buffer.
+        # Silent no-op when preselective_filter.enabled is false.
+        self._setup_preselective_filter_on_skills()
 
         return self._skills
 
@@ -545,6 +549,78 @@ class ForwardAndResetPipeline(BasePipeline):
         if hasattr(self, "_skills") and self._skills is not None:
             try:
                 self._skills.set_skill_planner_client(None)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Method 3 — pre-selective acquisition (preselective_filter)
+    # ------------------------------------------------------------------
+    def _setup_preselective_filter_on_skills(self) -> None:
+        """Read preselective_filter from recording_config and wire a hook.
+
+        Silent no-op when recording_config is absent or
+        preselective_filter.enabled is false. When enabled, loads SmolVLA
+        via vla_adaptor.setup_preselective_filter, captures the resulting
+        Selector + a per-call context provider, and attaches a candidate
+        selector hook to skills via ``set_skill_candidate_selector``.
+
+        See vla_adaptor/INTEGRATION_GUIDE.md for the design rationale.
+        """
+        self._preselective_selector = None
+        self._preselective_pending = []  # [(ctx, selection), ...] for add_to_buffer
+        if not self.recording_config:
+            return
+        cfg_path = Path(self.recording_config)
+        if not cfg_path.exists():
+            return
+        try:
+            import yaml as _yaml
+            with open(cfg_path, "r") as f:
+                full_cfg = _yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[preselective_filter] failed to read recording_config: {e}")
+            return
+        if not (full_cfg.get("preselective_filter") or {}).get("enabled", False):
+            return
+        try:
+            from vla_adaptor import setup_preselective_filter
+            selector = setup_preselective_filter(full_cfg)
+        except Exception as e:
+            print(f"[preselective_filter] setup failed: {e}; disabling")
+            return
+        if selector is None:
+            return
+        self._preselective_selector = selector
+
+        # Note: the candidate selector hook itself requires a per-call
+        # context provider (current obs/state/instruction/skill_id/gripper).
+        # The provider closure is constructed during episode setup where
+        # the orchestrator has access to those values. For now the selector
+        # is held on self; the hook installation is deferred to the episode
+        # loop wiring. See INTEGRATION_GUIDE.md "context-provider gap".
+        if hasattr(self, "_skills") and self._skills is not None:
+            try:
+                # No-op default hook — returns None → skills falls back to RNG.
+                # Real hook gets installed by the episode loop when ready.
+                self._skills.set_skill_candidate_selector(None)
+            except Exception:
+                pass
+        print("[preselective_filter] selector ready (hook installation pending)")
+
+    def _teardown_preselective_filter(self) -> None:
+        """Release SmolVLA + buffer resources at session end."""
+        sel = getattr(self, "_preselective_selector", None)
+        if sel is None:
+            return
+        try:
+            from vla_adaptor import teardown_preselective_filter
+            teardown_preselective_filter(sel)
+        except Exception:
+            pass
+        self._preselective_selector = None
+        if hasattr(self, "_skills") and self._skills is not None:
+            try:
+                self._skills.set_skill_candidate_selector(None)
             except Exception:
                 pass
 
@@ -784,6 +860,7 @@ class ForwardAndResetPipeline(BasePipeline):
         # Skill-level perturbation: shut down OMPL daemon if it was spawned
         try:
             self._teardown_skill_perturbation()
+            self._teardown_preselective_filter()
         except Exception as e:
             print(f"[Recording] Warning: skill perturbation teardown failed: {e}")
 

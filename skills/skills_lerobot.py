@@ -207,6 +207,13 @@ class LeRobotSkills:
         # for an OMPL joint-space candidate randomly drawn from a batch.
         # See perturbation/skill_level.
         self._skill_planner_client = None     # PlanServiceClient or None
+        # Skill candidate selector hook (Method 3 / preselective_filter).
+        # When set, it overrides the default RNG choice over OMPL/curobo
+        # plan_batch results. Signature:
+        #   fn(cands, current_joints, goal_joint_rad, is_transit) -> int | None
+        # Return None to fall back to RNG. See vla_adaptor for the production
+        # selector wiring.
+        self._skill_candidate_selector = None
         self._skill_planner_n_candidates = 4  # batch size; fallback to old path on empty
 
         # Caller positions reference for detect_objects auto-merge / label
@@ -232,6 +239,17 @@ class LeRobotSkills:
     # ─────────────────────────────────────────────
     # Skill-level perturbation hooks (OMPL via daemon)
     # ─────────────────────────────────────────────
+    def set_skill_candidate_selector(self, selector_fn) -> None:
+        """Attach a candidate-selection hook. Pass None to detach.
+
+        When attached, the per-call hook replaces the default RNG-uniform
+        pick over plan_batch candidates. Signature:
+            fn(cands, current_joints, goal_joint_rad, is_transit) -> int | None
+        Returning None defers to the RNG fallback (e.g., the hook decides
+        this call is out-of-scope).
+        """
+        self._skill_candidate_selector = selector_fn
+
     def set_skill_planner_client(self, client, n_candidates: int = 4) -> None:
         """Attach a PlanServiceClient. Pass None to detach.
 
@@ -1801,7 +1819,22 @@ class LeRobotSkills:
                 self._log(f"  [Skill Perturbation] daemon error, fallback to cartesian: {e}")
 
             if cands:
-                idx = int(self._perturbation_rng.integers(0, len(cands)))
+                # Candidate selection. Default: RNG uniform over batch.
+                # If a preselective hook is attached, it gets first refusal —
+                # may return an index (use it) or None (defer to RNG).
+                idx = None
+                if self._skill_candidate_selector is not None:
+                    try:
+                        idx = self._skill_candidate_selector(
+                            cands, current_joints, goal_joint_rad, is_transit,
+                        )
+                    except Exception as e:
+                        self._log(
+                            f"  [Skill Perturbation] selector hook failed: {e}; RNG fallback"
+                        )
+                        idx = None
+                if idx is None:
+                    idx = int(self._perturbation_rng.integers(0, len(cands)))
                 chosen = cands[idx]
                 self._log(
                     f"  [Skill Perturbation] {chosen.algo} "

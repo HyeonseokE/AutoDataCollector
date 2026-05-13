@@ -263,24 +263,46 @@ class LeRobotSkills:
         self._skill_planner_n_candidates = max(1, int(n_candidates))
 
     def perturbation_disabled(self):
-        """Context manager that temporarily detaches perturbation.
+        """Backward-compat alias: subgoal perturbation only.
 
-        Used by the pipeline to skip perturbation during reset execution
-        while keeping forward execution perturbed::
+        New code should prefer ``systems_disabled(subgoal=True, ...)`` for
+        finer control over which subsystem to disable per pipeline phase.
+        """
+        return self.systems_disabled(subgoal=True)
 
-            with skills.perturbation_disabled():
+    def systems_disabled(
+        self,
+        subgoal: bool = False,
+        skill_planner: bool = False,
+        preselective: bool = False,
+    ):
+        """Temporarily detach the named subsystems.
+
+        Used by the pipeline to apply phase-specific gating (typically
+        "disable forward-only systems during reset")::
+
+            with skills.systems_disabled(subgoal=True, preselective=True):
                 self.execute_code(reset_code, ...)
         """
         from contextlib import contextmanager
 
         @contextmanager
         def _ctx():
-            saved = self._perturbation
-            self._perturbation = None
+            saved: dict = {}
+            if subgoal:
+                saved["_perturbation"] = self._perturbation
+                self._perturbation = None
+            if skill_planner:
+                saved["_skill_planner_client"] = self._skill_planner_client
+                self._skill_planner_client = None
+            if preselective:
+                saved["_skill_candidate_selector"] = self._skill_candidate_selector
+                self._skill_candidate_selector = None
             try:
                 yield
             finally:
-                self._perturbation = saved
+                for attr, val in saved.items():
+                    setattr(self, attr, val)
 
         return _ctx()
 

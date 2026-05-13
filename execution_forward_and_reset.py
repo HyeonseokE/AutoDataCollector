@@ -318,11 +318,54 @@ class ForwardAndResetPipeline(BasePipeline):
 
         return self._skills
 
+    # ------------------------------------------------------------------
+    # Phase-flag helpers (enabled_forward / enabled_reset)
+    # ------------------------------------------------------------------
+    def _read_phase_flags(
+        self, section: dict, default_fwd: bool = True, default_reset: bool = False,
+    ) -> tuple[bool, bool, bool]:
+        """Parse enabled_forward / enabled_reset with legacy `enabled` fallback.
+
+        Returns (any_phase_enabled, enabled_forward, enabled_reset).
+
+        - If either new key is present, use them (defaults applied to the missing one).
+        - Else if legacy `enabled` is present, map to (enabled, default_reset).
+          This preserves the historical pattern: `enabled: true` → forward-only.
+        - Else both False (section disabled).
+        """
+        if not section:
+            return (False, False, False)
+        if "enabled_forward" in section or "enabled_reset" in section:
+            fwd = bool(section.get("enabled_forward", default_fwd))
+            reset = bool(section.get("enabled_reset", default_reset))
+        elif "enabled" in section:
+            fwd = bool(section["enabled"])
+            reset = default_reset
+        else:
+            return (False, False, False)
+        return (fwd or reset, fwd, reset)
+
+    def _phase_gate(self, phase: str):
+        """Return a context manager that disables systems whose flag is false for `phase`.
+
+        Reads cached phase flags set during the 3 _setup_* methods. If a system
+        wasn't attached, its disable is a no-op (system is None already).
+        """
+        sg = getattr(self, "_subgoal_phase", {"forward": False, "reset": False})
+        sk = getattr(self, "_skill_planner_phase", {"forward": False, "reset": False})
+        pf = getattr(self, "_preselective_phase", {"forward": False, "reset": False})
+        return self._skills.systems_disabled(
+            subgoal=not sg.get(phase, False),
+            skill_planner=not sk.get(phase, False),
+            preselective=not pf.get(phase, False),
+        )
+
     def _setup_perturbation_on_skills(self) -> None:
         """Read perturbation.subgoal from recording_config.yaml and wire to skills.
 
         Silent no-op when recording_config is absent or perturbation is disabled.
         """
+        self._subgoal_phase = {"forward": False, "reset": False}
         if not self.recording_config:
             return
         cfg_path = Path(self.recording_config)
@@ -336,8 +379,10 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Perturbation] Failed to read recording_config: {e}")
             return
         pert_raw = (full_cfg.get("perturbation") or {}).get("subgoal") or {}
-        if not pert_raw.get("enabled", False):
+        any_en, fwd, reset = self._read_phase_flags(pert_raw)
+        if not any_en:
             return
+        self._subgoal_phase = {"forward": fwd, "reset": reset}
         try:
             from perturbation.subgoal_level import (
                 SubgoalPerturbation, SubgoalPerturbationConfig,
@@ -350,7 +395,8 @@ class ForwardAndResetPipeline(BasePipeline):
             self._skills.set_perturbation(pert)
             print(
                 f"[Perturbation] Subgoal-level ENABLED "
-                f"(sigma={pert.cfg.sigma}m, clip_radius={pert.cfg.clip_radius:.3f}m)"
+                f"(sigma={pert.cfg.sigma}m, clip_radius={pert.cfg.clip_radius:.3f}m, "
+                f"phase=forward:{fwd} reset:{reset})"
             )
             # Apply any seed that was scheduled before skills existed.
             pending = getattr(self, "_pending_perturbation_seed", None)
@@ -366,6 +412,7 @@ class ForwardAndResetPipeline(BasePipeline):
         Daemon (mplib_env) auto-spawns on client construction; lerobot_cap process
         keeps a reference and shuts it down at teardown via ``_teardown_skill_perturbation``.
         """
+        self._skill_planner_phase = {"forward": False, "reset": False}
         if not self.recording_config:
             return
         cfg_path = Path(self.recording_config)
@@ -379,8 +426,10 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Skill Perturbation] Failed to read recording_config: {e}")
             return
         skill_raw = (full_cfg.get("perturbation") or {}).get("skill") or {}
-        if not skill_raw.get("enabled", False):
+        any_en, fwd, reset = self._read_phase_flags(skill_raw)
+        if not any_en:
             return
+        self._skill_planner_phase = {"forward": fwd, "reset": reset}
 
         # Backend choice (yaml key `perturbation.skill.backend`):
         #   - "ompl"   (default): OMPL via mplib_env subprocess daemon.
@@ -568,6 +617,7 @@ class ForwardAndResetPipeline(BasePipeline):
         """
         self._preselective_selector = None
         self._preselective_pending = []  # [(ctx, selection), ...] for add_to_buffer
+        self._preselective_phase = {"forward": False, "reset": False}
         if not self.recording_config:
             return
         cfg_path = Path(self.recording_config)
@@ -580,8 +630,14 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception as e:
             print(f"[preselective_filter] failed to read recording_config: {e}")
             return
-        if not (full_cfg.get("preselective_filter") or {}).get("enabled", False):
+        psf_raw = full_cfg.get("preselective_filter") or {}
+        any_en, fwd, reset = self._read_phase_flags(psf_raw)
+        if not any_en:
             return
+        self._preselective_phase = {"forward": fwd, "reset": reset}
+        print(
+            f"[preselective_filter] phase=forward:{fwd} reset:{reset}"
+        )
         try:
             from vla_adaptor import setup_preselective_filter
             selector = setup_preselective_filter(full_cfg)
@@ -1912,7 +1968,8 @@ class ForwardAndResetPipeline(BasePipeline):
                 builtins._current_execution_dir = forward_dir
                 builtins._scene_summary = self.multi_turn_info.get("turn0_response", "") if self.multi_turn_info else ""
 
-                forward_success = self.execute_code(self.generated_code, self.detected_positions)
+                with self._phase_gate("forward"):
+                    forward_success = self.execute_code(self.generated_code, self.detected_positions)
                 result['forward']['execution_success'] = forward_success
 
                 if forward_success:
@@ -2325,8 +2382,8 @@ class ForwardAndResetPipeline(BasePipeline):
                     reset_mt = getattr(self, 'reset_multi_turn_info', None)
                     builtins._scene_summary = reset_mt.get("turn0_response", "") if reset_mt else ""
 
-                    # Subgoal perturbation is forward-only; suspend during reset.
-                    with self._skills.perturbation_disabled():
+                    # Phase-gated: detach systems whose enabled_reset=false.
+                    with self._phase_gate("reset"):
                         reset_success = self.execute_code(reset_code, current_positions, extra_globals={
                             "current_positions": current_positions,
                             "target_positions": target_positions,
@@ -3333,11 +3390,11 @@ class ForwardAndResetPipeline(BasePipeline):
             saved_record = self.record_dataset
             self.record_dataset = False
             try:
-                # Subgoal perturbation is forward-only; suspend during reset.
+                # Phase-gated: detach systems whose enabled_reset=false.
                 # Trigger lazy skill creation first so the context manager has
                 # a real object to act on.
                 self._get_task_runner()
-                with self._skills.perturbation_disabled():
+                with self._phase_gate("reset"):
                     success = self.execute_code(reset_code, {}, extra_globals={
                         "current_positions": current_pos,
                         "target_positions": target_positions,

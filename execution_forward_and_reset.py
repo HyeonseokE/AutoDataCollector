@@ -592,20 +592,116 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         self._preselective_selector = selector
 
-        # Note: the candidate selector hook itself requires a per-call
-        # context provider (current obs/state/instruction/skill_id/gripper).
-        # The provider closure is constructed during episode setup where
-        # the orchestrator has access to those values. For now the selector
-        # is held on self; the hook installation is deferred to the episode
-        # loop wiring. See INTEGRATION_GUIDE.md "context-provider gap".
+        # Build the per-call context provider + selector hook closure.
+        # This bridges the gap between (a) skills_lerobot's plan_batch call
+        # site, which only has joint-space context, and (b) the Selector,
+        # which needs (O, S, I, skill_id, gripper) for IG·AC.
         if hasattr(self, "_skills") and self._skills is not None:
             try:
-                # No-op default hook — returns None → skills falls back to RNG.
-                # Real hook gets installed by the episode loop when ready.
-                self._skills.set_skill_candidate_selector(None)
-            except Exception:
-                pass
-        print("[preselective_filter] selector ready (hook installation pending)")
+                hook = self._build_preselective_hook(selector)
+                self._skills.set_skill_candidate_selector(hook)
+                print("[preselective_filter] selector + hook installed on skills")
+            except Exception as e:
+                print(f"[preselective_filter] hook install failed: {e}; skills fall back to RNG")
+
+    def _build_preselective_hook(self, selector):
+        """Construct the closure that bridges plan_batch results → Selector.
+
+        Returned function matches the signature expected by
+        LeRobotSkills.set_skill_candidate_selector:
+            fn(cands, current_joints, goal_joint_rad, is_transit) -> int | None
+        """
+        # Cache static config; resolve lazily on first call to avoid import-time deps.
+        from preselective_filter import Candidate, Context
+        from vla_adaptor import trajectory_to_action_chunk
+
+        # Pull policy config (chunk_size, max_action_dim) from the adapter.
+        # selector.policy is SmolVLAAdapter; .policy is the underlying SmolVLAPolicy.
+        try:
+            policy_cfg = selector.policy.policy.config
+            chunk_size = int(policy_cfg.chunk_size)
+            action_dim = int(policy_cfg.max_action_dim)
+        except Exception as e:
+            print(f"[preselective_filter] cannot read policy config ({e}); skipping hook")
+            return None
+
+        orchestrator = self
+        skills_ref = self._skills
+
+        def hook(cands, current_joints, goal_joint_rad, is_transit):
+            # Only intercept transits — pick/place descents (is_transit=False)
+            # bypass Method 3 entirely.
+            if not is_transit:
+                return None
+            try:
+                # ---- Collect current context ----
+                # observation: latest async camera frames (RecordingContext)
+                obs_dict = orchestrator._latest_observation_dict()
+                # episode-level instruction (from execute_forward call)
+                instr = str(getattr(orchestrator, "instruction", "") or "")
+                # gripper: current motor position (set during move_to_position prelude)
+                gripper = float(getattr(skills_ref, "current_gripper_pos", 0.0))
+                # skill_id: v1 uses a single bucket for all transits; extend later
+                # to differentiate move/move_and_close/move_and_open via the
+                # hook signature if buffer partitioning needs finer granularity.
+                skill_id = "move_to"
+
+                # ---- Wrap candidates ----
+                # Times: v1 uses uniform 10Hz waypoint spacing as a stand-in for
+                # the existing constant-velocity parameterization. The bridge
+                # then resamples to chunk_size/fps. See INTEGRATION_GUIDE.md for
+                # the deferred upgrade to real planner-velocity-based times.
+                fps = int(orchestrator.recording_fps)
+                wrapped = []
+                for c in cands:
+                    wp = c.waypoints
+                    arm_dof = int(wp.shape[1])
+                    times = (
+                        __import__("numpy").arange(wp.shape[0], dtype=float) / float(fps)
+                    )
+                    chunk = trajectory_to_action_chunk(
+                        waypoints=wp,
+                        times=times,
+                        chunk_size=chunk_size,
+                        action_dim=action_dim,
+                        fps=fps,
+                        current_gripper=gripper,
+                        arm_dof=arm_dof,
+                    )
+                    wrapped.append(Candidate(
+                        skill_id=skill_id, action_chunk=chunk, payload=c,
+                    ))
+
+                ctx = Context(
+                    observation=obs_dict,
+                    state=__import__("numpy").asarray(current_joints, dtype=float),
+                    instruction=instr,
+                    skill_id=skill_id,
+                )
+                selection = selector.select(ctx, wrapped)
+                # Defer add_to_buffer until end-of-episode TRUE-judge gate.
+                orchestrator._preselective_pending.append((ctx, selection))
+                return int(selection.chosen_index)
+            except Exception as e:
+                print(f"[preselective_filter] hook exception: {e}")
+                return None
+
+        return hook
+
+    def _latest_observation_dict(self) -> dict:
+        """Return latest camera frames as {camera_name: np.ndarray}.
+
+        Falls back to {} if the async capture surface isn't available.
+        """
+        try:
+            from record_dataset.context import RecordingContext
+            cap = getattr(RecordingContext, "_async_capture", None)
+            if cap is None:
+                return {}
+            imgs = cap.get_latest_images()
+            return imgs or {}
+        except Exception:
+            return {}
 
     def _teardown_preselective_filter(self) -> None:
         """Release SmolVLA + buffer resources at session end."""

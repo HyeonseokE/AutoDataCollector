@@ -1,6 +1,6 @@
 """Method 3 — Skill-wise Pre-selective Acquisition.
 
-Spec: ours_method/구현내용정리.md.
+Spec: 구현내용정리_modelAC_updated_nuance_final.md
 """
 from .protocols import BufferStore, PolicyAdapter
 from .selector import Selector, SelectorConfig

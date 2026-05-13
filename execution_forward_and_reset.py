@@ -1806,6 +1806,12 @@ class ForwardAndResetPipeline(BasePipeline):
                 if self.record_dataset:
                     self._start_episode_recording(task=instruction)
 
+                # Method 3: reset per-episode pending-selection list. Selector
+                # hook (when installed) appends (ctx, selection) tuples to this
+                # list per move_to_position call; only TRUE-judge episodes are
+                # committed to the buffer (see line ~1942).
+                self._preselective_pending = []
+
                 import builtins
                 builtins._current_execution_dir = forward_dir
                 builtins._scene_summary = self.multi_turn_info.get("turn0_response", "") if self.multi_turn_info else ""
@@ -1938,6 +1944,26 @@ class ForwardAndResetPipeline(BasePipeline):
                 # API 실패로 인한 데이터 손실 방지를 위해 UNCERTAIN은 보존.
                 if self.record_dataset:
                     should_discard = judge_prediction == "FALSE"
+
+                    # Method 3: commit pending selections to buffer ONLY on
+                    # strict TRUE judge (decision #6). UNCERTAIN episodes are
+                    # kept in the dataset (manual review) but NOT in buffer to
+                    # avoid IG/AC poisoning.
+                    selector = getattr(self, "_preselective_selector", None)
+                    pending = getattr(self, "_preselective_pending", [])
+                    if (selector is not None
+                            and judge_prediction == "TRUE"
+                            and pending):
+                        committed = 0
+                        for ctx, selection in pending:
+                            try:
+                                selector.add_to_buffer(ctx, selection)
+                                committed += 1
+                            except Exception as e:
+                                print(f"[preselective_filter] add_to_buffer failed: {e}")
+                        print(f"[preselective_filter] committed {committed}/{len(pending)} selections to buffer")
+                    self._preselective_pending = []
+
                     # _end_episode_recording이 save_episode 전에 buffer snapshot을 떠서 반환
                     episode_df = self._end_episode_recording(discard=should_discard)
 

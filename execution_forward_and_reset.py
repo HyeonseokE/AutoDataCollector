@@ -350,11 +350,19 @@ class ForwardAndResetPipeline(BasePipeline):
 
         Reads cached phase flags set during the 3 _setup_* methods. If a system
         wasn't attached, its disable is a no-op (system is None already).
+        Falls back to a null context manager when skills haven't been lazily
+        created yet (execute_code creates them on first call) — there's
+        nothing to gate in that case.
         """
+        from contextlib import nullcontext
+
+        skills = getattr(self, "_skills", None)
+        if skills is None:
+            return nullcontext()
         sg = getattr(self, "_subgoal_phase", {"forward": False, "reset": False})
         sk = getattr(self, "_skill_planner_phase", {"forward": False, "reset": False})
         pf = getattr(self, "_preselective_phase", {"forward": False, "reset": False})
-        return self._skills.systems_disabled(
+        return skills.systems_disabled(
             subgoal=not sg.get(phase, False),
             skill_planner=not sk.get(phase, False),
             preselective=not pf.get(phase, False),
@@ -1968,6 +1976,9 @@ class ForwardAndResetPipeline(BasePipeline):
                 builtins._current_execution_dir = forward_dir
                 builtins._scene_summary = self.multi_turn_info.get("turn0_response", "") if self.multi_turn_info else ""
 
+                # Ensure skills exist before phase-gating so the context manager
+                # can actually detach subsystems when enabled_forward=false.
+                self._get_task_runner()
                 with self._phase_gate("forward"):
                     forward_success = self.execute_code(self.generated_code, self.detected_positions)
                 result['forward']['execution_success'] = forward_success

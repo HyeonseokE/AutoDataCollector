@@ -85,8 +85,8 @@ ROBOT_IDS=(4)
 
 ### ==================== [single arm task] ==================
 ## pick and place
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# RESET_INSTRUCTION=""
+INSTRUCTION="pick up the red block and place it on the blue dish"
+RESET_INSTRUCTION=""
 
 ## stack2
 # INSTRUCTION="stack the blocks in the order of red and yellow"
@@ -97,8 +97,8 @@ ROBOT_IDS=(4)
 # RESET_INSTRUCTION=""
 
 ## 
-INSTRUCTION="Place the spoon between bread and cereal."
-RESET_INSTRUCTION=""
+# INSTRUCTION="Place the spoon between bread and cereal."
+# RESET_INSTRUCTION=""
 
 # INSTRUCTION="Close the pot by placing the lid on top."
 # RESET_INSTRUCTION=""
@@ -119,13 +119,13 @@ RESET_INSTRUCTION=""
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=100
+NUM_EPISODES=60
 NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
 # all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(all) 
+RESETSPACE_PER_ROBOT=(top-left) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -144,7 +144,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/session_20260508_155741"
+RESUME_SESSION=""
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

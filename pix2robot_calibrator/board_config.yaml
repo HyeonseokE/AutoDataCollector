@@ -1,0 +1,33 @@
+# Charuco 보드 사양 — pix2robot_calibrator (호모그래피용)
+#
+# 호모그래피 캘리브레이션 자체에는 보드의 metric 정보(squares/길이)가 필요 없지만,
+# CharucoDetector 가 보드 instance를 만들 때 동일한 spec을 요구하므로
+# pix2robot_charuco_calibrator/board_config.yaml 의 board 섹션과 동일하게 유지한다.
+#
+# 보드를 새로 인쇄하거나 바꾸면 두 yaml을 같이 수정해야 일관성이 유지된다.
+# 첫 실행 시 dictionary가 의심스러우면 pix2robot_charuco_calibrator 의
+# auto_detect_dictionary 유틸리티로 확인 가능.
+
+board:
+  # ArUco 사전 종류 — DICT_NxN_M (NxN 비트, M개 마커)
+  dictionary: DICT_4X4_50
+
+  # 보드의 사각형 격자 (가로 × 세로)
+  squares_x: 10
+  squares_y: 7
+
+  # 각 사각형 한 변 길이 (m)
+  square_length_m: 0.03883
+
+  # ArUco 마커 한 변 길이 (m) — 사각형의 ~75%
+  marker_length_m: 0.0291
+
+  # 보드 두께 (m) — pix2robot_calibrator 는 z=table_z 평균값만 쓰므로 사용 안 함.
+  # spec 직렬화 호환을 위해 필드만 유지.
+  thickness_m: 0.005
+
+# 코너 스냅 옵션
+snap:
+  # 클릭 위치에서 이 픽셀 거리 이내의 가장 가까운 검출 코너로 스냅.
+  # 초과 시 클릭 무시 (raw 픽셀 fallback 없음).
+  max_distance_px: 30

@@ -6,6 +6,12 @@ Pix2Robot Calibrator
 - 호모그래피 3x3: 픽셀(u,v) → 로봇(x,y) 평면 매핑
 - 테이블 z: 수집한 로봇 z값들의 평균 → 테이블 높이 상수 (base_link 기준)
 - depth 센서 불필요 → 노이즈 제거, 정밀도 향상
+
+매칭점 수집:
+- Charuco 보드를 워크스페이스에 평평하게 놓고 코너를 자동 검출
+- 사용자가 화면의 검출된 코너(시안색 십자)를 클릭하면 가장 가까운
+  코너로 스냅 → 그 코너의 sub-pixel 위치를 매칭점 픽셀로 사용
+- 임의 픽셀 클릭은 받지 않음 (코너 근처 30px 이내만 유효)
 """
 
 import cv2
@@ -21,11 +27,17 @@ from typing import List, Optional, Tuple
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lerobot_cap.hardware.feetech import FeetechController
 from lerobot_cap.hardware.calibration import MotorCalibration
 from lerobot_cap.kinematics.engine import KinematicsEngine
 from lerobot_cap.kinematics.calibration_limits import load_calibration_limits
+
+from pix2robot_charuco_calibrator import CharucoBoardSpec, CharucoDetector
+
+DEFAULT_BOARD_CONFIG = Path(__file__).parent / "board_config.yaml"
+DEFAULT_SNAP_PX = 30.0
 
 
 class Pix2RobotCalibrator:
@@ -36,24 +48,34 @@ class Pix2RobotCalibrator:
     호모그래피(u,v→x,y) + 테이블 z상수를 계산한다.
     """
 
-    def __init__(self, robot_id: int, camera_serial: str = None):
+    def __init__(
+        self,
+        robot_id: int,
+        camera_serial: str = None,
+        board_config: Optional[str] = None,
+    ):
         self.robot_id = robot_id
         self.camera_serial = camera_serial
+        self.board_config_path = Path(board_config) if board_config else DEFAULT_BOARD_CONFIG
+
+        # 보드 spec + 검출기
+        self.board_spec, self.snap_max_px = self._load_board_spec(self.board_config_path)
+        # K, dist 없이 픽셀 검출만 사용 (호모그래피는 3D 정보 불필요)
+        self._detector = CharucoDetector(self.board_spec, K=None, dist=None)
 
         # 대응점 저장
-        self.pixel_points: List[List[int]] = []      # [[u, v], ...]
+        self.pixel_points: List[List[float]] = []     # [[u, v], ...] (sub-pixel)
         self.robot_points: List[List[float]] = []     # [[x, y, z], ...]
-        self.depth_values: List[float] = []           # per-pixel depth (meters)
+        self.corner_ids: List[int] = []               # 매칭점에 대응되는 charuco corner id
 
         # 캘리브레이션 결과
         self.homography: Optional[np.ndarray] = None  # 3x3
         self.table_z: Optional[float] = None
-        self.table_depth: Optional[float] = None      # 카메라→테이블 평균 depth (meters)
         self.error_stats: Optional[dict] = None
 
         # UI 상태
         self._current_image: Optional[np.ndarray] = None
-        self._current_depth: Optional[np.ndarray] = None  # depth 이미지 (mm)
+        self._current_detections: list = []           # List[Detection]
         self._window_name = "Pix2Robot Calibration"
         self._pending_click: Optional[Tuple[int, int]] = None
 
@@ -62,10 +84,29 @@ class Pix2RobotCalibrator:
         self._kinematics: Optional[KinematicsEngine] = None
         self._calibration_limits = None
 
+    @staticmethod
+    def _load_board_spec(path: Path) -> Tuple[CharucoBoardSpec, float]:
+        """yaml에서 board spec과 snap 거리 로드."""
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"보드 설정 파일 없음: {path}")
+        with open(path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        if "board" not in cfg:
+            raise ValueError(f"board 섹션 없음: {path}")
+        spec = CharucoBoardSpec.from_dict(cfg["board"])
+        snap_px = float(cfg.get("snap", {}).get("max_distance_px", DEFAULT_SNAP_PX))
+        return spec, snap_px
+
     # ── 셋업/정리 ──────────────────────────────────────────────
 
     def setup_camera(self) -> np.ndarray:
-        """RealSense로 컬러 + depth 이미지 1장 캡처하여 반환."""
+        """
+        RealSense 컬러 프레임 1장 캡처 + charuco 코너 검출.
+
+        프리뷰에 실시간 검출 결과를 오버레이해서 충분한 코너가 보이는
+        프레임을 사용자가 직접 골라 's' 키로 확정하게 한다.
+        """
         from object_detection.camera import RealSenseD435
 
         with RealSenseD435(serial_number=self.camera_serial) as camera:
@@ -73,28 +114,46 @@ class Pix2RobotCalibrator:
             print("-" * 60)
             print("[Step 1/3] 카메라 이미지 캡처")
             print("-" * 60)
-            print("  카메라 프리뷰가 표시됩니다.")
-            print("  작업 영역이 잘 보이도록 카메라 위치를 조정한 뒤,")
-            print("  's' 키를 눌러 이미지를 캡처하세요.")
-            print("  (캡처된 이미지 위에서 포인트를 클릭합니다)")
-            print("  (depth 이미지도 함께 캡처되어 물체 높이 계산에 사용됩니다)")
+            print("  Charuco 보드를 워크스페이스에 평평하게 놓으세요.")
+            print("  실시간 검출(시안색 십자 + ID)이 충분히 잡히는 프레임에서")
+            print("  's' 키를 눌러 캡처합니다. 'q'는 취소.")
             print()
             while True:
-                color, depth = camera.get_frames()
+                color, _ = camera.get_frames()
                 if color is None:
                     continue
-                cv2.imshow("Camera Preview", color)
+
+                detections = self._detector.detect_charuco(color)
+                preview = self._detector.annotate(color, detections)
+                status = (
+                    f"detected corners: {len(detections)}    "
+                    "[s] capture  [q] quit"
+                )
+                cv2.putText(
+                    preview, status, (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    preview, status, (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA,
+                )
+
+                cv2.imshow("Camera Preview", preview)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('s'):
+                    if len(detections) < 4:
+                        print(
+                            f"  검출된 코너 {len(detections)}개 — 너무 적음. "
+                            "보드 자세/조명 조정 후 다시 's'."
+                        )
+                        continue
                     captured_color = color.copy()
-                    captured_depth = depth.copy() if depth is not None else None
+                    self._current_detections = detections
                     cv2.destroyWindow("Camera Preview")
-                    print(f"이미지 캡처 완료: color={captured_color.shape}")
-                    if captured_depth is not None:
-                        print(f"  depth 캡처 완료: {captured_depth.shape}")
-                    else:
-                        print("  [경고] depth 이미지를 캡처하지 못했습니다. 물체 높이 계산 불가.")
-                    self._current_depth = captured_depth
+                    print(
+                        f"이미지 캡처 완료: color={captured_color.shape}, "
+                        f"코너 {len(detections)}개 검출"
+                    )
                     return captured_color
                 elif key == ord('q'):
                     cv2.destroyAllWindows()
@@ -183,37 +242,46 @@ class Pix2RobotCalibrator:
             self._pending_click = (x, y)
 
     def _draw_overlay(self, frame: np.ndarray) -> np.ndarray:
-        """크로스헤어, 기존 포인트, 상태 텍스트 오버레이."""
-        display = frame.copy()
+        """검출 코너 + 매칭점 + 상태 텍스트 오버레이."""
+        # 1) charuco 코너 시안색 십자 + ID
+        display = self._detector.annotate(frame, self._current_detections)
 
-        # 기존 포인트 표시
-        for i, (px, rb) in enumerate(
-            zip(self.pixel_points, self.robot_points)
-        ):
-            u, v = int(px[0]), int(px[1])
-            # 크로스헤어
-            cv2.drawMarker(
-                display, (u, v), (0, 255, 0),
-                cv2.MARKER_CROSS, 20, 2,
+        # 2) 이미 사용된 코너 → 초록 원 강조 + 매칭점 라벨
+        used = {
+            cid: (px, rb)
+            for cid, px, rb in zip(
+                self.corner_ids, self.pixel_points, self.robot_points,
             )
-            label = (
-                f"P{i+1}: ({rb[0]:.3f}, {rb[1]:.3f}, {rb[2]:.3f})"
+        }
+        for det in self._current_detections:
+            if det.corner_id not in used:
+                continue
+            u, v = int(round(det.pixel_uv[0])), int(round(det.pixel_uv[1]))
+            cv2.circle(display, (u, v), 10, (0, 255, 0), 2)
+            _, rb = used[det.corner_id]
+            label = f"({rb[0]:.3f}, {rb[1]:.3f}, {rb[2]:.3f})"
+            cv2.putText(
+                display, label, (u + 12, v + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA,
             )
             cv2.putText(
-                display, label, (u + 12, v - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1,
+                display, label, (u + 12, v + 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 0), 1, cv2.LINE_AA,
             )
 
         # 상태 텍스트
         n = len(self.pixel_points)
-        status = f"Points: {n} | Click: select pixel | 'u': undo | 'c': compute (>=4) | 's': save | 'q': quit"
-        cv2.putText(
-            display, status, (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
+        status = (
+            f"Pairs: {n} | click charuco corner | "
+            "'u': undo | 'c': compute (>=4) | 's': save | 'q': quit"
         )
         cv2.putText(
             display, status, (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1,
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA,
+        )
+        cv2.putText(
+            display, status, (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA,
         )
 
         if self.homography is not None:
@@ -226,12 +294,12 @@ class Pix2RobotCalibrator:
 
     # ── 포인트 수집 ────────────────────────────────────────────
 
-    def _record_pixel_point(self, x: int, y: int) -> None:
-        """픽셀 좌표 선택 알림."""
+    def _record_pixel_point(self, corner_id: int, u: float, v: float) -> None:
+        """선택된 charuco 코너 알림."""
         n = len(self.pixel_points) + 1
         print()
         print(f"--- 포인트 {n} ---")
-        print(f"[Pixel] ({x}, {y}) 선택됨")
+        print(f"[Charuco corner id={corner_id}] uv=({u:.2f}, {v:.2f}) 선택됨")
 
     def _record_robot_point(self) -> List[float]:
         """
@@ -323,10 +391,10 @@ class Pix2RobotCalibrator:
 
                 # 역순으로 제거 (인덱스 밀림 방지)
                 for idx in sorted(outlier_indices, reverse=True):
-                    removed_px = self.pixel_points.pop(idx)
-                    removed_rb = self.robot_points.pop(idx)
-                    if idx < len(self.depth_values):
-                        self.depth_values.pop(idx)
+                    self.pixel_points.pop(idx)
+                    self.robot_points.pop(idx)
+                    if idx < len(self.corner_ids):
+                        self.corner_ids.pop(idx)
                 print(f"  -> {len(outlier_indices)}개 outlier 제거됨. "
                       f"남은 포인트: {len(self.pixel_points)}쌍")
 
@@ -348,7 +416,6 @@ class Pix2RobotCalibrator:
 
         self.homography = H
         self.table_z = self.compute_table_z()
-        self.table_depth = self.compute_table_depth()
         self.error_stats = self.verify()
 
         n_final = len(self.pixel_points)
@@ -358,10 +425,6 @@ class Pix2RobotCalibrator:
         print("-" * 60)
         print(f"  사용 포인트: {n_final}쌍" + (f" (원본 {n}쌍 중 outlier {n - n_final}개 자동 제거)" if n != n_final else ""))
         print(f"  테이블 z (base_link): {self.table_z:.4f} m")
-        if self.table_depth is not None and self.table_depth > 0:
-            print(f"  테이블 depth (카메라→테이블): {self.table_depth:.4f} m ({self.table_depth*100:.1f} cm)")
-        else:
-            print(f"  테이블 depth: 없음 (depth 카메라 미사용)")
         print(f"  평균 오차: {self.error_stats['mean_error_m']:.4f} m "
               f"({self.error_stats['mean_error_m']*100:.2f} cm)")
         print(f"  RMSE: {self.error_stats['rmse_m']:.4f} m")
@@ -385,15 +448,6 @@ class Pix2RobotCalibrator:
         z_values = [p[2] for p in self.robot_points]
         return float(np.mean(z_values))
 
-    def compute_table_depth(self) -> Optional[float]:
-        """수집한 depth값들의 평균 → 카메라에서 테이블까지 거리 (meters)."""
-        if not self.depth_values:
-            return None
-        valid = [d for d in self.depth_values if d > 0.05]  # 5cm 미만은 무효
-        if not valid:
-            return None
-        return float(np.mean(valid))
-
     def verify(self) -> dict:
         """재투영 오차 계산 (포인트별, 평균, RMSE)."""
         if self.homography is None:
@@ -411,7 +465,7 @@ class Pix2RobotCalibrator:
             ))
             errors.append(err)
             print(
-                f"  Pixel ({px[0]}, {px[1]}) → "
+                f"  Pixel ({px[0]:.2f}, {px[1]:.2f}) → "
                 f"predicted ({predicted_xy[0]:.4f}, {predicted_xy[1]:.4f}) "
                 f"vs actual ({rb[0]:.4f}, {rb[1]:.4f}), "
                 f"error: {err*100:.2f} cm"
@@ -431,30 +485,27 @@ class Pix2RobotCalibrator:
 
     # ── 변환 (캘리브레이션 후 사용) ────────────────────────────
 
-    def pixel_to_robot(self, u: int, v: int, depth_m: float = None) -> List[float]:
+    def pixel_to_robot(
+        self, u: float, v: float, depth_m: Optional[float] = None,
+    ) -> List[float]:
         """
-        호모그래피(u,v→x,y) + z 계산 → [x, y, z].
+        호모그래피(u,v→x,y) + table_z → [x, y, z].
+
+        z는 항상 table_z (수집한 로봇 z 평균) 사용. 물체 높이 추정은
+        지원하지 않음 — 테이블 평면 위 한 점만 변환한다.
 
         Args:
             u, v: 픽셀 좌표
-            depth_m: 해당 픽셀의 depth 값 (meters, 카메라→물체 거리).
-                     제공되면 물체 높이 = table_depth - depth_m 으로 계산.
-                     None이면 table_z (≈0) 사용.
+            depth_m: legacy 호환용 인자. 값은 무시됨. Pix2RobotCharuco에는
+                depth 기반 z 추정이 있으므로 polymorphic 호출 코드 호환을
+                위해 시그니처만 유지.
         """
         if self.homography is None:
             raise RuntimeError("캘리브레이션이 완료되지 않음")
 
         pixel = np.array([[[u, v]]], dtype=np.float32)
         robot_xy = cv2.perspectiveTransform(pixel, self.homography)[0][0]
-
-        # z 계산: depth가 주어지고 table_depth가 있으면 물체 높이 추정
-        z = self.table_z
-        if depth_m is not None and self.table_depth is not None and depth_m > 0.05:
-            object_height = self.table_depth - depth_m
-            if object_height > 0:
-                z = object_height
-
-        return [float(robot_xy[0]), float(robot_xy[1]), z]
+        return [float(robot_xy[0]), float(robot_xy[1]), float(self.table_z)]
 
     def robot_to_pixel(self, x: float, y: float, z: float = None) -> Tuple[int, int]:
         """
@@ -495,14 +546,12 @@ class Pix2RobotCalibrator:
             table_z=np.array([self.table_z]),
             pixel_points=np.array(self.pixel_points),
             robot_points=np.array(self.robot_points),
+            corner_ids=np.array(self.corner_ids, dtype=np.int32),
             mean_error_m=np.array([self.error_stats["mean_error_m"]]),
             max_error_m=np.array([self.error_stats["max_error_m"]]),
             rmse_m=np.array([self.error_stats["rmse_m"]]),
             per_point_errors_m=np.array(self.error_stats["per_point_errors_m"]),
-            depth_values=np.array(self.depth_values),
         )
-        if self.table_depth is not None:
-            save_dict["table_depth"] = np.array([self.table_depth])
         np.savez(npz_path, **save_dict)
 
         # .json
@@ -513,10 +562,10 @@ class Pix2RobotCalibrator:
             "num_points": len(self.pixel_points),
             "homography_3x3": self.homography.tolist(),
             "table_z_robot_frame": self.table_z,
-            "table_depth_m": self.table_depth,
-            "depth_values": self.depth_values,
             "pixel_points": self.pixel_points,
             "robot_points": self.robot_points,
+            "corner_ids": self.corner_ids,
+            "board_spec": self.board_spec.to_dict(),
             "error_stats": self.error_stats,
         }
         with open(json_path, 'w') as f:
@@ -539,26 +588,9 @@ class Pix2RobotCalibrator:
             self.table_z = float(data['table_z'][0])
             self.pixel_points = data['pixel_points'].tolist()
             self.robot_points = data['robot_points'].tolist()
-
-            if 'table_depth' in data:
-                self.table_depth = float(data['table_depth'][0])
-            if 'depth_values' in data:
-                self.depth_values = data['depth_values'].tolist()
-
-            # table_depth가 없으면 같은 디렉토리의 다른 캘리브레이션에서 공유
-            if self.table_depth is None:
-                calib_dir = filepath.parent
-                for other_npz in sorted(calib_dir.glob("*_pix2robot_data.npz")):
-                    if other_npz == filepath:
-                        continue
-                    try:
-                        other_data = np.load(other_npz, allow_pickle=True)
-                        if 'table_depth' in other_data:
-                            self.table_depth = float(other_data['table_depth'][0])
-                            print(f"  테이블 depth 공유: {self.table_depth:.4f} m (from {other_npz.name})")
-                            break
-                    except Exception:
-                        continue
+            self.corner_ids = (
+                data['corner_ids'].tolist() if 'corner_ids' in data else []
+            )
 
             if 'mean_error_m' in data:
                 self.error_stats = {
@@ -571,8 +603,6 @@ class Pix2RobotCalibrator:
             print(f"로드 완료: {filepath}")
             print(f"  포인트: {len(self.pixel_points)}쌍")
             print(f"  테이블 z: {self.table_z:.4f} m")
-            if self.table_depth is not None:
-                print(f"  테이블 depth: {self.table_depth:.4f} m")
             return True
         except Exception as e:
             print(f"로드 실패: {e}")
@@ -625,20 +655,22 @@ class Pix2RobotCalibrator:
 
         print()
         print("-" * 60)
-        print("[Step 2/3] 포인트 수집")
+        print("[Step 2/3] 포인트 수집 (Charuco 코너 스냅)")
         print("-" * 60)
-        print("  이미지에서 작업 영역의 특정 지점을 좌클릭하면,")
-        print("  로봇 포지셔닝 단계로 전환됩니다.")
+        print("  화면의 시안색 십자(✚) + 숫자가 검출된 Charuco 코너입니다.")
+        print(f"  코너 근처 {self.snap_max_px:.0f}px 이내를 좌클릭하면 가장 가까운")
+        print("  코너로 자동 스냅되어 로봇 포지셔닝 단계로 전환됩니다.")
+        print(f"  (코너에서 {self.snap_max_px:.0f}px 초과는 무시됨)")
         print()
         print("  <워크플로우>")
-        print("  1) 이미지에서 포인트 좌클릭 (픽셀 좌표 기록)")
-        print("  2) 로봇 토크가 풀림 → 로봇 EE를 해당 지점으로 수동 이동")
+        print("  1) 이미지에서 코너 근처 좌클릭 (sub-pixel 좌표 기록)")
+        print("  2) 로봇 토크가 풀림 → 로봇 EE를 해당 코너 위치로 수동 이동")
         print("  3) 터미널에 실시간 TCP 좌표가 표시됨 (좌표는 FK로 자동 계산)")
         print("  4) Enter → 로봇 좌표 기록, 토크 복원")
-        print("  5) 이미지 창이 다시 열림 → 다음 포인트 반복")
+        print("  5) 이미지 창이 다시 열림 → 다음 코너 반복")
         print()
         print("  <조작키>")
-        print("  좌클릭     : 픽셀 포인트 선택")
+        print("  좌클릭     : 가장 가까운 코너 선택 (스냅)")
         print("  'u'        : 마지막 포인트 쌍 취소")
         print("  'd'        : 특정 포인트 삭제 (번호 입력)")
         print("  'c'        : 호모그래피 계산 (최소 4쌍, 권장 8~12쌍)")
@@ -647,7 +679,7 @@ class Pix2RobotCalibrator:
         print("  Enter(터미널): 로봇 위치 확인")
         print("  q+Enter    : 현재 포인트 취소")
         print()
-        print("  TIP: 작업 영역의 모서리와 중앙에 고르게 포인트를 분포시키세요.")
+        print("  TIP: 작업 영역의 모서리와 중앙에 고르게 코너를 골라 분포시키세요.")
         print()
 
         self._pending_click = None
@@ -687,8 +719,13 @@ class Pix2RobotCalibrator:
                     print("먼저 'c'로 호모그래피를 계산하세요")
 
     def _handle_pixel_click(self, x: int, y: int) -> None:
-        """픽셀 클릭 → 로봇 포지셔닝 → 매칭쌍 저장."""
-        self._record_pixel_point(x, y)
+        """클릭 → 가장 가까운 charuco 코너로 스냅 → 로봇 포지셔닝 → 매칭쌍 저장."""
+        snapped = self._snap_to_corner(x, y)
+        if snapped is None:
+            return  # 무시 (사유는 _snap_to_corner 가 출력)
+
+        corner_id, u_snap, v_snap = snapped
+        self._record_pixel_point(corner_id, u_snap, v_snap)
 
         # OpenCV 창 닫기 (터미널 포커스)
         cv2.destroyWindow(self._window_name)
@@ -698,23 +735,15 @@ class Pix2RobotCalibrator:
         robot_pos = self._record_robot_point()
 
         if robot_pos is not None:
-            self.pixel_points.append([x, y])
+            self.pixel_points.append([u_snap, v_snap])
             self.robot_points.append(robot_pos)
-
-            # depth 값 기록 (테이블 표면 depth)
-            depth_m = 0.0
-            if self._current_depth is not None:
-                h, w = self._current_depth.shape[:2]
-                if 0 <= x < w and 0 <= y < h:
-                    depth_mm = float(self._current_depth[y, x])
-                    depth_m = depth_mm * 0.001  # mm → meters
-            self.depth_values.append(depth_m)
+            self.corner_ids.append(corner_id)
 
             n = len(self.pixel_points)
             print(f"  매칭쌍 {n} 저장: "
-                  f"pixel({x}, {y}) <-> robot({robot_pos[0]:.4f}, "
-                  f"{robot_pos[1]:.4f}, {robot_pos[2]:.4f})"
-                  f" | depth={depth_m:.4f}m")
+                  f"corner id={corner_id} uv=({u_snap:.2f}, {v_snap:.2f}) "
+                  f"<-> robot({robot_pos[0]:.4f}, "
+                  f"{robot_pos[1]:.4f}, {robot_pos[2]:.4f})")
             if n < 4:
                 print(f"  -> 최소 {4 - n}쌍 더 필요합니다. (최소 4쌍, 권장 8~12쌍)")
             elif n < 8:
@@ -725,20 +754,57 @@ class Pix2RobotCalibrator:
             print("  포인트 취소됨")
 
         print()
-        print("  이미지 창이 다시 열립니다. 다음 포인트를 클릭하세요.")
+        print("  이미지 창이 다시 열립니다. 다음 코너를 클릭하세요.")
 
         # OpenCV 창 다시 열기
         cv2.namedWindow(self._window_name)
         cv2.setMouseCallback(self._window_name, self._mouse_callback)
+
+    def _snap_to_corner(
+        self, x: int, y: int,
+    ) -> Optional[Tuple[int, float, float]]:
+        """
+        클릭 위치 (x,y)에서 가장 가까운 미사용 charuco 코너로 스냅.
+
+        Returns:
+            (corner_id, u, v) sub-pixel 좌표. snap 실패 시 None.
+        """
+        if not self._current_detections:
+            print("  검출된 코너 없음 — 캡처를 다시 진행하세요")
+            return None
+
+        used = set(self.corner_ids)
+        candidates = [
+            d for d in self._current_detections if d.corner_id not in used
+        ]
+        if not candidates:
+            print("  사용 가능한 코너 없음 (모두 사용됨)")
+            return None
+
+        dists = [
+            (float(np.hypot(d.pixel_uv[0] - x, d.pixel_uv[1] - y)), d)
+            for d in candidates
+        ]
+        dists.sort(key=lambda t: t[0])
+        best_dist, best = dists[0]
+
+        if best_dist > self.snap_max_px:
+            print(
+                f"  클릭 위치에서 가까운 코너 없음 "
+                f"(최단거리 {best_dist:.1f}px > 임계값 {self.snap_max_px:.0f}px)"
+            )
+            return None
+
+        return best.corner_id, float(best.pixel_uv[0]), float(best.pixel_uv[1])
 
     def _undo_last_point(self) -> None:
         """마지막 포인트 쌍 취소."""
         if self.pixel_points:
             px = self.pixel_points.pop()
             rb = self.robot_points.pop()
-            if self.depth_values:
-                self.depth_values.pop()
-            print(f"취소: pixel({px[0]}, {px[1]}) <-> "
+            cid = self.corner_ids.pop() if self.corner_ids else None
+            cid_str = f"id={cid} " if cid is not None else ""
+            print(f"취소: {cid_str}uv=({px[0]:.2f}, {px[1]:.2f}) <-> "
                   f"robot({rb[0]:.4f}, {rb[1]:.4f}, {rb[2]:.4f})")
             print(f"남은 포인트: {len(self.pixel_points)}쌍")
         else:
@@ -758,7 +824,9 @@ class Pix2RobotCalibrator:
         print("-" * 40)
         print("현재 포인트 목록:")
         for i, (px, rb) in enumerate(zip(self.pixel_points, self.robot_points)):
-            print(f"  P{i+1}: pixel({px[0]}, {px[1]}) <-> "
+            cid = self.corner_ids[i] if i < len(self.corner_ids) else None
+            cid_str = f"id={cid:>3} " if cid is not None else "          "
+            print(f"  P{i+1}: {cid_str}uv=({px[0]:.2f}, {px[1]:.2f}) <-> "
                   f"robot({rb[0]:.4f}, {rb[1]:.4f}, {rb[2]:.4f})")
         print("-" * 40)
         print("삭제할 포인트 번호를 입력하세요 (쉼표로 복수 가능, 예: 3,7,11)")
@@ -780,9 +848,12 @@ class Pix2RobotCalibrator:
                     for idx in sorted(set(indices), reverse=True):
                         px = self.pixel_points.pop(idx)
                         rb = self.robot_points.pop(idx)
-                        if idx < len(self.depth_values):
-                            self.depth_values.pop(idx)
-                        print(f"  삭제: P{idx+1} pixel({px[0]}, {px[1]}) <-> "
+                        cid = (
+                            self.corner_ids.pop(idx)
+                            if idx < len(self.corner_ids) else None
+                        )
+                        cid_str = f"id={cid} " if cid is not None else ""
+                        print(f"  삭제: P{idx+1} {cid_str}uv=({px[0]:.2f}, {px[1]:.2f}) <-> "
                               f"robot({rb[0]:.4f}, {rb[1]:.4f}, {rb[2]:.4f})")
                     print(f"  남은 포인트: {len(self.pixel_points)}쌍")
                     # 호모그래피 무효화

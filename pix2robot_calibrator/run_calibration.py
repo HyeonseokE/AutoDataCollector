@@ -32,9 +32,22 @@ def main():
         "--camera-serial", type=str, default=None,
         help="사용할 RealSense 카메라 시리얼 번호 (미지정 시 첫 번째 카메라 사용)",
     )
+    parser.add_argument(
+        "--board-config", type=str, default=None,
+        help=(
+            "Charuco 보드 yaml 경로 (미지정 시 "
+            "pix2robot_calibrator/board_config.yaml 사용). "
+            "pix2robot_charuco_calibrator/board_config.yaml 의 board 섹션과 "
+            "동일하게 유지하세요."
+        ),
+    )
     args = parser.parse_args()
 
-    calibrator = Pix2RobotCalibrator(robot_id=args.robot, camera_serial=args.camera_serial)
+    calibrator = Pix2RobotCalibrator(
+        robot_id=args.robot,
+        camera_serial=args.camera_serial,
+        board_config=args.board_config,
+    )
 
     try:
         success = calibrator.calibrate_interactive(resume=args.resume)

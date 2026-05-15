@@ -2,7 +2,7 @@
 
 Boots once on the planning host (e.g., H100) holding:
 - SmolVLA policy + preprocessor (loaded once, reused across episodes)
-- curobo MotionPlanner backend (in-process, no daemon)
+- curobo MotionPlanner backend (in-process)
 - Selector (IG·AC) + JsonlBufferStore (server-local persistence)
 
 A single client RPC `PlanAndSelect` does plan_batch → IG·AC → returns chosen
@@ -24,7 +24,7 @@ import time
 import uuid
 from concurrent import futures
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import grpc
 import numpy as np
@@ -85,7 +85,12 @@ def _map_images_to_policy_keys(
 # --------------------------------------------------------------------------
 # Curobo backend bootstrap (one-time on server start)
 # --------------------------------------------------------------------------
-def _build_curobo(urdf_path: str, skill_cfg: dict, project_root: Path):
+def _build_curobo(
+    urdf_path: str,
+    skill_cfg: dict,
+    project_root: Path,
+    transit_pitch_max_deg: Optional[float] = None,
+):
     from perturbation.skill_level import get_curobo_backend
 
     CuroboBackend, CuroboBackendConfig = get_curobo_backend()
@@ -107,6 +112,12 @@ def _build_curobo(urdf_path: str, skill_cfg: dict, project_root: Path):
         arm_joint_count=int(skill_cfg.get("arm_joint_count", 5)),
         max_vias_per_candidate=int(
             skill_cfg.get("curobo_max_vias_per_candidate", 1)
+        ),
+        # Option A wrist-cam transit bias: clamp via-point orientations to
+        # pitch-down. Driven by the top-level transit_pitch_max_deg key.
+        via_pitch_max_rad=(
+            None if transit_pitch_max_deg is None
+            else float(np.radians(float(transit_pitch_max_deg)))
         ),
         max_batch_size=n_cand,
     )
@@ -334,7 +345,10 @@ def serve(args: argparse.Namespace) -> None:
 
     print(f"[server] loading curobo backend ({args.urdf}) ...")
     skill_cfg = (recording_cfg.get("perturbation") or {}).get("skill") or {}
-    curobo = _build_curobo(args.urdf, skill_cfg, project_root)
+    curobo = _build_curobo(
+        args.urdf, skill_cfg, project_root,
+        transit_pitch_max_deg=recording_cfg.get("transit_pitch_max_deg"),
+    )
 
     servicer = PreselectiveAcquirerServicer(
         selector=selector,

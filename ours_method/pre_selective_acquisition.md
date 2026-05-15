@@ -81,7 +81,7 @@
   └── (B 에 적재) → 다음 skill m+1 에서 반복
 ```
 
-- 풀 source: `stochastic_perturbation.md` (2) skill-level OMPL ensemble + (3) subgoal Gaussian offset
+- 풀 source: `stochastic_perturbation.md` (2) skill-level curobo via-point planner + (3) subgoal Gaussian offset
 - 선택 단위: **skill segment** (전체 rollout 아님). 매 skill 마다 독립 선택.
 - 실행된 segment 만 수집 → 사후 폐기 비용 없음
 
@@ -95,7 +95,7 @@
 | `acquisition/scorer.py` | `InformationGainScorer`, `ActionConsistencyScorer` — Protocol 기반, 합성 가능 |
 | `acquisition/policy.py` | TopIG / Pareto / threshold gate 선택 정책 |
 | `acquisition/online_selector.py` | skill-step 별 candidate 풀 입력 → ξ\* 출력 |
-| `skills/skills_lerobot.py` | (변경) `move_to_position` 안 OMPL `plan_batch` 결과를 `online_selector` 로 라우팅 — 현재는 RNG 무작위 선택 |
+| `skills/skills_lerobot.py` | (변경) `move_to_position` 안 curobo `plan_batch` 결과를 `online_selector` 로 라우팅 — 현재는 RNG 무작위 선택 |
 | `execution_forward_and_reset.py` | (변경) 기학습 VLA(`π_0`) + dataset/buffer reference 를 `online_selector` 에 주입 |
 | `pipeline_config/recording_config_ws*.yaml` | (변경) `acquisition:` 섹션 ($δ_{IG}$, $ε_H$, scorer/policy 설정) |
 
@@ -126,7 +126,7 @@ acquisition:
 
 | 단계 | 역할 | 출력 |
 |---|---|---|
-| (2) Skill-level OMPL ensemble | "어떻게 갈지" 모드 다양성 | candidate 풀 (algo × seed) |
+| (2) Skill-level curobo via-point planner | "어떻게 갈지" 경로 위상 다양성 | candidate 풀 (via 개수 × via 위치 × seed) |
 | (3) Subgoal-level Gaussian | "어디로 갈지" 위상학적 다양성 | candidate 풀 (offset 분포) |
 | **Method 3 (이 문서)** | **풀에서 useful 만 선별** | 실행 + 적재되는 단일 segment |
 

@@ -27,9 +27,6 @@ dependencies:
   - pinocchio>=2.6.0
   - hpp-fcl>=2.3.0           # Collision detection (used by Pinocchio)
 
-  # Motion Planning (OMPL - optional, from conda-forge)
-  # - ompl>=1.6.0            # Uncomment if needed
-
   # Visualization
   - meshcat-python>=0.3.0    # 3D visualization
 

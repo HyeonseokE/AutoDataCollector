@@ -213,6 +213,7 @@ class TrajectoryPlanner:
         verbose: bool = False,
         fixed_joints: Optional[List[int]] = None,
         target_pitch: Optional[float] = None,
+        prefer_pitch_max_rad: Optional[float] = None,
     ) -> Tuple[Trajectory, dict]:
         """
         Plan trajectory to target EE position using multi-solution IK.
@@ -258,6 +259,7 @@ class TrajectoryPlanner:
             verbose=verbose,
             fixed_joints=fixed_joints,
             target_pitch=target_pitch,
+            prefer_pitch_max_rad=prefer_pitch_max_rad,
         )
 
         # Calculate expected position error

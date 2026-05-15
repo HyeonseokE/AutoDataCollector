@@ -19,18 +19,11 @@ levels in the codebase:
 
 Both layers fire in production. This document covers only the skill layer.
 
-The skill layer has **two backends** that share an identical interface
-`plan_batch(start_qpos, goal_qpos, n, seed=...) → List[TrajectoryCandidate]`
-and are switched by a single yaml flag:
-
-```yaml
-perturbation.skill.backend: "ompl"     # CPU OMPL ensemble (subprocess daemon)
-perturbation.skill.backend: "curobo"   # GPU curobo + via-point diversity (in-process)
-```
-
-Both are kept maintained — yaml toggle, no recompile. This doc focuses
-on the curobo backend; OMPL has its own design in `planner.py` /
-`parallel.py` / `client.py` / `daemon/`.
+The skill layer uses curobo as the planning backend, exposing
+`plan_batch(start_qpos, goal_qpos, n, seed=...) → List[TrajectoryCandidate]`.
+The gRPC adapter (`vla_adaptor/grpc_planner_adapter.py`) duck-types the
+same interface so the local in-process backend and the remote H100
+server are swappable from yaml. This doc describes the curobo backend.
 
 ## 2. Algorithmic core — multi-via, random K, continuous sampling
 
@@ -96,13 +89,13 @@ spatial diversity instead of O(4).
 ### 3.1 Backend dispatch (in `execution_forward_and_reset.py`)
 
 ```
-yaml.perturbation.skill.backend
+yaml.preselective_filter.transport
     │
-    ├── "ompl"   → PlanServiceClient(urdf, cfg, socket, n_workers)
-    │                ↑ spawns CPU subprocess daemon (mplib OMPL)
+    ├── "local" → CuroboBackend(urdf, cfg)
+    │              ↑ in-process GPU planner, atexit-cleaned
     │
-    └── "curobo" → CuroboBackend(urdf, cfg)
-                     ↑ in-process GPU planner, atexit-cleaned
+    └── "grpc"  → GrpcPlannerClient(PreselectiveClient(addr), provider)
+                   ↑ remote planning + IG·AC selection on H100
 ```
 
 Both implementations expose:
@@ -113,7 +106,7 @@ close()
 ```
 
 so `skills_lerobot.set_skill_planner_client(client)` is the same call
-regardless of backend.
+regardless of transport.
 
 ### 3.2 Production call site (in `skills/skills_lerobot.py:1787`)
 
@@ -335,11 +328,11 @@ re-seeding).
 ```yaml
 perturbation:
   skill:
-    enabled: true                  # master switch (false → cartesian-line only)
-    backend: curobo                # "ompl" or "curobo"
+    enabled_forward: true          # master switch (false → cartesian-line only)
+    enabled_reset: false           # reset-direction perturbation off by default
     n_candidates: 4                # batch size; plan_batch returns ≤ this many cands
 
-    # curobo-only options (ignored when backend=ompl):
+    # curobo options:
     curobo_robot_cfg_path: robot_configs/curobo/so101_robot0.yml  # absolute or
                                                                   # project-relative
     curobo_num_trajopt_seeds: 4    # parallel trajopt starts per plan
@@ -349,7 +342,6 @@ perturbation:
     curobo_junction_smooth_k: 5    # cubic spline blend window at via junctions
     curobo_max_vias_per_candidate: 2   # K_max — see §2
 
-    # shared options (both backends):
     fixed_joint_indices: [4]       # wrist_roll lock (parity w/ cartesian IK)
     arm_joint_count: 5             # SO-101 = 5 DoF arm
 ```
@@ -391,13 +383,9 @@ per-episode RNG is seeded AND IK converged. See §3.2.
 ```
 perturbation/skill_level/
 ├── CUROBO_METHODOLOGY.md     ← (this file)
-├── __init__.py               ← exports get_curobo_backend(), PlanServiceClient
+├── __init__.py               ← exports get_curobo_backend(), TrajectoryCandidate
 ├── curobo_backend.py         ← CuroboBackend + CuroboBackendConfig
-├── planner.py                ← OMPL PlannerEnsembleConfig, TrajectoryCandidate dataclass
-├── parallel.py               ← OMPL ParallelEnsemble (multi-algo worker pool)
-├── client.py                 ← OMPL PlanServiceClient (IPC client to daemon)
-├── collision_world.py        ← shared workspace/table/obstacle config
-└── daemon/                   ← OMPL subprocess server (mplib-based)
+└── planner.py                ← TrajectoryCandidate dataclass (shared wire shape)
 ```
 
 External entry points:
@@ -490,17 +478,16 @@ line indicates collapse.
 Setting it affects every curobo instance in the same process. The
 backend sets it once on init; do not toggle it elsewhere.
 
-### 11.6 OMPL backend still maintained
+### 11.6 OMPL backend removed
 
-Per the user's design choice, both `ompl` and `curobo` backends remain
-fully functional. The OMPL daemon (CPU subprocess) is the fallback
-when GPU is unavailable or for ablation. Do not delete OMPL code
-unless explicitly requested.
+The earlier CPU OMPL ensemble + `mplib_env` subprocess daemon has been
+removed. curobo is now the sole skill-level planner; the gRPC adapter
+is the only alternative transport.
 
 ## 12. Commit trail (chronological)
 
 ```
-780ed41  feat: curobo GPU backend (CuroboBackend) + OMPL fixes — 35× speedup
+780ed41  feat: curobo GPU backend (CuroboBackend) — 35× speedup
 861f0af  perf(curobo): batched goalset IK + merged seg1+seg2 — 1.9× speedup
 ce7cc6d  test(curobo): real-robot smoke test + production interface duck-type fix
 c0353df  fix(curobo): resolve robot_cfg_path to absolute before handing to curobo
@@ -510,6 +497,7 @@ e50e167  feat(curobo): add CuroboBackend.close() to explicitly free CUDA graph
 9cc3e67  feat(curobo): random K_via per candidate (multi-via support, K_max≤2)
 2bf895e  test(curobo): smoke test now exercises K_max=2 with 4 transits
 68144d0  test(curobo): add EE-arc visualization tool for plan_batch candidates
+ea8259e  feat(preselective_rpc): H100 gRPC server bootstrap script
 ```
 
 ## 13. Future work / open items
@@ -524,10 +512,6 @@ e50e167  feat(curobo): add CuroboBackend.close() to explicitly free CUDA graph
   `plan_batch`. Cost: +500 ms FK + matplotlib per transit, ~200 KB PNG
   per transit. Recommended OFF in production, ON for first-N transit
   sanity checks.
-- **OMPL deprecation**: when curobo has logged ~50+ successful
-  episodes of real data and downstream policy training has validated
-  the data, OMPL backend + daemon + IPC code can be removed
-  (~800-1000 lines). The yaml flag would also disappear.
 - **K_max > 2**: theoretically possible but SO-101 reachability makes
   K=3 vias fail IK > 30 % of the time. Would need a more careful
   reachability filter or different robot.

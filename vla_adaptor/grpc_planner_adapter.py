@@ -1,7 +1,7 @@
 """Drop-in skill-planner client backed by the preselective gRPC server.
 
-The local CuroboBackend / OMPL daemon both expose
-``plan_batch(start, goal, n, seed) → list[TrajectoryCandidate]`` and let
+The local CuroboBackend exposes
+``plan_batch(start, goal, n, seed) → list[TrajectoryCandidate]`` and lets
 skills_lerobot sample ONE candidate locally. In gRPC mode the server runs
 both planning AND IG·AC selection; the adapter here returns a single-element
 list containing the server's chosen trajectory, so skills_lerobot's existing
@@ -66,7 +66,7 @@ class GrpcPlannerClient:
         self._skill_id = str(skill_id)
 
     # ------------------------------------------------------------------
-    # plan_batch — drop-in replacement for CuroboBackend / OMPL daemon
+    # plan_batch — drop-in replacement for CuroboBackend
     # ------------------------------------------------------------------
     def plan_batch(
         self,

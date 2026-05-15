@@ -43,91 +43,94 @@ CaP의 스킬들은 사전정의된 deterministic 함수들이라, 동일 태스
 
 ---
 
-## (2) Skill-level perturbation: OMPL Planner Ensemble *(DONE)*
+## (2) Skill-level perturbation: curobo via-point planner *(DONE)*
 
-다양한 OMPL planner의 앙상블로 skill 단위 경로 패턴을 랜덤 생성한다.
+GPU-accelerated curobo motion planner로 skill 단위 transit 경로 패턴을
+랜덤 생성한다. 직선 baseline + via-point sampling 으로 path topology
+다양성을 만든다. 자세한 설계는 [`CUROBO_METHODOLOGY.md`](CUROBO_METHODOLOGY.md)
+참고.
 
-mplib은 OMPL 래퍼라 RRT*/RRT-Connect/PRM*/BIT*/KPIECE 등이 한 바이너리에 들어있고, 알고리즘별로 *질적으로 다른* 경로를 만들어낸다 (RRT-Connect = greedy 직선형, PRM* = roadmap 품질형, BIT* = anytime-optimal). 단순 seed 변경이 한 알고리즘의 분산 안에서만 다양성을 주는 데 비해, 앙상블은 **모드(mode) 자체**를 바꿔 분포의 폭을 넓힌다.
+### 아키텍처 요약
 
-### 아키텍처
-
-`mplib`은 numpy 1.x를 요구하지만 `lerobot_cap`은 numpy 2.x를 쓰므로, OMPL 코드는 **별도 conda env (`mplib_env`)**의 daemon 프로세스에 격리되고, 메인 프로세스는 Unix-socket RPC 클라이언트(`PlanServiceClient`)로만 통신한다.
+`curobo` 는 in-process GPU planner 라 별도 daemon / IPC 가 필요 없다.
+batched plan_cspace 호출로 N candidate 를 1 회 GPU pass 에서 동시 풀고,
+CUDA graph 캡쳐로 두 번째 호출부터 50ms → 5ms 수준으로 떨어진다.
 
 ```
-┌─ skills_lerobot (numpy 2.x) ─────────────────────────────────┐
+┌─ skills_lerobot (lerobot env, numpy 2.x) ────────────────────┐
 │   move_to_position(is_transit=True):                         │
-│     cands = client.plan_batch(start, goal, n=4, seed=…)      │
-│     chosen = rng.choice(cands)                               │
+│     cands = client.plan_batch(start, goal, n, seed=…)        │
+│     chosen = cands[rng.integers(0, len(cands))]              │
 │     trajectory.joint_positions = chosen.waypoints            │
 │     (constant-velocity time parameterization)                │
 └────────────────┬─────────────────────────────────────────────┘
-                 │ Unix socket  /tmp/lerobot_planner_$UID.sock
-┌────────────────▼──────────────────────────────────────────┐
-│  daemon/server.py  (mplib_env, numpy 1.x)                 │
-│    ParallelEnsemble(mp.Pool, n_workers)                   │
-│      └ each worker holds a PlannerEnsemble                │
-│          ├ mplib.Planner(urdf, move_group, objects=…)     │
-│          └ OMPL state space over ACTIVE joints only       │
-│              (fixed_joint_indices held at start value)    │
-└───────────────────────────────────────────────────────────┘
+                 │
+        ┌────────┴─────────┐
+        │                  │
+        ▼                  ▼
+  CuroboBackend       GrpcPlannerClient → preselective_rpc.server (H100)
+  (in-process GPU)     (remote planning + IG·AC selection)
 ```
 
-데몬은 `PlanServiceClient.__init__`에서 (소켓이 dead일 때) 자동 spawn 되고, `close()`에서 자동 종료된다.
+두 transport 모두 `plan_batch(start, goal, n, seed)` 인터페이스를 노출하므로
+`skills.set_skill_planner_client(client)` 는 transport 와 무관하게 동일.
 
-### 알고리즘 풀
+### Candidate 다양성 (via-point sampling)
 
-`DEFAULT_ALGORITHMS = ("RRTConnect", "PRMstar", "BITstar", "KPIECE1")`. 실 운용에서는 `KPIECE1` 제외 권장 — wild zigzag (z 400+mm) 위험. 한 `plan_batch(n)` 호출은 알고리즘들을 라운드로빈으로 분배하고, 알고리즘 내부 시드는 RNG에서 뽑는다 → 후보 N개 = 모드 다양성 × 시드 다양성.
+| Slot | 설명 |
+|------|------|
+| `slot 0` | direct — start→goal 한 segment (baseline) |
+| `slot 1..n-1` | via — start → v_1 → … → v_K → goal, `K ∈ {1, …, K_max}` random |
+
+via-point 위치는 직선에서 `curobo_via_offset_mag` (기본 0.10m) 거리만큼
+랜덤 방향으로 떨어진 점에서 IK 로 풀어낸다.
 
 ### Fixed-joint planning
 
-SO-101 5-DoF 중 wrist_roll(joint index 4)을 plan 도중 고정. cartesian-IK 경로의 `maintain_wrist_roll=True` 동작과 일치시켜 transit 중 gripper roll wiggle을 제거. OMPL 상태공간은 활성 관절(active_idx)만으로 구성되고, 결과 waypoint 확장 시 fixed joint는 start 값으로 broadcast.
+SO-101 5-DoF 중 `wrist_roll`(joint index 4) 을 plan 도중 고정. cartesian-IK
+경로의 `maintain_wrist_roll=True` 와 parity 를 맞춰 transit 중 gripper roll
+wiggle 을 제거. `curobo_backend.fixed_joint_indices=(4,)` 로 설정.
 
 ### Time parameterization
 
-OMPL 후보는 알고리즘별 waypoint 개수가 크게 다르다(RRTConnect ≈ 169 wp vs BITstar ≈ 56 wp at 같은 cost). mplib 기본 time-parameterize는 min-segment-time clamp 때문에 duration ∝ waypoint 수가 되어 RRTConnect가 ~3× 느려진다. 대신 **상수 관절 속도**(`OMPL_VELOCITY_FACTOR × planner.max_velocity`)로 직접 time-parameterize하여 duration이 path length(cost)에만 비례하도록 정규화. EE Cartesian 속도 cap(≈ 0.15 m/s)도 함께 적용해 curved path가 straight path보다 빠르지 않도록.
+candidate 별 waypoint 개수가 K (via 개수) 에 따라 달라지므로 기본 trajopt
+time-parameterize 가 duration ∝ waypoint 수로 편향될 수 있다. 대신 **상수
+관절 속도** (`SKILL_PERT_VELOCITY_FACTOR × planner.max_velocity`) + EE
+Cartesian cap (≈ 0.15 m/s) 으로 직접 time-parameterize 하여 duration 이
+path length 에만 비례하도록 정규화한다.
 
 ### Collision world
 
-`WorkspaceConfig`로 다음을 FCL 객체로 추가:
-- **table** (z=0 평면, 두께 0.1m, 2×2m) — 항상 권장
-- **ceiling** — optional
-- **other_arms** — bi-arm 셋업에서 다른 arm을 AABB로 모델링
-- **dynamic scene objects** — `update_scene(detected)` 로 detected objects를 worker별 collision world에 box 형태로 push (Phase 6, daemon-level 구현됨)
-
-`table_mount_links`에 등록된 robot link(`base_link`)는 `workspace_table`과의 충돌이 허용된다(arm이 테이블 위에 마운트되어 있으므로).
+curobo robot config (`robot_configs/curobo/so101_robot*.yml`) 안에 table
+plane / arm self-collision spheres 가 들어 있다. dynamic scene objects 는
+`skills.update_planner_obstacles()` 로 detect 결과를 push 하면 backend 가
+자체 collision world 에 box 로 반영한다.
 
 ### Fallback
 
-다음 중 어떤 조건이든 cartesian-line trajectory로 폴백:
+다음 중 어떤 조건이든 cartesian-line trajectory 로 폴백:
 - `is_transit=False`
 - 클라이언트/RNG 미연결
-- `plan_batch` 예외 (소켓/데몬 에러 등)
+- `plan_batch` 예외
 - 빈 후보 배치
 
-### 파라미터 / 설정 (`recording_config.yaml`)
+### 파라미터 / 설정 (`recording_config_*.yaml`)
 
 ```yaml
 perturbation:
   skill:
-    enabled: true              # OMPL ensemble 활성화
-    n_candidates: 4            # plan_batch의 배치 크기
-    planning_time: 0.5         # 초 — OMPL .solve() 호출당
-    waypoint_density: 0.02     # m — 출력 waypoint 간 joint-distance 상한
-    n_workers: 4               # daemon worker pool 크기
-    algorithms:
-      - RRTConnect
-      - PRMstar
-      - BITstar
-      # KPIECE1 제외 권장 — wild zigzag (z 400+mm) 위험
-    fixed_joint_indices: [4]   # SO-101 wrist_roll 고정. [] 면 5D 전체 plan
-    workspace:
-      table_enabled: true
-      table_z: 0.0
-      table_thickness: 0.10
-      table_size: [2.0, 2.0]
-      table_mount_links: [base_link]
-      ceiling_enabled: false
-      other_arms: []
+    enabled_forward: true                 # forward execution 에서 활성화
+    enabled_reset: false                  # reset 은 직선만 (기본)
+    n_candidates: 128
+    curobo_robot_cfg_path: robot_configs/curobo/so101_robot0.yml
+    curobo_num_trajopt_seeds: 4
+    curobo_num_ik_seeds: 16
+    curobo_use_cuda_graph: true
+    curobo_via_offset_mag: 0.10
+    curobo_junction_smooth_k: 5
+    curobo_max_vias_per_candidate: 1      # K_max
+    fixed_joint_indices: [4]              # SO-101 wrist_roll 고정
+    arm_joint_count: 5
 ```
 
 ### 주입 흐름
@@ -135,8 +138,9 @@ perturbation:
 ```
 execution_forward_and_reset._setup_skill_perturbation_on_skills()
   ├── recording_config의 perturbation.skill 읽기
-  ├── PlanServiceClient(urdf, config_dict) 생성  # daemon 자동 spawn
-  └── skills.set_skill_planner_client(client, n_candidates=4)
+  ├── transport=local  → CuroboBackend(urdf, cfg)
+  │   transport=grpc   → GrpcPlannerClient(PreselectiveClient(addr), provider)
+  └── skills.set_skill_planner_client(client, n_candidates=N)
 
 [per-episode]
 _seed_episode_perturbation(batch_index, slot_in_batch)
@@ -147,7 +151,7 @@ skills_lerobot.move_to_position()
   ├── cartesian-line IK plan → trajectory (goal_joint_rad 추출용)
   ├── if is_transit AND client AND rng AND ik_converged:
   │     seed = rng.integers(0, 2**31-1)
-  │     cands = client.plan_batch(current_joints, goal_joint_rad, n=4, seed)
+  │     cands = client.plan_batch(current_joints, goal_joint_rad, n=N, seed)
   │     if cands:
   │       chosen = cands[rng.integers(0, len(cands))]
   │       trajectory.joint_positions = chosen.waypoints
@@ -157,23 +161,21 @@ skills_lerobot.move_to_position()
 
 [teardown]
 _teardown_skill_perturbation()
-  └── client.close()  # daemon에 shutdown 송신 + Popen.wait
+  └── client.close()  # CUDA graph 해제 + cache empty
 ```
 
 ### 파일 목록
 
-| 경로 | 상태 | 목적 |
-|------|------|------|
-| `perturbation/skill_level/__init__.py` | 신규 | public API export |
-| `perturbation/skill_level/planner.py` | 신규 | `PlannerEnsemble`, `PlannerEnsembleConfig`, `TrajectoryCandidate`, fixed-joint OMPL |
-| `perturbation/skill_level/parallel.py` | 신규 | `ParallelEnsemble` (mp.Pool, 워커별 planner 캐시, dynamic scene update) |
-| `perturbation/skill_level/collision_world.py` | 신규 | `WorkspaceConfig` + `build_workspace_objects` (table/ceiling/other_arms) |
-| `perturbation/skill_level/client.py` | 신규 | `PlanServiceClient` — daemon auto-spawn, Unix-socket RPC |
-| `perturbation/skill_level/daemon/server.py` | 신규 | mplib_env에서 도는 RPC 서버 |
-| `perturbation/skill_level/daemon/protocol.py` | 신규 | length-prefixed JSON 인코딩 |
-| `skills/skills_lerobot.py` | 변경 | `set_skill_planner_client` + `move_to_position` 안 OMPL 후보 선택 / 시간 재파라미터화 |
-| `execution_forward_and_reset.py` | 변경 | `_setup_skill_perturbation_on_skills` / `_teardown_skill_perturbation` |
-| `pipeline_config/recording_config_ws*.yaml` | 변경 | `perturbation.skill` 섹션 |
+| 경로 | 목적 |
+|------|------|
+| `perturbation/skill_level/__init__.py` | `TrajectoryCandidate`, `get_curobo_backend()` 노출 |
+| `perturbation/skill_level/planner.py` | `TrajectoryCandidate` dataclass (wire shape) |
+| `perturbation/skill_level/curobo_backend.py` | `CuroboBackend` + `CuroboBackendConfig` |
+| `vla_adaptor/grpc_planner_adapter.py` | `GrpcPlannerClient` — gRPC 모드 클라이언트 |
+| `preselective_rpc/server.py` | H100 측 plan+select gRPC 서버 |
+| `skills/skills_lerobot.py` | `set_skill_planner_client` + `move_to_position` candidate 선택 / 시간 재파라미터화 |
+| `execution_forward_and_reset.py` | `_setup_skill_perturbation_on_skills` / `_teardown_skill_perturbation` |
+| `pipeline_config/recording_config_ws*.yaml` | `perturbation.skill` 섹션 |
 
 ---
 
@@ -224,7 +226,7 @@ skills_lerobot.move_to_position()
   │     if kinematics.is_position_reachable(candidate):
   │       target_position = candidate
   │     else: drop offset, log fallback
-  └── proceed with IK + trajectory plan (스킬-level (2)가 켜져 있으면 그 후 OMPL 교체)
+  └── proceed with IK + trajectory plan (스킬-level (2)가 켜져 있으면 그 후 curobo 후보로 교체)
 ```
 
 `perturbation_disabled()` 컨텍스트 매니저로 reset 실행 시 일시 해제.
@@ -241,7 +243,7 @@ perturbation:
 
 ### RNG 시딩
 
-에피소드의 `seed` 값으로 `np.random.default_rng(seed)` 생성. 동일 seed + 동일 config → 동일 perturbation offset (재현 가능). 다른 trial에서는 다른 offset이 나오도록 trial별로 별도 RNG를 쓰거나, seed에 trial을 mixing하는 방식으로 확장. 한 RNG가 (3) subgoal과 (2) skill-level OMPL seed 추첨 모두에 사용된다.
+에피소드의 `seed` 값으로 `np.random.default_rng(seed)` 생성. 동일 seed + 동일 config → 동일 perturbation offset (재현 가능). 다른 trial에서는 다른 offset이 나오도록 trial별로 별도 RNG를 쓰거나, seed에 trial을 mixing하는 방식으로 확장. 한 RNG가 (3) subgoal과 (2) skill-level curobo via-point seed 추첨 모두에 사용된다.
 
 ### 파일 목록
 
@@ -279,7 +281,7 @@ Selector는 candidate pool과 최종 dataset 사이에 끼워, **목표 데이�
 ┌─────────────────────────────────────────────────────────────┐
 │ generator side  (1) 2-layer perturbation                    │
 │                                                             │
-│   (2) OMPL Planner ensemble [skill-level]                   │
+│   (2) curobo via-point planner [skill-level]                │
 │   (3) 3D Gaussian subgoal   [subgoal-level]                 │
 │                                                             │
 │   → candidate pool: logs/seed_*/trial_*/                    │

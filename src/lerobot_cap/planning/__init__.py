@@ -2,7 +2,7 @@
 Planning Layer
 
 Motion planning and trajectory generation.
-Uses OMPL for path planning (optional) and custom trajectory interpolation.
+Custom trajectory interpolation for joint-space and Cartesian-space paths.
 """
 
 from lerobot_cap.planning.trajectory import TrajectoryPlanner, Trajectory

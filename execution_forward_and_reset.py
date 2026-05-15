@@ -350,11 +350,16 @@ class ForwardAndResetPipeline(BasePipeline):
                 except KeyError:
                     continue
 
+        # Transit-time wrist-camera pitch preference. Independent of
+        # perturbation; only biases multi-IK candidate selection on transits.
+        self._setup_transit_pitch_pref_on_skills()
         # Subgoal-level perturbation: read recording_config and attach if enabled.
         # Per-episode RNG is seeded later via _seed_episode_perturbation().
         self._setup_perturbation_on_skills()
-        # Skill-level perturbation (OMPL ensemble via daemon). Same gating as
-        # subgoal — the daemon only spawns when skill.enabled == true.
+        # Skill-level perturbation (curobo backend, in-process). Same gating
+        # as subgoal — created only when perturbation.skill.enabled_* is true.
+        # Skipped entirely when preselective_filter.transport=grpc (server side
+        # owns the planner in that case).
         self._setup_skill_perturbation_on_skills()
         # Method 3: pre-selective acquisition. Wraps the RNG candidate pick
         # with an IG·AC selector backed by SmolVLA + a per-skill jsonl buffer.
@@ -413,6 +418,34 @@ class ForwardAndResetPipeline(BasePipeline):
             preselective=not pf.get(phase, False),
         )
 
+    def _setup_transit_pitch_pref_on_skills(self) -> None:
+        """Read ``transit_pitch_max_deg`` from recording_config and apply to skills.
+
+        Top-level yaml key (no nested section). When present and non-null,
+        transits prefer IK solutions whose gripper pitch ≤ this value (deg).
+        Negative = tilted down (e.g., -30 → at least 30° below horizontal).
+        Silent no-op if absent.
+        """
+        if not self.recording_config:
+            return
+        cfg_path = Path(self.recording_config)
+        if not cfg_path.exists():
+            return
+        try:
+            import yaml as _yaml
+            with open(cfg_path, "r") as f:
+                full_cfg = _yaml.safe_load(f) or {}
+        except Exception:
+            return
+        val = full_cfg.get("transit_pitch_max_deg")
+        if val is None:
+            return
+        try:
+            self._skills.set_transit_pitch_max_deg(float(val))
+            print(f"[Transit IK] pitch ≤ {float(val):.1f}° preferred during transits")
+        except Exception as e:
+            print(f"[Transit IK] failed to apply transit_pitch_max_deg: {e}")
+
     def _setup_perturbation_on_skills(self) -> None:
         """Read perturbation.subgoal from recording_config.yaml and wire to skills.
 
@@ -459,11 +492,10 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Perturbation] Failed to construct perturbation: {e}")
 
     def _setup_skill_perturbation_on_skills(self) -> None:
-        """Read perturbation.skill from recording_config and wire a PlanServiceClient.
+        """Read perturbation.skill from recording_config and wire a curobo backend.
 
-        Silent no-op when recording_config absent or skill perturbation disabled.
-        Daemon (mplib_env) auto-spawns on client construction; lerobot_cap process
-        keeps a reference and shuts it down at teardown via ``_teardown_skill_perturbation``.
+        Silent no-op when recording_config absent, skill perturbation disabled,
+        or transport=grpc (server side owns the planner in that case).
         """
         self._skill_planner_phase = {"forward": False, "reset": False}
         if not self.recording_config:
@@ -496,22 +528,6 @@ class ForwardAndResetPipeline(BasePipeline):
             )
             return
 
-        # Backend choice (yaml key `perturbation.skill.backend`):
-        #   - "ompl"   (default): OMPL via mplib_env subprocess daemon.
-        #   - "curobo": GPU-accelerated curobo, in-process (no daemon).
-        # Both expose the same plan_batch(start, goal, n, rng) signature so
-        # skills_lerobot.set_skill_planner_client treats them identically.
-        backend_name = str(skill_raw.get("backend", "ompl")).lower()
-        if backend_name not in ("ompl", "curobo"):
-            print(f"[Skill Perturbation] unknown backend {backend_name!r}; defaulting to ompl")
-            backend_name = "ompl"
-
-        try:
-            from perturbation.skill_level import PlanServiceClient
-        except Exception as e:
-            print(f"[Skill Perturbation] import failed (skill_level package): {e}")
-            return
-
         # Resolve URDF path from the skills' robot config YAML directly.
         # NOTE: self._skills.config is None until LeRobotSkills.connect() runs;
         # this hook fires earlier (during _create_skills), so we must read the
@@ -536,124 +552,86 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Skill Perturbation] URDF not found ({urdf_path!r}); skipping")
             return
 
-        # Build planner config dict for the daemon.
-        planner_cfg = dict(
-            enabled=True,
-            algorithms=tuple(skill_raw.get("algorithms",
-                                            ("RRTConnect", "PRMstar", "BITstar", "KPIECE1"))),
-            planning_time=float(skill_raw.get("planning_time", 0.5)),
-            waypoint_density=float(skill_raw.get("waypoint_density", 0.02)),
-            workspace=skill_raw.get("workspace") or None,
-            fixed_joint_indices=tuple(skill_raw.get("fixed_joint_indices") or ()),
-        )
-        # Normalize workspace nested types (yaml gives lists; the dataclass
-        # defaults are tuples, but mplib accepts both).
-        ws = planner_cfg.get("workspace")
-        if isinstance(ws, dict):
-            if "table_size" in ws and ws["table_size"] is not None:
-                ws["table_size"] = tuple(ws["table_size"])
-            if "table_mount_links" in ws and ws["table_mount_links"] is not None:
-                ws["table_mount_links"] = tuple(ws["table_mount_links"])
-
-        # Per-robot socket so multiple robots in one host don't collide.
-        # Use the robot config stem as the id (e.g., "so101_robot0") since
-        # self._skills.config is still None at this point.
+        # Robot id used to locate the curobo robot config under
+        # robot_configs/curobo/<robot_id>.yml when no explicit override.
         robot_id = "default"
         try:
             robot_id = Path(self._skills.robot_config_path).stem
         except Exception:
             pass
-        import os as _os
-        socket_path = f"/tmp/lerobot_planner_{_os.getuid()}_{robot_id}.sock"
 
         try:
-            if backend_name == "curobo":
-                # ── curobo backend: in-process, no daemon, no IPC. ───────────
-                from perturbation.skill_level import get_curobo_backend
-                CuroboBackend, CuroboBackendConfig = get_curobo_backend()
-                # YAML may specify a custom curobo robot config path; fall back
-                # to the auto-generated default under robot_configs/curobo/.
-                # Relative paths MUST be resolved to absolute here — curobo's
-                # internal robot-loader otherwise tries to resolve them against
-                # its own content/configs/robot/ directory, producing nonsense
-                # paths like ".../src/nvidia-curobo/.../robot_configs/curobo/X.yml".
-                project_root = Path(self.recording_config).resolve().parent.parent
-                default_curobo_cfg = str(
-                    project_root / "robot_configs" / "curobo" / f"{robot_id}.yml"
-                )
-                curobo_cfg_path = skill_raw.get("curobo_robot_cfg_path") or default_curobo_cfg
-                _cp = Path(curobo_cfg_path)
-                if not _cp.is_absolute():
-                    _cp = project_root / _cp
-                curobo_cfg_path = str(_cp.resolve())
-                if not Path(curobo_cfg_path).exists():
-                    print(
-                        f"[Skill Perturbation] curobo robot config missing: "
-                        f"{curobo_cfg_path}\n  Generate via: "
-                        f"python -m curobo.examples.getting_started.build_robot_model "
-                        f"--urdf {urdf_path} --output {curobo_cfg_path}"
-                    )
-                    return
-                _n_cand = int(skill_raw.get("n_candidates", 4))
-                cb_cfg = CuroboBackendConfig(
-                    enabled=True,
-                    robot_cfg_path=curobo_cfg_path,
-                    num_trajopt_seeds=int(skill_raw.get("curobo_num_trajopt_seeds", 4)),
-                    num_ik_seeds=int(skill_raw.get("curobo_num_ik_seeds", 16)),
-                    use_cuda_graph=bool(skill_raw.get("curobo_use_cuda_graph", False)),
-                    via_offset_mag=float(skill_raw.get("curobo_via_offset_mag", 0.10)),
-                    junction_smooth_k=int(skill_raw.get("curobo_junction_smooth_k", 5)),
-                    fixed_joint_indices=tuple(skill_raw.get("fixed_joint_indices") or ()),
-                    arm_joint_count=int(skill_raw.get("arm_joint_count", 5)),
-                    max_vias_per_candidate=int(
-                        skill_raw.get("curobo_max_vias_per_candidate", 1)
-                    ),
-                    # CUDA graph batch must cover n_candidates; otherwise plan_batch
-                    # caps n via `min(n, max_batch_size)` and we silently get fewer.
-                    max_batch_size=_n_cand,
-                )
-                client = CuroboBackend(urdf=urdf_path, config=cb_cfg)
-                self._skill_planner_client = client
-                self._skills.set_skill_planner_client(
-                    client, n_candidates=int(skill_raw.get("n_candidates", 4)),
-                )
+            from perturbation.skill_level import get_curobo_backend
+            CuroboBackend, CuroboBackendConfig = get_curobo_backend()
+            # YAML may specify a custom curobo robot config path; fall back
+            # to the auto-generated default under robot_configs/curobo/.
+            # Relative paths MUST be resolved to absolute here — curobo's
+            # internal robot-loader otherwise tries to resolve them against
+            # its own content/configs/robot/ directory, producing nonsense
+            # paths like ".../src/nvidia-curobo/.../robot_configs/curobo/X.yml".
+            project_root = Path(self.recording_config).resolve().parent.parent
+            default_curobo_cfg = str(
+                project_root / "robot_configs" / "curobo" / f"{robot_id}.yml"
+            )
+            curobo_cfg_path = skill_raw.get("curobo_robot_cfg_path") or default_curobo_cfg
+            _cp = Path(curobo_cfg_path)
+            if not _cp.is_absolute():
+                _cp = project_root / _cp
+            curobo_cfg_path = str(_cp.resolve())
+            if not Path(curobo_cfg_path).exists():
                 print(
-                    f"[Skill Perturbation] CUROBO backend ENABLED "
-                    f"(robot_cfg={curobo_cfg_path}, n_candidates={skill_raw.get('n_candidates', 4)})"
+                    f"[Skill Perturbation] curobo robot config missing: "
+                    f"{curobo_cfg_path}\n  Generate via: "
+                    f"python -m curobo.examples.getting_started.build_robot_model "
+                    f"--urdf {urdf_path} --output {curobo_cfg_path}"
                 )
-            else:
-                # ── OMPL backend (default): subprocess daemon. ───────────────
-                client = PlanServiceClient(
-                    urdf=urdf_path,
-                    config=planner_cfg,
-                    socket_path=socket_path,
-                    n_workers=int(skill_raw.get("n_workers", 4)),
-                    autospawn=True,
-                )
-                self._skill_planner_client = client
-                self._skills.set_skill_planner_client(
-                    client, n_candidates=int(skill_raw.get("n_candidates", 4)),
-                )
-                print(
-                    f"[Skill Perturbation] OMPL ensemble ENABLED "
-                    f"(algos={planner_cfg['algorithms']}, n_candidates={skill_raw.get('n_candidates', 4)}, "
-                    f"socket={socket_path})"
-                )
+                return
+            _n_cand = int(skill_raw.get("n_candidates", 4))
+            cb_cfg = CuroboBackendConfig(
+                enabled=True,
+                robot_cfg_path=curobo_cfg_path,
+                num_trajopt_seeds=int(skill_raw.get("curobo_num_trajopt_seeds", 4)),
+                num_ik_seeds=int(skill_raw.get("curobo_num_ik_seeds", 16)),
+                use_cuda_graph=bool(skill_raw.get("curobo_use_cuda_graph", False)),
+                via_offset_mag=float(skill_raw.get("curobo_via_offset_mag", 0.10)),
+                junction_smooth_k=int(skill_raw.get("curobo_junction_smooth_k", 5)),
+                fixed_joint_indices=tuple(skill_raw.get("fixed_joint_indices") or ()),
+                arm_joint_count=int(skill_raw.get("arm_joint_count", 5)),
+                max_vias_per_candidate=int(
+                    skill_raw.get("curobo_max_vias_per_candidate", 1)
+                ),
+                # Option A wrist-cam transit bias. Top-level transit_pitch_max_deg
+                # (the same knob that gates endpoint IK) also clamps every
+                # via-point orientation, so the whole curobo path stays
+                # pitch-down. None when the key is absent.
+                via_pitch_max_rad=(
+                    None if full_cfg.get("transit_pitch_max_deg") is None
+                    else float(np.radians(float(full_cfg["transit_pitch_max_deg"])))
+                ),
+                # CUDA graph batch must cover n_candidates; otherwise plan_batch
+                # caps n via `min(n, max_batch_size)` and we silently get fewer.
+                max_batch_size=_n_cand,
+            )
+            client = CuroboBackend(urdf=urdf_path, config=cb_cfg)
+            self._skill_planner_client = client
+            self._skills.set_skill_planner_client(client, n_candidates=_n_cand)
+            print(
+                f"[Skill Perturbation] CUROBO backend ENABLED "
+                f"(robot_cfg={curobo_cfg_path}, n_candidates={_n_cand})"
+            )
             # Apply pending per-episode seed (mirror subgoal setup). The RNG
             # check in skills_lerobot.move_to_position swap requires this.
             pending = getattr(self, "_pending_perturbation_seed", None)
             if pending is not None:
                 self._skills.set_perturbation_rng(pending)
         except Exception as e:
-            print(f"[Skill Perturbation] Failed to init backend {backend_name!r}: {e}")
+            print(f"[Skill Perturbation] Failed to init curobo backend: {e}")
             self._skill_planner_client = None
 
     def _teardown_skill_perturbation(self) -> None:
-        """Shut down whichever backend was attached (OMPL daemon or curobo).
+        """Shut down the curobo backend (frees CUDA graph + planner state).
 
-        Both backends expose ``close()`` (PlanServiceClient terminates its
-        daemon subprocess; CuroboBackend drops planner state + frees CUDA
-        graph memory). Called between pipeline sessions and on Ctrl+C.
+        Called between pipeline sessions and on Ctrl+C.
         """
         client = getattr(self, "_skill_planner_client", None)
         if client is None:
@@ -1165,7 +1143,7 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"[Recording] Warning: Failed to disconnect cameras: {e}")
             self.camera_manager = None
 
-        # Skill-level perturbation: shut down OMPL daemon if it was spawned
+        # Skill-level perturbation: shut down curobo backend if it was spawned
         try:
             self._teardown_skill_perturbation()
             self._teardown_preselective_filter()

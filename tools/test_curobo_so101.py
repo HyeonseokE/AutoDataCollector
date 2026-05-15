@@ -3,7 +3,7 @@
 Verifies the auto-generated robot config (robot_configs/curobo/so101_robot0.yml)
 loads and plans a single trajectory. Mirrors the franka.yml smoke test but with
 our 5-DoF arm. Output reports waypoint count, duration, success rate, and plan
-latency for comparison against the OMPL backend.
+latency.
 
 Usage:
     conda activate lerobot_cap
@@ -60,7 +60,7 @@ def main() -> int:
     print(f"[info] start qpos shape: {q_start.position.shape}")
     print(f"[info] start qpos: {q_start.position.cpu().numpy().tolist()}")
 
-    # Goal: 5-joint qpos matching the OMPL smoke test target.
+    # Goal: 5-joint qpos smoke test target.
     # plan_cspace takes a JointState goal (no IK needed).
     import numpy as np
     goal_q = torch.tensor(

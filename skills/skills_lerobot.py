@@ -201,20 +201,29 @@ class LeRobotSkills:
         self._perturbation = None      # SubgoalPerturbation or None
         self._perturbation_rng = None  # np.random.Generator or None
 
-        # Skill-level perturbation: OMPL planner ensemble talked to via a
-        # PlanServiceClient (separate mplib_env). When attached + RNG set +
-        # is_transit, move_to_position swaps the cartesian-line trajectory
-        # for an OMPL joint-space candidate randomly drawn from a batch.
-        # See perturbation/skill_level.
-        self._skill_planner_client = None     # PlanServiceClient or None
+        # Skill-level perturbation: curobo motion planner (in-process, GPU).
+        # When attached + RNG set + is_transit, move_to_position swaps the
+        # cartesian-line trajectory for one joint-space candidate drawn from a
+        # batched plan_batch(start, goal, n, seed) call. See
+        # perturbation/skill_level for the local backend and
+        # vla_adaptor.grpc_planner_adapter for the gRPC drop-in.
+        self._skill_planner_client = None     # CuroboBackend / GrpcPlannerClient
         # Skill candidate selector hook (Method 3 / preselective_filter).
-        # When set, it overrides the default RNG choice over OMPL/curobo
-        # plan_batch results. Signature:
+        # When set, it overrides the default RNG choice over plan_batch
+        # results. Signature:
         #   fn(cands, current_joints, goal_joint_rad, is_transit) -> int | None
         # Return None to fall back to RNG. See vla_adaptor for the production
         # selector wiring.
         self._skill_candidate_selector = None
         self._skill_planner_n_candidates = 4  # batch size; fallback to old path on empty
+
+        # Transit-time pitch preference. When set, multi-IK for is_transit=True
+        # moves only keeps solutions with gripper pitch ≤ this value (radians).
+        # Negative = tilted down. Lets the wrist camera consistently look at
+        # the workspace during transits. Falls back to all valid solutions if
+        # nothing satisfies the bound so reachability is never sacrificed.
+        # Configure via recording_config.yaml: transit_pitch_max_deg.
+        self._transit_pitch_max_rad: Optional[float] = None
 
         # Caller positions reference for detect_objects auto-merge / label
         # preservation. Set by TaskRunner.execute() per task.
@@ -236,8 +245,18 @@ class LeRobotSkills:
         """(Re)seed the per-episode RNG for perturbation sampling."""
         self._perturbation_rng = np.random.default_rng(int(seed))
 
+    def set_transit_pitch_max_deg(self, pitch_max_deg: Optional[float]) -> None:
+        """Bias transit IK toward gripper pitch ≤ pitch_max_deg (e.g., -30 = at least
+        30° tilted down). Pass None to disable. Applied only when is_transit=True
+        and no explicit target_pitch is given. Reachability is preserved: if no
+        solution meets the bound, falls back to the unfiltered set.
+        """
+        self._transit_pitch_max_rad = (
+            None if pitch_max_deg is None else float(np.radians(pitch_max_deg))
+        )
+
     # ─────────────────────────────────────────────
-    # Skill-level perturbation hooks (OMPL via daemon)
+    # Skill-level perturbation hooks (curobo backend or gRPC)
     # ─────────────────────────────────────────────
     def set_skill_candidate_selector(self, selector_fn) -> None:
         """Attach a candidate-selection hook. Pass None to detach.
@@ -251,12 +270,16 @@ class LeRobotSkills:
         self._skill_candidate_selector = selector_fn
 
     def set_skill_planner_client(self, client, n_candidates: int = 4) -> None:
-        """Attach a PlanServiceClient. Pass None to detach.
+        """Attach a skill planner client. Pass None to detach.
+
+        ``client`` is either a local ``CuroboBackend`` or the
+        ``GrpcPlannerClient`` adapter that delegates to a remote server.
+        Both expose ``plan_batch(start, goal, n, seed) → list[Candidate]``.
 
         When attached AND the per-episode RNG is set AND is_transit=True,
         move_to_position will replace its cartesian-line trajectory with
-        one OMPL joint-space candidate randomly drawn from a batch of
-        ``n_candidates`` parallel plans (different algos, different seeds).
+        one joint-space candidate drawn from a batch of ``n_candidates``
+        plans (via-point variants for curobo; server's IG·AC pick for grpc).
         Fallback to the original cartesian path is automatic on empty batch.
         """
         self._skill_planner_client = client
@@ -1451,7 +1474,7 @@ class LeRobotSkills:
                 total_out = sum(u.get("output_tokens", 0) for u in detect_usage_list)
                 self._log(f"  [detect_objects] Token usage: in={total_in}, out={total_out}")
 
-            # Phase 6 auto-hook: push detected positions into the OMPL daemon's
+            # Phase 6 auto-hook: push detected positions into the planner's
             # collision world so subsequent transit plans avoid them. Silent
             # no-op when skill perturbation isn't enabled. Filters out None
             # entries (failed detections). Each object becomes a small Box;
@@ -1466,12 +1489,17 @@ class LeRobotSkills:
                 }
                 if obstacles:
                     try:
-                        rep = self._skill_planner_client.update_scene(obstacles)
-                        self._log(
-                            f"  [Skill Perturbation] update_scene: "
-                            f"+{rep.get('added',0)} -{rep.get('removed',0)} "
-                            f"={rep.get('kept',0)}"
-                        )
+                        rep = self._skill_planner_client.update_scene(obstacles) or {}
+                        # curobo + grpc adapters are no-ops (static collision world);
+                        # only log when the backend actually changed something.
+                        if rep.get("added", 0) or rep.get("removed", 0):
+                            self._log(
+                                f"  [Skill Perturbation] update_scene: "
+                                f"+{rep.get('added',0)} -{rep.get('removed',0)} "
+                                f"={rep.get('kept',0)}"
+                            )
+                    except AttributeError:
+                        pass  # backend doesn't implement dynamic scene
                     except Exception as e:
                         self._log(f"  [Skill Perturbation] update_scene failed: {e}")
 
@@ -1699,6 +1727,14 @@ class LeRobotSkills:
             ik_target_pitch = current_pitch
             self._log(f"  Maintaining pitch at {np.degrees(current_pitch):.1f}°")
 
+        # Transit-time pitch-down preference: applies only when this is a pure
+        # transit AND no explicit target_pitch is in play (pick/place restore
+        # their own pitch). Wrist-cam stays oriented toward the workspace.
+        prefer_pitch_max = None
+        if (is_transit and ik_target_pitch is None
+                and self._transit_pitch_max_rad is not None):
+            prefer_pitch_max = self._transit_pitch_max_rad
+
         # Plan trajectory with position-only IK but fixed wrist_roll and optional pitch constraint
         # Use ik_target_position (with gravity sag offset) for IK planning
         trajectory, ik_info = active_planner.plan_to_position_multi(
@@ -1709,10 +1745,17 @@ class LeRobotSkills:
             verbose=False,
             fixed_joints=fixed_joints_list,
             target_pitch=ik_target_pitch,
+            prefer_pitch_max_rad=prefer_pitch_max,
         )
         self._log(f"  Multi-IK: {ik_info['num_valid']}/{ik_info['num_solutions']} valid solutions")
         if ik_info.get("selected_pitch") is not None:
-            self._log(f"  Selected pitch: {np.degrees(ik_info['selected_pitch']):.1f}°")
+            tag = ""
+            if prefer_pitch_max is not None:
+                if ik_info.get("pitch_filter_applied"):
+                    tag = f" [pitch≤{np.degrees(prefer_pitch_max):.0f}° kept {ik_info['pitch_filter_kept']}]"
+                else:
+                    tag = f" [pitch≤{np.degrees(prefer_pitch_max):.0f}° no fit → unfiltered]"
+            self._log(f"  Selected pitch: {np.degrees(ik_info['selected_pitch']):.1f}°{tag}")
 
         if not trajectory.ik_converged:
             if ik_target_pitch is not None:
@@ -1816,14 +1859,16 @@ class LeRobotSkills:
 
         goal_joint_rad = trajectory.joint_positions[-1]
 
-        # Skill-level perturbation (Phase 5): swap the cartesian-line trajectory
-        # for an OMPL joint-space candidate. Conditions:
+        # Skill-level perturbation: swap the cartesian-line trajectory for a
+        # joint-space candidate from the attached planner. Conditions:
         #   - is_transit=True (caller-declared transit; not pick/place descents)
-        #   - PlanServiceClient attached AND per-episode RNG attached
+        #   - planner client attached (curobo backend or gRPC adapter)
+        #   - per-episode RNG attached
         #   - existing IK converged (so we have a valid goal_joint_rad)
         # Uses the same start (current_joints) and goal (goal_joint_rad), but
-        # asks OMPL for N candidate paths and picks one randomly. Falls back
-        # to the cartesian-line trajectory on any error or empty batch.
+        # asks the planner for N candidate paths. A selector hook (Method 3)
+        # may pick the index; otherwise RNG fallback. Falls back to the
+        # cartesian-line trajectory on any error or empty batch.
         if (is_transit
                 and self._skill_planner_client is not None
                 and self._perturbation_rng is not None
@@ -1838,7 +1883,7 @@ class LeRobotSkills:
                 )
             except Exception as e:
                 cands = []
-                self._log(f"  [Skill Perturbation] daemon error, fallback to cartesian: {e}")
+                self._log(f"  [Skill Perturbation] planner error, fallback to cartesian: {e}")
 
             if cands:
                 # Candidate selection. Default: RNG uniform over batch.
@@ -1863,35 +1908,35 @@ class LeRobotSkills:
                     f"(seed={chosen.seed}, wp={chosen.waypoints.shape[0]}, "
                     f"cost={chosen.cost:.3f}) chosen from {len(cands)} candidates"
                 )
-                # Replace trajectory.joint_positions with the OMPL waypoints
+                # Replace trajectory.joint_positions with the planner waypoints
                 # and time-parameterize them at a CONSTANT joint velocity so
-                # the speed is identical across algorithms — duration scales
+                # the speed is identical across plan variants — duration scales
                 # purely with path length (cost). We do this manually instead
                 # of calling time_parameterize_trajectory because that helper
                 # has a min-segment-time clamp tied to max_segment_length /
-                # max_acceleration that, combined with OMPL's dense output,
-                # forces total duration ≈ N_waypoints × min_dt — i.e. duration
-                # ∝ waypoint count instead of cost. That made RRTConnect
-                # (169 wp) ~3× slower than BITstar (56 wp) at identical cost.
+                # max_acceleration that, combined with the planner's dense
+                # output, forces total duration ≈ N_waypoints × min_dt — i.e.
+                # duration ∝ waypoint count instead of cost, which would make
+                # denser paths run slower than sparser ones at identical cost.
                 new_joints = np.asarray(chosen.waypoints, dtype=float)
                 planner_max_v = float(getattr(active_planner, "max_velocity", 1.0))
-                # Constant velocity used for ALL OMPL transits, every algorithm.
-                OMPL_VELOCITY_FACTOR = 1.5
-                ompl_max_v = OMPL_VELOCITY_FACTOR * planner_max_v
-                # EE Cartesian velocity cap (m/s). The straight-path case
-                # (BITstar/PRMstar) is joint-velocity-bound and produces a
-                # natural EE speed of roughly (joint_max_v) × (typical Jacobian
-                # magnitude) ≈ 1.5 rad/s × 0.10 m/rad = 0.15 m/s. Setting the
-                # EE cap above this would let curved (RRTConnect-style) paths
-                # whose EE arc is longer than the joint motion run FASTER in
-                # m/s than straight paths — which is the very mismatch the
-                # cap was supposed to eliminate. So we set the cap AT the
-                # natural straight-path EE speed: both bindings active
-                # simultaneously, EE speed identical across all algorithms.
-                OMPL_MAX_EE_VELOCITY = 0.15  # m/s
+                # Constant velocity used for ALL planner transits, every variant.
+                SKILL_PERT_VELOCITY_FACTOR = 1.5
+                skill_pert_max_v = SKILL_PERT_VELOCITY_FACTOR * planner_max_v
+                # EE Cartesian velocity cap (m/s). The straight-path case is
+                # joint-velocity-bound and produces a natural EE speed of
+                # roughly (joint_max_v) × (typical Jacobian magnitude) ≈
+                # 1.5 rad/s × 0.10 m/rad = 0.15 m/s. Setting the EE cap above
+                # this would let curved (via-point) paths whose EE arc is
+                # longer than the joint motion run FASTER in m/s than straight
+                # paths — which is the very mismatch the cap was supposed to
+                # eliminate. So we set the cap AT the natural straight-path EE
+                # speed: both bindings active simultaneously, EE speed
+                # identical across all plan variants.
+                SKILL_PERT_MAX_EE_VELOCITY = 0.15  # m/s
                 seg_lens = np.linalg.norm(np.diff(new_joints, axis=0), axis=1)
                 # Joint-velocity bound: t_joint = joint_seg_len / max_joint_vel
-                t_joint = seg_lens / max(ompl_max_v, 1e-6)
+                t_joint = seg_lens / max(skill_pert_max_v, 1e-6)
                 # EE-velocity bound: t_ee = ||diff(ee_xyz)|| / max_ee_vel
                 try:
                     ee_xyz = np.asarray([
@@ -1899,7 +1944,7 @@ class LeRobotSkills:
                         for q in new_joints
                     ])
                     ee_seg_lens = np.linalg.norm(np.diff(ee_xyz, axis=0), axis=1)
-                    t_ee = ee_seg_lens / max(OMPL_MAX_EE_VELOCITY, 1e-6)
+                    t_ee = ee_seg_lens / max(SKILL_PERT_MAX_EE_VELOCITY, 1e-6)
                 except Exception as _e:
                     self._log(f"  [Skill Perturbation] FK for EE-vel cap failed ({_e}); joint-only")
                     t_ee = np.zeros_like(t_joint)
@@ -1915,7 +1960,7 @@ class LeRobotSkills:
                 # ee_positions cached array no longer matches; clear so executor
                 # recomputes via FK if needed.
                 trajectory.ee_positions = None
-                # goal_joint_rad unchanged — endpoint of OMPL plan == requested goal.
+                # goal_joint_rad unchanged — planner endpoint == requested goal.
             else:
                 self._log("  [Skill Perturbation] empty batch — using cartesian fallback")
 
@@ -2328,6 +2373,21 @@ class LeRobotSkills:
         # pick_z를 명목값으로 먼저 저장 (place에서 참조, pick 실패 시에도 crash 방지)
         self._pick_z = pick_z
 
+        # Re-center xy directly above the object at the current hover height.
+        # The upstream transit is subgoal-perturbed and can end up to ±100mm
+        # off the requested hover; without this correction the descent goes
+        # diagonally and accumulates IK + cartesian-line error, landing the
+        # fingertip several mm off the object centre. is_transit=False keeps
+        # perturbation off so the recenter itself is tight.
+        try:
+            _, _, _cur_ee = self._get_current_state()
+            recenter_xyz = [pick_position[0], pick_position[1], float(_cur_ee[2])]
+            self.move_to_position(recenter_xyz, target_name=pick_label,
+                                  skill_description=skill_description,
+                                  is_transit=False)
+        except Exception as _e:
+            self._log(f"  [Pick] xy recenter skipped ({_e})")
+
         # Descent to object contact — interaction subgoal, MUST NOT be perturbed.
         if not self.move_to_position(pick_position, target_name=pick_label,
                                      skill_description=skill_description,
@@ -2417,6 +2477,24 @@ class LeRobotSkills:
 
         # Move to place position (skill recording handled inside)
         place_label = f"place on {target_name}" if target_name else None
+
+        # Re-center xy directly above the place target at the current hover
+        # height. Same rationale as the pick recenter: the upstream transit is
+        # subgoal-perturbed and can leave the gripper up to ±100mm off the
+        # dish centre, so descending diagonally from there drops the block on
+        # the dish edge instead of the centre. Purely vertical descent after
+        # this recenter eliminates the diagonal-IK error budget entirely.
+        try:
+            _, _, _cur_ee = self._get_current_state()
+            recenter_xyz = [final_position[0], final_position[1], float(_cur_ee[2])]
+            self.move_to_position(recenter_xyz,
+                                  target_pitch=saved_pitch,
+                                  target_name=place_label,
+                                  skill_description=skill_description,
+                                  is_transit=False)
+        except Exception as _e:
+            self._log(f"  [Place] xy recenter skipped ({_e})")
+
         # Descent to place contact — interaction subgoal, MUST NOT be perturbed.
         if not self.move_to_position(final_position,
                                      target_pitch=saved_pitch,

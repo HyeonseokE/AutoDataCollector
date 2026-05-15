@@ -25,10 +25,10 @@ score `IG · AC` can label genuinely OOD regions as "Useful Diversity".
 
 1. **Scope** — Method 3 operates on the "novel but in-distribution"
    region. Fully-OOD states are out of scope.
-2. **Upstream guard** — Method 2 perturbation layers (skill-level
-   OMPL/Curobo + subgoal Gaussian) are tuned to keep candidates
-   task-relevant. Candidates drifting into hard OOD are not Method 3's
-   responsibility to detect.
+2. **Upstream guard** — Method 2 perturbation layers (skill-level curobo
+   + subgoal Gaussian) are tuned to keep candidates task-relevant.
+   Candidates drifting into hard OOD are not Method 3's responsibility
+   to detect.
 3. **No-threshold selection** — Per spec, every skill step must produce
    one choice. Even an OOD-tainted choice degrades to "least bad", not
    to a corrupted dataset gate.

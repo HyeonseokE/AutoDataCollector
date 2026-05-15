@@ -908,6 +908,7 @@ class KinematicsEngine:
         verbose: bool = False,
         fixed_joints: Optional[List[int]] = None,
         target_pitch: Optional[float] = None,
+        prefer_pitch_max_rad: Optional[float] = None,
     ) -> Tuple[np.ndarray, bool, dict]:
         """
         Multi-solution IK solver that tries multiple initial guesses.
@@ -1080,12 +1081,31 @@ class KinematicsEngine:
             else:
                 return self._q_to_joint_positions(self.q_neutral), False, info
 
+        # Pitch-down preference (transit-time wrist-camera bias): if
+        # prefer_pitch_max_rad is set, keep only solutions whose gripper
+        # pitch <= max (i.e., gripper points at or below that angle from
+        # horizontal). Negative numbers = tilted down. Fall through to the
+        # unfiltered set if nothing satisfies the bound so reachability is
+        # never sacrificed.
+        candidate_solutions = valid_solutions
+        if prefer_pitch_max_rad is not None:
+            filtered = [s for s in valid_solutions
+                        if s.get("pitch") is not None
+                        and s["pitch"] <= prefer_pitch_max_rad]
+            if filtered:
+                candidate_solutions = filtered
+                info["pitch_filter_applied"] = True
+                info["pitch_filter_kept"] = len(filtered)
+            else:
+                info["pitch_filter_applied"] = False
+                info["pitch_filter_kept"] = 0
+
         # Select best valid solution (closest to current joints)
         if current_joints is not None:
-            best = min(valid_solutions, key=lambda s: joint_distance(s["joints"], current_joints))
+            best = min(candidate_solutions, key=lambda s: joint_distance(s["joints"], current_joints))
         else:
             # If no current joints, pick the one with smallest position error
-            best = min(valid_solutions, key=lambda s: s["position_error"])
+            best = min(candidate_solutions, key=lambda s: s["position_error"])
 
         info["selected"] = best["name"]
         info["selected_pitch"] = best.get("pitch")

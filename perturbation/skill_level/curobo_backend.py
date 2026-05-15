@@ -1,9 +1,9 @@
 """Curobo-based skill-level perturbation backend (v2 — batched + cuda graph + locked joints).
 
-Design fixes applied vs v1:
+Design notes:
   1. CUDA graph enabled + consistent shapes ⇒ ~25× per-plan speedup.
-  2. ``fixed_joint_indices`` enforced — wrist_roll lock matches the OMPL
-     branch (cartesian IK already fixes it; curobo also).
+  2. ``fixed_joint_indices`` enforced — wrist_roll lock matches cartesian IK
+     behaviour (e.g. SO-101 keeps gripper roll fixed during transit).
   3. ``ik_solver.solve_pose`` for via_qpos (skip the costly plan_pose).
   4. Batched plan_cspace — N candidates compute in one GPU pass.
 
@@ -20,8 +20,9 @@ For the i=0 (direct) candidate, seg2[0] is a trivial goal→goal plan; we use
 seg1[0] only and discard seg2[0]. This keeps batch shape consistent so a
 single CUDA graph services every seg1 and seg2 call across plan_batch calls.
 
-Public interface mirrors ``PlannerEnsemble.plan_batch`` for duck-type swap
-with the OMPL backend via yaml ``perturbation.skill.backend``.
+Public interface exposes ``plan_batch(start, goal, n, rng)`` so the gRPC
+adapter (``vla_adaptor.grpc_planner_adapter.GrpcPlannerClient``) can duck-type
+the same call.
 """
 
 from __future__ import annotations
@@ -83,6 +84,13 @@ class CuroboBackendConfig:
     #       plan_cspace batch + N × K_max IK batch, so VRAM grows ~1.5×
     #       per K_max step.
     max_vias_per_candidate: int = 1
+    # Wrist-camera transit bias (Option A). When set, every via-point IK
+    # goalset orientation is clamped so the gripper Z-axis (pointing
+    # direction) elevation ≤ this value (radians; negative = tilted down).
+    # This forces vias to be pitch-down regardless of how the start/goal
+    # endpoint yaws differ — slerp alone does not preserve pitch when the
+    # two endpoint orientations are far apart. None = no clamp (legacy).
+    via_pitch_max_rad: Optional[float] = None
 
 
 class CuroboBackend:
@@ -133,6 +141,9 @@ class CuroboBackend:
         # via curobo's goalset dimension G = len(self._slerp_ratios).
         self._slerp_ratios = (0.5, 0.3, 0.7, 0.0, 1.0)
         self._n_goalset = len(self._slerp_ratios)
+
+        # Option A: via-point orientation pitch clamp (wrist-cam transit bias).
+        self._via_pitch_max_rad = config.via_pitch_max_rad
 
         # Multi-via geometry:
         #   _max_vias     = K_max (config.max_vias_per_candidate). 0 disables
@@ -210,6 +221,13 @@ class CuroboBackend:
     def dof(self) -> int:
         return self._n_arm
 
+    def update_scene(self, obstacles) -> dict:  # noqa: ARG002
+        # The previous CPU-OMPL daemon mutated its FCL world here. curobo
+        # uses a static collision world baked into the robot yaml, so this
+        # is intentionally a no-op — kept only to satisfy the duck-typed
+        # planner interface that skills_lerobot's detect hook calls.
+        return {"added": 0, "removed": 0, "kept": 0}
+
     def close(self) -> None:
         """Release GPU resources held by curobo (CUDA graphs, trajopt/IK
         solver state, kinematics tables). **Idempotent** — safe to call
@@ -224,8 +242,8 @@ class CuroboBackend:
               until reboot. (SIGKILL is unhandleable; only the CUDA driver
               can reclaim that memory.)
 
-        Duck-types ``PlanServiceClient.close`` so the pipeline's
-        ``_teardown_skill_perturbation`` can call it uniformly.
+        Mirrors the closeable shape the pipeline's
+        ``_teardown_skill_perturbation`` expects so it can call this uniformly.
         """
         if getattr(self, "_closed", False):
             return
@@ -267,9 +285,8 @@ class CuroboBackend:
         seed: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> list[TrajectoryCandidate]:
-        """Plan N transit candidates. Duck-types ``PlanServiceClient.plan_batch``
-        so production code (skills_lerobot) can pass ``seed=int`` interchangeably
-        with either backend. Tests may pass ``rng=`` directly.
+        """Plan N transit candidates. ``seed=int`` matches what skills_lerobot
+        passes from production; tests may pass ``rng=`` directly.
         """
         if not self.cfg.enabled or n <= 0:
             return []
@@ -574,6 +591,42 @@ class CuroboBackend:
         out = s0 * q1 + s1 * q2
         return out / max(np.linalg.norm(out), 1e-12)
 
+    @staticmethod
+    def _tilt_quat_pitch_down(q_wxyz: np.ndarray, pitch_max_rad: float) -> np.ndarray:
+        """Clamp the gripper Z-axis elevation of a wxyz quaternion to ≤ pitch_max.
+
+        The gripper 'pitch' is arcsin(z_axis[2]), z_axis being the 3rd column
+        of the rotation matrix (the gripper pointing direction). If the quat is
+        already steep enough (elevation ≤ pitch_max), it is returned unchanged.
+        Otherwise it is tilted down about the horizontal axis perpendicular to
+        its azimuth, which lowers the elevation to exactly pitch_max while
+        preserving azimuth (yaw) and roll-about-Z. Verified: azimuth drift
+        < 1e-6 rad, elevation lands on target < 1e-6 rad.
+        """
+        w, x, y, z = (float(c) for c in q_wxyz)
+        zx = 2.0 * (x * z + w * y)
+        zy = 2.0 * (y * z - w * x)
+        zz = float(np.clip(1.0 - 2.0 * (x * x + y * y), -1.0, 1.0))
+        elevation = np.arcsin(zz)
+        if elevation <= pitch_max_rad:
+            return np.asarray(q_wxyz, dtype=float)
+        az = np.arctan2(zy, zx)
+        half = 0.5 * (elevation - pitch_max_rad)
+        s = np.sin(half)
+        # Correction quat: rotate by (elevation - pitch_max) about the
+        # horizontal axis u = [-sin(az), cos(az), 0]; applied on the LEFT so
+        # it rotates the gripper Z-axis in the world frame.
+        qc = (np.cos(half), -np.sin(az) * s, np.cos(az) * s, 0.0)
+        w2, x2, y2, z2 = (float(c) for c in q_wxyz)
+        w1, x1, y1, z1 = qc
+        out = np.array([
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ], dtype=float)
+        return out / max(np.linalg.norm(out), 1e-12)
+
     def _ik_solve_batched(
         self,
         via_xyz_list: list[np.ndarray],
@@ -628,6 +681,19 @@ class CuroboBackend:
             ],
             axis=0,
         )  # (G, 4)
+        # Option A: clamp every goalset orientation to pitch-down so the via
+        # IK can only land on a downward-facing gripper. slerp between two
+        # pitch-down endpoints does NOT preserve pitch when their yaws differ
+        # widely — this clamp guarantees it. No-op when via_pitch_max_rad is
+        # None or the slerp result is already steep enough.
+        if self._via_pitch_max_rad is not None:
+            quat_g = np.stack(
+                [
+                    self._tilt_quat_pitch_down(q, self._via_pitch_max_rad).astype(np.float32)
+                    for q in quat_g
+                ],
+                axis=0,
+            )
         xyz_b = np.asarray(padded, dtype=np.float32).reshape(n_via, 3)
 
         # Broadcast to (n_via, G, ·): each via paired with every slerp quat.

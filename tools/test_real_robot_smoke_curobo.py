@@ -115,7 +115,7 @@ def main() -> int:
         num_ik_seeds=16,
         use_cuda_graph=True,        # 1st plan_batch pays graph-capture cost
         max_batch_size=4,
-        fixed_joint_indices=(4,),   # lock wrist_roll (parity w/ OMPL & cartesian)
+        fixed_joint_indices=(4,),   # lock wrist_roll (parity w/ cartesian IK)
         arm_joint_count=5,
         via_offset_mag=0.10,
         junction_smooth_k=5,

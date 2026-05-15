@@ -17,6 +17,18 @@ class PolicyAdapter(Protocol):
 
     def forward_fm(self, context: Context, action_chunk: ActionChunk) -> FMOutput: ...
 
+    def forward_fm_batched(
+        self, context: Context, action_chunks: list[ActionChunk],
+    ) -> list[FMOutput]:
+        """K-candidate-batched forward_fm.
+
+        Folds K independent forward_fm calls into a single (K · N_b) forward
+        to amortize GPU launch overhead. Returns one FMOutput per input chunk
+        in the same order. Implementations may fall back to per-candidate
+        calls when K == 1 or batched execution is not beneficial.
+        """
+        ...
+
     def sample_actions(self, context: Context, n_samples: int) -> list[ActionChunk]: ...
 
 

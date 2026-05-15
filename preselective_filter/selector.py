@@ -56,10 +56,10 @@ class Selector:
         cfg = self.config
         skill_id = context.skill_id
 
-        # 1. π₀ forward per candidate → (L_FM, z) for IG
-        fm_outputs = [
-            self.policy.forward_fm(context, c.action_chunk) for c in candidates
-        ]
+        # 1. π₀ forward for all K candidates in one (K · N_b) batched call → (L_FM, z) for IG
+        fm_outputs = self.policy.forward_fm_batched(
+            context, [c.action_chunk for c in candidates],
+        )
         u_values = [float(fm.l_fm) for fm in fm_outputs]
 
         # 2. π₀ sampling → AC_model mode set M_π₀(x_m)
@@ -122,27 +122,30 @@ class Selector:
         cold_ac = not neighbors
         cold_tag = ""
         if cold_n and cold_ac:
-            cold_tag = " [cold:N+AC_buf]"
+            cold_tag = " [cold:N_B+AC_buffer]"
         elif cold_n:
-            cold_tag = " [cold:N_buf]"
+            cold_tag = " [cold:N_B]"
         elif cold_ac:
-            cold_tag = " [cold:AC_buf]"
+            cold_tag = " [cold:AC_buffer]"
         print(
-            f"[preselective_filter] skill={skill_id} K={K} → chose idx={chosen_index} "
-            f"(score={scores[chosen_index]:.4f}){cold_tag}"
+            f"[preselective_filter] skill={skill_id} | K={K} candidates generated "
+            f"→ chose idx={chosen_index} (score={scores[chosen_index]:.4f}){cold_tag}"
         )
 
-        # P1 — verbose per-candidate dump
+        # P1 — verbose per-candidate breakdown
+        # Each candidate's IG = U_π₀^α · N_B^(1-α) and AC = AC_model^λ · AC_buffer^(1-λ).
+        # Shows raw → normalized values for the two IG components, the two AC components,
+        # the combined IG/AC, and the final score = IG · AC.
         if cfg.debug_verbose:
+            print(f"[preselective_filter] per-candidate IG/AC breakdown (K={K}):")
             for i in range(K):
-                marker = " *" if i == chosen_index else ""
+                chosen_marker = "  <-- CHOSEN" if i == chosen_index else ""
                 print(
                     f"[preselective_filter]   idx={i}: "
-                    f"U={u_values[i]:.3f}→{u_norm[i]:.3f} "
-                    f"N={n_values[i]:.3f}→{n_norm[i]:.3f} | IG={ig[i]:.3f} | "
-                    f"dM={d_model[i]:.3f}→{ac_model[i]:.3f} "
-                    f"dB={d_buffer[i]:.3f}→{ac_buffer[i]:.3f} | AC={ac[i]:.3f} | "
-                    f"score={scores[i]:.4f}{marker}"
+                    f"IG[ U_π₀={u_values[i]:.4f}→{u_norm[i]:.3f}  "
+                    f"N_B={n_values[i]:.4f}→{n_norm[i]:.3f} ]={ig[i]:.4f}  "
+                    f"|  AC[ model={ac_model[i]:.3f}  buffer={ac_buffer[i]:.3f} ]"
+                    f"={ac[i]:.4f}  |  score={scores[i]:.4f}{chosen_marker}"
                 )
 
         # 6. Per-candidate reports

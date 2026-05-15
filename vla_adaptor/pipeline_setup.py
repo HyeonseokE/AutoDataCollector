@@ -49,7 +49,14 @@ def setup_preselective_filter(
     if not recording_config:
         return None
     section = recording_config.get("preselective_filter") or {}
-    if not section.get("enabled", False):
+    # Phase-split aware: enabled if either forward or reset is on.
+    # Legacy `enabled: <bool>` still supported as fallback.
+    en_fwd = section.get("enabled_forward")
+    en_reset = section.get("enabled_reset")
+    if en_fwd is None and en_reset is None:
+        if not section.get("enabled", False):
+            return None
+    elif not (bool(en_fwd) or bool(en_reset)):
         return None
 
     policy_cfg = section.get("policy") or {}
@@ -80,6 +87,7 @@ def setup_preselective_filter(
             z_pool=str(adapter_cfg.get("z_pool", "mean")),
             device=device,
             debug_verbose=debug_verbose,
+            autocast_dtype=str(adapter_cfg.get("autocast_dtype", "bfloat16")),
         ),
     )
 

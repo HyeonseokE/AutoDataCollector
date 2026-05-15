@@ -1,0 +1,84 @@
+// Method 3 — preselective acquirer over gRPC.
+//
+// Server side (H100): owns SmolVLA + curobo backend + Selector + Buffer.
+// Client side (robot edge): builds context, calls PlanAndSelect, receives
+// the chosen trajectory. Defers buffer commit until task judge resolves.
+//
+// Generate stubs from project root:
+//   python -m grpc_tools.protoc -I preselective_rpc \
+//     --python_out=preselective_rpc --grpc_python_out=preselective_rpc \
+//     preselective_rpc/preselective.proto
+//
+// All bulky payloads (numpy arrays, jpeg images, trajectory waypoints) are
+// shipped as `bytes` and serialized application-side (numpy.save / pickle /
+// jpeg). Keeps the proto small while preserving exact dtypes.
+
+syntax = "proto3";
+
+package preselective;
+
+service PreselectiveAcquirer {
+  // Plan K candidates via curobo + run IG·AC + return chosen trajectory.
+  // Server stores (ctx, selection) by selection_id for deferred commit.
+  rpc PlanAndSelect(PlanRequest) returns (PlanResponse);
+
+  // After task judge returns TRUE, commit pending selections to buffer.
+  // Pass an empty selection_ids list with judge_true=false to discard.
+  rpc CommitToBuffer(CommitRequest) returns (CommitResponse);
+
+  // Health check + server config snapshot.
+  rpc Ready(Empty) returns (ServerInfo);
+}
+
+message PlanRequest {
+  string skill_id = 1;            // partition key for buffer (e.g. "move_to")
+  bytes start_qpos = 2;           // np.save: shape (DOF,) float32
+  bytes goal_qpos = 3;            // np.save: shape (DOF,) float32
+  bytes state = 4;                // np.save: full robot state for SmolVLA
+  // Camera frames: dict[str, bytes] pickled, where each value is jpeg bytes
+  // OR a numpy.save'd HxWxC uint8 array. Keys are policy.config.image_features
+  // names (or raw camera names — server resolves via _map_images_to_policy_keys).
+  bytes images_pickle = 5;
+  string instruction = 6;
+  int32 n_candidates = 7;         // K — passed straight to curobo.plan_batch
+  int32 seed = 8;                 // RNG seed for plan_batch + tie-break
+  bool is_transit = 9;            // false → server returns no_op (skip selection)
+}
+
+message PlanResponse {
+  // Chosen trajectory candidate, pickled — fields:
+  //   waypoints: np.ndarray (T, DOF) float32
+  //   times    : np.ndarray (T,) float32
+  //   algo     : str   (e.g., "curobo:via1_s7")
+  //   cost     : float
+  //   seed     : int
+  bytes chosen_trajectory_pickle = 1;
+  int32 chosen_index = 2;         // index into the original K candidates
+  string score_report_json = 3;   // per-candidate IG/AC breakdown (debug)
+  string selection_id = 4;        // UUID — pass to CommitToBuffer later
+  bool used_fallback = 5;         // true when curobo returned 0 cands and
+                                  // server returned a cartesian-line backup
+}
+
+message CommitRequest {
+  repeated string selection_ids = 1;
+  bool judge_true = 2;            // false → drop pending without commit
+  string episode_id = 3;          // for server-side logging only
+}
+
+message CommitResponse {
+  int32 committed = 1;            // selections actually appended
+  int32 dropped = 2;              // pending but not committed (judge false)
+  map<string, int32> buffer_totals = 3;  // skill_id → entry count after commit
+}
+
+message ServerInfo {
+  string smolvla_checkpoint = 1;
+  string device = 2;
+  string curobo_robot_cfg = 3;
+  int32 buffer_total = 4;
+  map<string, int32> buffer_per_skill = 5;
+  string selector_summary = 6;    // "α=0.5 λ=0.5 M=8 k=8 N_b=8"
+}
+
+message Empty {}

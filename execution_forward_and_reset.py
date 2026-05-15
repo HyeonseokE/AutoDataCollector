@@ -121,6 +121,51 @@ sys.path.insert(0, str(PROJECT_ROOT / "object_detection"))
 from pipeline.base_pipeline import BasePipeline
 
 
+def _map_images_to_policy_keys(
+    raw_imgs: dict,
+    image_keys: list,
+    target_shape: tuple | None,
+) -> dict:
+    """Resize/format raw camera frames to the SmolVLA policy's image_features.
+
+    raw_imgs        : {camera_name: HxWxC uint8 ndarray} from RecordingContext
+    image_keys      : ['observation.images.camera1', 'camera2', ...] (policy)
+    target_shape    : (C, H, W) — same for every image_features entry
+
+    Maps the i-th raw frame onto the i-th policy key (positional). Missing slots
+    are dropped — SmolVLA's preprocessor only requires "at least one" image
+    present. Returned tensors are CHW float32 in [0, 1] with a leading batch
+    dim, ready for the preprocessor pipeline.
+    """
+    if not image_keys or not raw_imgs or target_shape is None:
+        return dict(raw_imgs) if raw_imgs else {}
+    C, H, W = int(target_shape[0]), int(target_shape[1]), int(target_shape[2])
+    out: dict = {}
+    items = list(raw_imgs.items())
+    for i, key in enumerate(image_keys):
+        if i >= len(items):
+            break
+        _, frame = items[i]
+        if frame is None:
+            continue
+        arr = np.asarray(frame)
+        if arr.ndim == 3 and arr.shape[2] == 3:  # HWC RGB/BGR
+            if arr.shape[:2] != (H, W):
+                arr = cv2.resize(arr, (W, H), interpolation=cv2.INTER_AREA)
+            arr = arr.transpose(2, 0, 1)         # HWC → CHW
+        elif arr.ndim == 3 and arr.shape[0] == 3:  # already CHW
+            if arr.shape[1:] != (H, W):
+                hwc = arr.transpose(1, 2, 0)
+                hwc = cv2.resize(hwc, (W, H), interpolation=cv2.INTER_AREA)
+                arr = hwc.transpose(2, 0, 1)
+        else:
+            continue  # unsupported shape — skip
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32) / 255.0 if arr.dtype == np.uint8 else arr.astype(np.float32)
+        out[key] = arr[None, ...]  # add batch dim → (1, C, H, W)
+    return out
+
+
 class ForwardAndResetPipeline(BasePipeline):
     """Forward → Judge → Reset 통합 파이프라인"""
 
@@ -439,6 +484,18 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         self._skill_planner_phase = {"forward": fwd, "reset": reset}
 
+        # When preselective_filter is set to gRPC transport, the remote server
+        # owns curobo + selection. Skip local backend creation entirely — the
+        # GrpcPlannerClient adapter installed by _setup_preselective_filter_on_skills
+        # will satisfy skills_lerobot's plan_batch contract on this side.
+        psf_raw = full_cfg.get("preselective_filter") or {}
+        if str(psf_raw.get("transport", "local")).lower() == "grpc":
+            print(
+                "[Skill Perturbation] transport=grpc — local skill planner skipped; "
+                "GrpcPlannerClient will be installed by preselective setup."
+            )
+            return
+
         # Backend choice (yaml key `perturbation.skill.backend`):
         #   - "ompl"   (default): OMPL via mplib_env subprocess daemon.
         #   - "curobo": GPU-accelerated curobo, in-process (no daemon).
@@ -537,6 +594,7 @@ class ForwardAndResetPipeline(BasePipeline):
                         f"--urdf {urdf_path} --output {curobo_cfg_path}"
                     )
                     return
+                _n_cand = int(skill_raw.get("n_candidates", 4))
                 cb_cfg = CuroboBackendConfig(
                     enabled=True,
                     robot_cfg_path=curobo_cfg_path,
@@ -550,6 +608,9 @@ class ForwardAndResetPipeline(BasePipeline):
                     max_vias_per_candidate=int(
                         skill_raw.get("curobo_max_vias_per_candidate", 1)
                     ),
+                    # CUDA graph batch must cover n_candidates; otherwise plan_batch
+                    # caps n via `min(n, max_batch_size)` and we silently get fewer.
+                    max_batch_size=_n_cand,
                 )
                 client = CuroboBackend(urdf=urdf_path, config=cb_cfg)
                 self._skill_planner_client = client
@@ -643,9 +704,25 @@ class ForwardAndResetPipeline(BasePipeline):
         if not any_en:
             return
         self._preselective_phase = {"forward": fwd, "reset": reset}
+        transport = str(psf_raw.get("transport", "local")).lower()
         print(
-            f"[preselective_filter] phase=forward:{fwd} reset:{reset}"
+            f"[preselective_filter] phase=forward:{fwd} reset:{reset} transport={transport}"
         )
+
+        # ──────────────────────────────────────────────────────────────
+        # Branch on transport mode.
+        #   local : SmolVLA + Selector + curobo all in this process. The hook
+        #           runs IG·AC on K candidates curobo already produced.
+        #   grpc  : remote H100 server runs both curobo + IG·AC. We install
+        #           a GrpcPlannerClient adapter as the skill planner; that
+        #           adapter calls server.PlanAndSelect inside plan_batch
+        #           and returns a single-element list (the chosen traj).
+        #           No selector hook needed — server already chose.
+        # ──────────────────────────────────────────────────────────────
+        if transport == "grpc":
+            self._setup_preselective_grpc(psf_raw, full_cfg)
+            return
+
         try:
             from vla_adaptor import setup_preselective_filter
             selector = setup_preselective_filter(full_cfg)
@@ -668,6 +745,58 @@ class ForwardAndResetPipeline(BasePipeline):
             except Exception as e:
                 print(f"[preselective_filter] hook install failed: {e}; skills fall back to RNG")
 
+    def _setup_preselective_grpc(self, psf_raw: dict, full_cfg: dict) -> None:
+        """gRPC transport branch — remote server owns curobo + Selector.
+
+        Side effects:
+          - self._preselective_grpc_client : PreselectiveClient (for commit())
+          - self._skill_planner_client     : GrpcPlannerClient adapter
+          - skills.set_skill_planner_client(adapter, n_candidates)
+          - skills.set_skill_candidate_selector(None)  — server already chose
+        """
+        addr = str(psf_raw.get("transport_address", "127.0.0.1:50061"))
+        timeout_s = float(psf_raw.get("transport_timeout_s", 60.0))
+        try:
+            from preselective_rpc.client import PreselectiveClient
+            from vla_adaptor.grpc_planner_adapter import GrpcPlannerClient
+        except Exception as e:
+            print(f"[preselective_filter] grpc imports failed: {e}; disabling")
+            return
+
+        client = PreselectiveClient(server_address=addr, timeout_s=timeout_s)
+        try:
+            info = client.ready()
+        except Exception as e:
+            print(f"[preselective_filter] grpc Ready() failed at {addr}: {e}; disabling")
+            try:
+                client.close()
+            except Exception:
+                pass
+            return
+        print(
+            f"[preselective_filter] grpc connected: {addr} | "
+            f"device={info.get('device')} buffer={info.get('buffer_total')} "
+            f"selector={info.get('selector_summary')}"
+        )
+
+        adapter = GrpcPlannerClient(client=client, context_provider=self)
+        n_cand = int(((full_cfg.get("perturbation") or {}).get("skill") or {}).get(
+            "n_candidates", 4))
+
+        self._preselective_grpc_client = client
+        self._skill_planner_client = adapter
+        if hasattr(self, "_skills") and self._skills is not None:
+            self._skills.set_skill_planner_client(adapter, n_candidates=n_cand)
+            self._skills.set_skill_candidate_selector(None)  # server picks
+            # Re-apply pending RNG so skills_lerobot's plan_batch swap fires.
+            pending = getattr(self, "_pending_perturbation_seed", None)
+            if pending is not None:
+                self._skills.set_perturbation_rng(pending)
+            print(
+                f"[preselective_filter] grpc planner installed on skills "
+                f"(K={n_cand}, no local hook)"
+            )
+
     def _build_preselective_hook(self, selector):
         """Construct the closure that bridges plan_batch results → Selector.
 
@@ -685,6 +814,15 @@ class ForwardAndResetPipeline(BasePipeline):
             policy_cfg = selector.policy.policy.config
             chunk_size = int(policy_cfg.chunk_size)
             action_dim = int(policy_cfg.max_action_dim)
+            # Expected image keys + shape (C, H, W) for SmolVLA's preprocessor.
+            # We map our raw cameras (e.g., 'top', 'left_wrist') positionally
+            # onto the first N expected keys; missing slots are simply skipped
+            # (the preprocessor only requires "at least one" image present).
+            image_keys = list(policy_cfg.image_features.keys())
+            image_target_shape = (
+                tuple(policy_cfg.image_features[image_keys[0]].shape)
+                if image_keys else None
+            )  # e.g., (3, 256, 256)
         except Exception as e:
             print(f"[preselective_filter] cannot read policy config ({e}); skipping hook")
             return None
@@ -700,7 +838,10 @@ class ForwardAndResetPipeline(BasePipeline):
             try:
                 # ---- Collect current context ----
                 # observation: latest async camera frames (RecordingContext)
-                obs_dict = orchestrator._latest_observation_dict()
+                raw_imgs = orchestrator._latest_observation_dict()
+                obs_dict = _map_images_to_policy_keys(
+                    raw_imgs, image_keys, image_target_shape,
+                )
                 # episode-level instruction (from execute_forward call)
                 instr = str(getattr(orchestrator, "instruction", "") or "")
                 # gripper: current motor position (set during move_to_position prelude)
@@ -770,14 +911,21 @@ class ForwardAndResetPipeline(BasePipeline):
     def _teardown_preselective_filter(self) -> None:
         """Release SmolVLA + buffer resources at session end."""
         sel = getattr(self, "_preselective_selector", None)
-        if sel is None:
-            return
-        try:
-            from vla_adaptor import teardown_preselective_filter
-            teardown_preselective_filter(sel)
-        except Exception:
-            pass
-        self._preselective_selector = None
+        if sel is not None:
+            try:
+                from vla_adaptor import teardown_preselective_filter
+                teardown_preselective_filter(sel)
+            except Exception:
+                pass
+            self._preselective_selector = None
+        # Close gRPC channel if we were in remote mode.
+        grpc_cli = getattr(self, "_preselective_grpc_client", None)
+        if grpc_cli is not None:
+            try:
+                grpc_cli.close()
+            except Exception:
+                pass
+            self._preselective_grpc_client = None
         if hasattr(self, "_skills") and self._skills is not None:
             try:
                 self._skills.set_skill_candidate_selector(None)
@@ -1971,6 +2119,14 @@ class ForwardAndResetPipeline(BasePipeline):
                 # list per move_to_position call; only TRUE-judge episodes are
                 # committed to the buffer (see line ~1942).
                 self._preselective_pending = []
+                # gRPC mode: drop any stale selection_ids the client may still
+                # be tracking from a previous (uncommitted) episode.
+                _grpc_cli = getattr(self, "_preselective_grpc_client", None)
+                if _grpc_cli is not None:
+                    try:
+                        _grpc_cli.reset_pending()
+                    except Exception:
+                        pass
 
                 import builtins
                 builtins._current_execution_dir = forward_dir
@@ -2115,7 +2271,40 @@ class ForwardAndResetPipeline(BasePipeline):
                     # avoid IG/AC poisoning.
                     selector = getattr(self, "_preselective_selector", None)
                     pending = getattr(self, "_preselective_pending", [])
-                    if (selector is not None
+                    grpc_client = getattr(self, "_preselective_grpc_client", None)
+
+                    if grpc_client is not None:
+                        # gRPC mode: server holds the pending selections by
+                        # selection_id. Tell it to commit (or drop) them now.
+                        ep_id = f"ep_{episode_idx}" if 'episode_idx' in dir() else ""
+                        try:
+                            res = grpc_client.commit(
+                                judge_true=(judge_prediction == "TRUE"),
+                                episode_id=ep_id,
+                            )
+                            if judge_prediction == "TRUE":
+                                print(
+                                    f"[preselective_filter] grpc committed "
+                                    f"{res['committed']} selections to buffer"
+                                )
+                            else:
+                                print(
+                                    f"[preselective_filter] grpc dropped "
+                                    f"{res['dropped']} selections (judge={judge_prediction})"
+                                )
+                            totals = res.get("buffer_totals") or {}
+                            if totals:
+                                breakdown = ", ".join(
+                                    f"{sid}={n}" for sid, n in sorted(totals.items())
+                                )
+                                print(
+                                    f"[preselective_filter] buffer totals "
+                                    f"(skills={len(totals)}, entries={sum(totals.values())}): "
+                                    f"{breakdown}"
+                                )
+                        except Exception as e:
+                            print(f"[preselective_filter] grpc commit failed: {e}")
+                    elif (selector is not None
                             and judge_prediction == "TRUE"
                             and pending):
                         committed = 0
@@ -2126,6 +2315,20 @@ class ForwardAndResetPipeline(BasePipeline):
                             except Exception as e:
                                 print(f"[preselective_filter] add_to_buffer failed: {e}")
                         print(f"[preselective_filter] committed {committed}/{len(pending)} selections to buffer")
+                        # Per-skill cumulative buffer summary after commit.
+                        try:
+                            totals = selector.buffer.summary()
+                            if totals:
+                                breakdown = ", ".join(
+                                    f"{sid}={n}" for sid, n in sorted(totals.items())
+                                )
+                                grand = sum(totals.values())
+                                print(
+                                    f"[preselective_filter] buffer totals "
+                                    f"(skills={len(totals)}, entries={grand}): {breakdown}"
+                                )
+                        except Exception as e:
+                            print(f"[preselective_filter] buffer summary failed: {e}")
                     self._preselective_pending = []
 
                     # _end_episode_recording이 save_episode 전에 buffer snapshot을 떠서 반환

@@ -99,6 +99,19 @@ class JsonlBufferStore:
         safe = str(skill_id).replace("/", "_").replace(" ", "_")
         return self.root / f"{safe}.jsonl"
 
+    def summary(self) -> dict[str, int]:
+        """Return {skill_id: entry_count} for every jsonl shard in the buffer.
+
+        Cheap line-counting scan over each shard file. The skill_id is the
+        filename stem; callers should treat it as a string token.
+        """
+        out: dict[str, int] = {}
+        if not self.root.exists():
+            return out
+        for p in sorted(self.root.glob("*.jsonl")):
+            out[p.stem] = self._count_lines(p)
+        return out
+
     def _count_lines(self, path: Path) -> int:
         if not path.exists():
             return 0

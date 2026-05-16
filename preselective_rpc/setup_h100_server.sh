@@ -118,7 +118,7 @@ fi
 # ──────────────────────────────────────────────────────────────────────
 bold "4/9  vendored lerobot/  (editable, with deps)"
 
-if python -c "import lerobot.policies.smolvla.modeling_smolvla" 2>/dev/null; then
+if python -c "import lerobot.policies.pi05.modeling_pi05" 2>/dev/null; then
   info "lerobot already importable"
 else
   info "pip install -e lerobot/  (this pulls draccus, datasets, accelerate, …)"
@@ -227,26 +227,21 @@ bold "9/9  import sanity"
 python - <<'PYEOF'
 import sys
 sys.path.insert(0, '.')
-import lerobot.policies.smolvla.modeling_smolvla  # SmolVLA reachable
+import lerobot.policies.pi05.modeling_pi05        # pi05 reachable
 import curobo                                     # curobo reachable
 import grpc                                       # gRPC reachable
 from preselective_rpc.client import PreselectiveClient
 from preselective_rpc.server import PreselectiveAcquirerServicer
-from vla_adaptor.grpc_planner_adapter import GrpcPlannerClient
+from preselective_filter.integration import GrpcPlannerClient, setup_preselective_filter
 from preselective_filter import Selector, SelectorConfig
 print("  all imports OK")
 PYEOF
 
 bold "DONE"
 echo
-echo "Next:"
-echo "  1) make sure pipeline_config/recording_config_ws3.yaml is present (see step 8)"
-echo "  2) start the server:"
-echo "     conda activate $ENV_NAME"
-echo "     python -u -m preselective_rpc.server \\"
-echo "       --host 0.0.0.0 --port 50061 \\"
-echo "       --recording-config pipeline_config/recording_config_ws3.yaml \\"
-echo "       --urdf assets/urdf/so101_robot4.urdf"
+echo "Next — start the server with ONE command:"
+echo "  bash preselective_rpc/run_h100_server.sh"
 echo
-echo "  3) from the robot host, point yaml's transport_address at this machine"
-echo "     and call ready() to verify connectivity."
+echo "(run_h100_server.sh re-runs this setup idempotently, then launches the"
+echo " server. From the robot host, point the yaml's transport_address at this"
+echo " machine and call ready() to verify connectivity.)"

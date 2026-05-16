@@ -63,7 +63,7 @@ def _infer_family(checkpoint: str) -> VLAFamily:
     Pass ``family=`` to ``make_vla_key_extractor`` to override this heuristic.
     """
     s = str(checkpoint).lower()
-    if "smolvla" in s:
+    if "smolvla" in s or "smol" in s:   # SmolVLA checkpoints often named smol_*
         return "smolvla"
     if "groot" in s or "gr00t" in s:
         return "groot"

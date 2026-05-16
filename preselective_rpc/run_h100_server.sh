@@ -26,6 +26,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJ_ROOT"
 
+# Ignore ~/.local user-site packages so a stray lerobot/transformers there
+# cannot shadow the vendored copy used by the server.
+export PYTHONNOUSERSITE=1
+
 bold() { printf "\033[1;36m== %s ==\033[0m\n" "$*"; }
 err()  { printf "\033[1;31mXX %s\033[0m\n" "$*" >&2; }
 

@@ -25,6 +25,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJ_ROOT"
 
+# Ignore ~/.local user-site packages — the conda env must be self-contained.
+# A stray `lerobot` / `transformers` in ~/.local otherwise shadows the
+# vendored copy and breaks pi05 / smolvla loading.
+export PYTHONNOUSERSITE=1
+
 bold()  { printf "\033[1;36m== %s ==\033[0m\n" "$*"; }
 info()  { printf "\033[36m  %s\033[0m\n" "$*"; }
 warn()  { printf "\033[1;33m!! %s\033[0m\n" "$*"; }
@@ -116,13 +121,39 @@ fi
 # ──────────────────────────────────────────────────────────────────────
 # 4. vendored lerobot (Python 3.12 required)
 # ──────────────────────────────────────────────────────────────────────
-bold "4/9  vendored lerobot/  (editable, with deps)"
+bold "4/9  vendored lerobot/  (editable, with pi + smolvla extras)"
 
-if python -c "import lerobot.policies.pi05.modeling_pi05" 2>/dev/null; then
-  info "lerobot already importable"
+VENDORED_LEROBOT="$PROJ_ROOT/lerobot/src/lerobot"
+lerobot_is_vendored() {
+  python - 2>/dev/null <<PYEOF
+import os, sys
+try:
+    import lerobot
+except Exception:
+    sys.exit(1)
+got = os.path.realpath(os.path.dirname(lerobot.__file__))
+sys.exit(0 if got == os.path.realpath("$VENDORED_LEROBOT") else 2)
+PYEOF
+}
+
+if lerobot_is_vendored; then
+  info "vendored lerobot active: $VENDORED_LEROBOT"
 else
-  info "pip install -e lerobot/  (this pulls draccus, datasets, accelerate, …)"
-  pip install -e "$PROJ_ROOT/lerobot" --ignore-requires-python
+  warn "lerobot missing or shadowed by a non-vendored copy — reinstalling"
+  # Loop: remove EVERY lerobot install (conda env + ~/.local can both have one).
+  while pip uninstall -y lerobot >/dev/null 2>&1; do
+    info "  removed a stray lerobot install"
+  done
+  info "pip install -e lerobot[pi,smolvla]  (pulls transformers 5.x, accelerate, …)"
+  pip install -e "$PROJ_ROOT/lerobot[pi,smolvla]" --ignore-requires-python
+  if ! lerobot_is_vendored; then
+    err "lerobot STILL not the vendored copy — a stray install is shadowing it."
+    err "  fix manually, then re-run this script:"
+    err "    while pip uninstall -y lerobot 2>/dev/null; do :; done"
+    err "    pip install -e lerobot[pi,smolvla] --ignore-requires-python"
+    exit 1
+  fi
+  info "vendored lerobot installed"
 fi
 
 # ──────────────────────────────────────────────────────────────────────

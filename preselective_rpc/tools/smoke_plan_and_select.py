@@ -1,9 +1,9 @@
 """Smoke test for PreselectiveAcquirer.PlanAndSelect + CommitToBuffer.
 
 Synthetic context (no robot, no cameras). Validates the full RPC path:
-  1. encode/decode of numpy + image dict
+  1. encode/decode of numpy
   2. server-side curobo plan_batch (K candidates)
-  3. server-side SmolVLA forward_fm_batched + sample_actions
+  3. server-side buffer-only IG·AC selector.select
   4. selector.select → trajectory pickle round-trip
   5. selection_id → CommitToBuffer flushes / drops correctly
 

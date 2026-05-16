@@ -44,6 +44,11 @@ class PreselectiveAcquirerStub(object):
                 request_serializer=preselective__pb2.CommitRequest.SerializeToString,
                 response_deserializer=preselective__pb2.CommitResponse.FromString,
                 _registered_method=True)
+        self.IngestEpisode = channel.stream_unary(
+                '/preselective.PreselectiveAcquirer/IngestEpisode',
+                request_serializer=preselective__pb2.FrameMessage.SerializeToString,
+                response_deserializer=preselective__pb2.IngestResponse.FromString,
+                _registered_method=True)
         self.Ready = channel.unary_unary(
                 '/preselective.PreselectiveAcquirer/Ready',
                 request_serializer=preselective__pb2.Empty.SerializeToString,
@@ -70,6 +75,15 @@ class PreselectiveAcquirerServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def IngestEpisode(self, request_iterator, context):
+        """Grow the vector DB from a recorded forward demo. The client streams the
+        episode frame-by-frame; the server encodes each (key_t) with its frozen
+        VLA and appends one (key_t, value_t) buffer entry per frame.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Ready(self, request, context):
         """Health check + server config snapshot.
         """
@@ -89,6 +103,11 @@ def add_PreselectiveAcquirerServicer_to_server(servicer, server):
                     servicer.CommitToBuffer,
                     request_deserializer=preselective__pb2.CommitRequest.FromString,
                     response_serializer=preselective__pb2.CommitResponse.SerializeToString,
+            ),
+            'IngestEpisode': grpc.stream_unary_rpc_method_handler(
+                    servicer.IngestEpisode,
+                    request_deserializer=preselective__pb2.FrameMessage.FromString,
+                    response_serializer=preselective__pb2.IngestResponse.SerializeToString,
             ),
             'Ready': grpc.unary_unary_rpc_method_handler(
                     servicer.Ready,
@@ -150,6 +169,33 @@ class PreselectiveAcquirer(object):
             '/preselective.PreselectiveAcquirer/CommitToBuffer',
             preselective__pb2.CommitRequest.SerializeToString,
             preselective__pb2.CommitResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def IngestEpisode(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_unary(
+            request_iterator,
+            target,
+            '/preselective.PreselectiveAcquirer/IngestEpisode',
+            preselective__pb2.FrameMessage.SerializeToString,
+            preselective__pb2.IngestResponse.FromString,
             options,
             channel_credentials,
             insecure,

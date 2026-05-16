@@ -1,14 +1,17 @@
-"""Preselective acquirer gRPC server.
+"""Preselective acquirer gRPC server (retrieval-augmented).
 
 Boots once on the planning host (e.g., H100) holding:
-- SmolVLA policy + preprocessor (loaded once, reused across episodes)
-- curobo MotionPlanner backend (in-process)
-- Selector (IG·AC) + JsonlBufferStore (server-local persistence)
+- curobo MotionPlanner backend (in-process, GPU)
+- frozen VLA encoder (SmolVLA, key-embedding extractor — GPU)
+- IG·AC Selector + FaissBufferStore vector DB (server-local persistence)
 
-A single client RPC `PlanAndSelect` does plan_batch → IG·AC → returns chosen
-trajectory + selection_id. Pending (ctx, selection) tuples are kept in an
-in-memory dict keyed by selection_id; `CommitToBuffer` flushes them to the
-JsonlBufferStore on judge-TRUE, or drops them on judge-FALSE.
+The VLA is frozen and used ONLY to produce the FAISS key embedding
+(mean-pooled embed_prefix = VL feature + proprioception).
+
+A single client RPC `PlanAndSelect` does plan_batch → encode → IG·AC →
+returns chosen trajectory + selection_id. Pending (ctx, selection) tuples
+are kept in an in-memory dict keyed by selection_id; `CommitToBuffer`
+flushes them to the FaissBufferStore on judge-TRUE, or drops on judge-FALSE.
 
 Run:
     python -m preselective_rpc.server \\
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 import uuid
 from concurrent import futures
@@ -37,49 +41,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from preselective_filter import Candidate, Context, Selection
 from preselective_rpc import preselective_pb2, preselective_pb2_grpc
 from preselective_rpc._codec import (
+    decode_jpeg,
     decode_ndarray,
     decode_pickle,
     encode_pickle,
 )
-from vla_adaptor import trajectory_to_action_chunk
-from vla_adaptor.pipeline_setup import setup_preselective_filter
-
-
-# --------------------------------------------------------------------------
-# Image preprocessing helper — mirrors execution_forward_and_reset._map_images_to_policy_keys
-# --------------------------------------------------------------------------
-def _map_images_to_policy_keys(
-    raw_imgs: dict, image_keys: list, target_shape: tuple | None,
-) -> dict:
-    import cv2  # lazy
-    if not image_keys or not raw_imgs or target_shape is None:
-        return dict(raw_imgs) if raw_imgs else {}
-    C, H, W = int(target_shape[0]), int(target_shape[1]), int(target_shape[2])
-    out: dict = {}
-    items = list(raw_imgs.items())
-    for i, key in enumerate(image_keys):
-        if i >= len(items):
-            break
-        _, frame = items[i]
-        if frame is None:
-            continue
-        arr = np.asarray(frame)
-        if arr.ndim == 3 and arr.shape[2] == 3:
-            if arr.shape[:2] != (H, W):
-                arr = cv2.resize(arr, (W, H), interpolation=cv2.INTER_AREA)
-            arr = arr.transpose(2, 0, 1)
-        elif arr.ndim == 3 and arr.shape[0] == 3:
-            if arr.shape[1:] != (H, W):
-                hwc = arr.transpose(1, 2, 0)
-                hwc = cv2.resize(hwc, (W, H), interpolation=cv2.INTER_AREA)
-                arr = hwc.transpose(2, 0, 1)
-        else:
-            continue
-        if arr.dtype != np.float32:
-            arr = (arr.astype(np.float32) / 255.0
-                   if arr.dtype == np.uint8 else arr.astype(np.float32))
-        out[key] = arr[None, ...]
-    return out
+from preselective_filter.integration import (
+    setup_preselective_filter,
+    trajectory_to_action_chunk,
+)
 
 
 # --------------------------------------------------------------------------
@@ -132,29 +102,31 @@ class PreselectiveAcquirerServicer(
 ):
     def __init__(
         self,
-        selector,                    # preselective_filter.Selector (already loaded)
+        selector,                    # preselective_filter.Selector
+        encoder,                     # preselective_filter.vectorDB.VLAKeyExtractor
         curobo_backend,              # CuroboBackend
         recording_fps: int = 10,
+        chunk_size: int = 50,
         debug_verbose: bool = False,
     ) -> None:
         self.selector = selector
+        self.encoder = encoder
         self.curobo = curobo_backend
         self.recording_fps = int(recording_fps)
+        # Action-chunk resampling horizon. Buffer-only: action_dim is derived
+        # per-request as arm_dof+1 (no VLA padding). Every candidate in one
+        # plan_batch shares arm_dof, so all chunks are mutually comparable.
+        self._chunk_size = int(chunk_size)
         self.debug_verbose = debug_verbose
 
         # Selection cache — selection_id → (Context, Selection)
         # Bounded by episode length × concurrent_clients; cleared on Commit.
         self._pending: dict[str, tuple[Context, Selection]] = {}
 
-        # Pre-resolve policy config for image mapping.
-        policy_cfg = selector.policy.policy.config
-        self._chunk_size = int(policy_cfg.chunk_size)
-        self._action_dim = int(policy_cfg.max_action_dim)
-        keys = list(policy_cfg.image_features.keys())
-        self._image_keys = keys
-        self._image_target_shape = (
-            tuple(policy_cfg.image_features[keys[0]].shape) if keys else None
-        )
+        # Serializes all VLA-encoder + buffer access. The encoder is
+        # thread-unsafe; with concurrent clients PlanAndSelect and the
+        # long-running IngestEpisode must not touch it at the same time.
+        self._lock = threading.Lock()
 
     # ----------------------------------------------------------------
     def PlanAndSelect(self, request, context):
@@ -190,16 +162,10 @@ class PreselectiveAcquirerServicer(
         if not cands:
             return preselective_pb2.PlanResponse(used_fallback=True)
 
-        # 2. Build IG·AC context + wrap candidates as preselective Candidates
-        obs_dict = _map_images_to_policy_keys(
-            raw_imgs, self._image_keys, self._image_target_shape,
-        )
-        ctx = Context(
-            observation=obs_dict,
-            state=np.asarray(state, dtype=float),
-            instruction=str(request.instruction or ""),
-            skill_id=str(request.skill_id or "move_to"),
-        )
+        # 2. Wrap curobo candidates into fixed-shape action chunks.
+        instruction = str(request.instruction or "")
+        state_arr = np.asarray(state, dtype=float)
+        skill_id = str(request.skill_id or "move_to")
 
         wrapped: list[Candidate] = []
         for c in cands:
@@ -210,22 +176,37 @@ class PreselectiveAcquirerServicer(
                 waypoints=wp,
                 times=times,
                 chunk_size=self._chunk_size,
-                action_dim=self._action_dim,
+                action_dim=arm_dof + 1,   # no VLA padding — real dims only
                 fps=self.recording_fps,
                 current_gripper=0.0,
                 arm_dof=arm_dof,
             )
             wrapped.append(Candidate(
-                skill_id=ctx.skill_id, action_chunk=chunk, payload=c,
+                skill_id=skill_id, action_chunk=chunk, payload=c,
             ))
 
-        # 3. Run selector
-        selection = self.selector.select(ctx, wrapped)
+        # 3. Encode the FAISS key + run the selector under the encoder/buffer
+        #    lock (the frozen VLA is thread-unsafe; IngestEpisode shares it).
+        try:
+            with self._lock:
+                key_emb = self.encoder.encode(raw_imgs, instruction, state_arr)
+                ctx = Context(
+                    observation=np.zeros(0, dtype=np.float32),
+                    state=state_arr,
+                    instruction=instruction,
+                    skill_id=skill_id,
+                    key_embedding=key_emb,
+                )
+                selection = self.selector.select(ctx, wrapped)
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"encode/select failed: {e}")
+            return preselective_pb2.PlanResponse()
         chosen = selection.chosen_candidate.payload
 
-        # 4. Cache pending for deferred buffer commit
+        # 4. selection_id is returned for protocol compatibility; the buffer is
+        #    now grown by IngestEpisode (raw demo), not by committing this pick.
         sel_id = uuid.uuid4().hex
-        self._pending[sel_id] = (ctx, selection)
 
         # 5. Pack response
         traj_dict = {
@@ -242,9 +223,9 @@ class PreselectiveAcquirerServicer(
             score_report_json = json.dumps([
                 {
                     "i": r.candidate_index,
-                    "u_pi0": r.u_pi0_norm, "n_buf": r.n_buffer_norm,
-                    "ig": r.ig, "ac_m": r.ac_model, "ac_b": r.ac_buffer,
-                    "ac": r.ac, "score": r.score,
+                    "novelty": r.novelty_raw, "ig": r.ig,
+                    "consistency": r.consistency_raw, "ac": r.ac,
+                    "score": r.score,
                 }
                 for r in selection.reports
             ])
@@ -305,24 +286,74 @@ class PreselectiveAcquirerServicer(
         )
 
     # ----------------------------------------------------------------
+    def IngestEpisode(self, request_iterator, context):
+        """Grow the vector DB from a streamed forward demo.
+
+        The client streams the recorded episode frame-by-frame; for each frame
+        the server encodes key_t with its frozen VLA and appends a
+        (key_t, value_t) buffer entry. Holds the encoder/buffer lock for the
+        whole episode so a concurrent PlanAndSelect can't race the encoder.
+        """
+        from preselective_filter.integration import ingest_frame
+
+        t0 = time.perf_counter()
+        n = 0
+        try:
+            with self._lock:
+                for fm in request_iterator:
+                    images = {}
+                    if fm.images_pickle:
+                        images = {
+                            k: decode_jpeg(v)
+                            for k, v in decode_pickle(fm.images_pickle).items()
+                        }
+                    ingest_frame(
+                        self.encoder, self.selector.buffer,
+                        images=images,
+                        instruction=str(fm.instruction or ""),
+                        state=decode_ndarray(fm.state),
+                        action_chunk=decode_ndarray(fm.action_chunk),
+                        skill_id=str(fm.skill_id or "move_to"),
+                    )
+                    n += 1
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"IngestEpisode failed after {n} frames: {e}")
+            return preselective_pb2.IngestResponse(frames_ingested=n)
+
+        totals = {}
+        try:
+            totals = self.selector.buffer.summary()
+        except Exception:
+            pass
+        if self.debug_verbose:
+            elapsed = time.perf_counter() - t0
+            print(
+                f"[server] IngestEpisode: {n} demo frames in {elapsed:.1f}s, "
+                f"buffer={totals}"
+            )
+        return preselective_pb2.IngestResponse(
+            frames_ingested=n, buffer_totals=totals,
+        )
+
+    # ----------------------------------------------------------------
     def Ready(self, request, context):
         totals = {}
         try:
             totals = self.selector.buffer.summary()
         except Exception:
             pass
-        adapter_cfg = self.selector.policy.config
         sel_cfg = self.selector.config
+        emb_dim = getattr(self.encoder, "embedding_dim", None)
         return preselective_pb2.ServerInfo(
-            smolvla_checkpoint="<resident>",
-            device=str(adapter_cfg.device),
+            smolvla_checkpoint="<frozen VLA encoder>",
+            device=str(getattr(self.encoder, "device", "cuda")),
             curobo_robot_cfg=str(getattr(self.curobo.cfg, "robot_cfg_path", "")),
             buffer_total=int(sum(totals.values())),
             buffer_per_skill=totals,
             selector_summary=(
-                f"α={sel_cfg.alpha} λ={sel_cfg.lam} "
-                f"M={sel_cfg.n_vla_samples} k={sel_cfg.context_k} "
-                f"N_b={adapter_cfg.n_fm_mc_samples}"
+                f"FAISS retrieval k={sel_cfg.context_k} "
+                f"key_dim={emb_dim if emb_dim is not None else '?'}"
             ),
         )
 
@@ -336,12 +367,13 @@ def serve(args: argparse.Namespace) -> None:
     with cfg_path.open("r", encoding="utf-8") as f:
         recording_cfg = yaml.safe_load(f)
 
-    print(f"[server] loading SmolVLA + Selector from {cfg_path} ...")
-    selector = setup_preselective_filter(recording_cfg)
-    if selector is None:
+    print(f"[server] building Selector + VLA encoder from {cfg_path} ...")
+    result = setup_preselective_filter(recording_cfg)
+    if result is None:
         raise RuntimeError(
             "preselective_filter is disabled in the yaml — server has nothing to do."
         )
+    selector, encoder = result
 
     print(f"[server] loading curobo backend ({args.urdf}) ...")
     skill_cfg = (recording_cfg.get("perturbation") or {}).get("skill") or {}
@@ -350,12 +382,15 @@ def serve(args: argparse.Namespace) -> None:
         transit_pitch_max_deg=recording_cfg.get("transit_pitch_max_deg"),
     )
 
+    psf_cfg = recording_cfg.get("preselective_filter") or {}
+    sel_cfg = psf_cfg.get("selector") or {}
     servicer = PreselectiveAcquirerServicer(
         selector=selector,
+        encoder=encoder,
         curobo_backend=curobo,
         recording_fps=int(recording_cfg.get("recording_fps", 10)),
-        debug_verbose=bool((recording_cfg.get("preselective_filter") or {})
-                           .get("debug_verbose", False)),
+        chunk_size=int(sel_cfg.get("chunk_size", 50)),
+        debug_verbose=bool(psf_cfg.get("debug_verbose", False)),
     )
 
     server = grpc.server(

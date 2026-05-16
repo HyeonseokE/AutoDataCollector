@@ -21,7 +21,7 @@ seg1[0] only and discard seg2[0]. This keeps batch shape consistent so a
 single CUDA graph services every seg1 and seg2 call across plan_batch calls.
 
 Public interface exposes ``plan_batch(start, goal, n, rng)`` so the gRPC
-adapter (``vla_adaptor.grpc_planner_adapter.GrpcPlannerClient``) can duck-type
+adapter (``preselective_filter.integration.grpc_planner_adapter.GrpcPlannerClient``) can duck-type
 the same call.
 """
 

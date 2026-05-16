@@ -76,16 +76,20 @@ class GrpcPlannerClient:
         seed: int | None = None,
         rng: Any | None = None,  # accepted for signature parity; ignored
     ) -> list[_RemoteTrajectoryCandidate]:
-        """Send context to server, receive ONE chosen trajectory."""
-        try:
-            images = self._provider._latest_observation_dict()
-        except Exception:
-            images = {}
+        """Send context to server, receive ONE chosen trajectory.
+
+        Images are shipped so the server's frozen VLA encoder can compute the
+        FAISS key embedding; the encoder tolerates an empty dict.
+        """
         instruction = ""
         try:
             instruction = str(getattr(self._provider, "instruction", "") or "")
         except Exception:
             pass
+        try:
+            images = self._provider._latest_observation_dict()
+        except Exception:
+            images = {}
 
         try:
             resp = self._client.plan_and_select(

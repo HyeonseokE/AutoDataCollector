@@ -206,14 +206,14 @@ class LeRobotSkills:
         # cartesian-line trajectory for one joint-space candidate drawn from a
         # batched plan_batch(start, goal, n, seed) call. See
         # perturbation/skill_level for the local backend and
-        # vla_adaptor.grpc_planner_adapter for the gRPC drop-in.
+        # preselective_filter.integration.grpc_planner_adapter for the gRPC drop-in.
         self._skill_planner_client = None     # CuroboBackend / GrpcPlannerClient
         # Skill candidate selector hook (Method 3 / preselective_filter).
         # When set, it overrides the default RNG choice over plan_batch
         # results. Signature:
         #   fn(cands, current_joints, goal_joint_rad, is_transit) -> int | None
-        # Return None to fall back to RNG. See vla_adaptor for the production
-        # selector wiring.
+        # Return None to fall back to RNG. See preselective_filter.integration
+        # for the production selector wiring.
         self._skill_candidate_selector = None
         self._skill_planner_n_candidates = 4  # batch size; fallback to old path on empty
 
@@ -982,6 +982,14 @@ class LeRobotSkills:
         target_reached = False
         reach_time = None
 
+        # Real-time gripper pitch tracking (debug). pitch = arcsin(gripper Z
+        # elevation): 0° horizontal, -90° straight down. Tracked per control
+        # step so the progress line shows the live value and the Done line
+        # reports the span — large span = pitch swung during the move.
+        pitch_start_deg = None
+        pitch_lo_deg = None
+        pitch_hi_deg = None
+
         # Gripper schedule 활성 조건: start/end 값이 모두 주어졌고 duration > 0
         gripper_schedule_active = (
             gripper_start_value is not None
@@ -1049,13 +1057,30 @@ class LeRobotSkills:
                 state_full = np.concatenate([actual_norm, [gripper_cmd]])
                 self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
 
+            # Live gripper pitch (debug). FK is ~0.1ms so per-step is fine.
+            cur_pitch_deg = None
+            if kinematics is not None:
+                try:
+                    cur_pitch_deg = float(np.degrees(kinematics.get_gripper_pitch(actual_rad)))
+                    if pitch_start_deg is None:
+                        pitch_start_deg = cur_pitch_deg
+                    pitch_lo_deg = (cur_pitch_deg if pitch_lo_deg is None
+                                    else min(pitch_lo_deg, cur_pitch_deg))
+                    pitch_hi_deg = (cur_pitch_deg if pitch_hi_deg is None
+                                    else max(pitch_hi_deg, cur_pitch_deg))
+                except Exception:
+                    cur_pitch_deg = None
+
             # Progress display
             if self.verbose:
                 progress = min(elapsed / duration, 1.0)
                 bar_len = 30
                 filled = int(bar_len * progress)
                 bar = "=" * filled + "-" * (bar_len - filled)
-                print(f"\r  [{bar}] {phase} err:{position_error*1000:6.1f}mm", end="", flush=True)
+                pitch_str = (f" pitch:{cur_pitch_deg:+6.1f}°"
+                             if cur_pitch_deg is not None else "")
+                print(f"\r  [{bar}] {phase} err:{position_error*1000:6.1f}mm{pitch_str}",
+                      end="", flush=True)
 
             # Check target reached
             if position_error < POSITION_TOLERANCE:
@@ -1080,10 +1105,17 @@ class LeRobotSkills:
                 time.sleep(sleep_time)
 
         if self.verbose:
+            pitch_report = ""
+            if pitch_start_deg is not None and cur_pitch_deg is not None:
+                span = pitch_hi_deg - pitch_lo_deg
+                pitch_report = (
+                    f" | pitch {pitch_start_deg:+.1f}°→{cur_pitch_deg:+.1f}° "
+                    f"(span {pitch_lo_deg:+.1f}…{pitch_hi_deg:+.1f}°, Δ{span:.1f}°)"
+                )
             if target_reached:
-                print(f"\r  [{'=' * 30}] Done (err: {position_error*1000:.1f}mm)    ")
+                print(f"\r  [{'=' * 30}] Done (err: {position_error*1000:.1f}mm){pitch_report}    ")
             else:
-                print(f"\r  [{'=' * 30}] Timeout (err: {position_error*1000:.1f}mm)")
+                print(f"\r  [{'=' * 30}] Timeout (err: {position_error*1000:.1f}mm){pitch_report}")
 
         # Commit final gripper state if schedule was active
         if gripper_schedule_active:
@@ -1726,6 +1758,15 @@ class LeRobotSkills:
             current_pitch = active_planner.kinematics.get_gripper_pitch(current_joints)
             ik_target_pitch = current_pitch
             self._log(f"  Maintaining pitch at {np.degrees(current_pitch):.1f}°")
+        elif is_transit and getattr(self, "_saved_pitch", None) is not None:
+            # Holding-phase transit: an object is grasped (pick saved its
+            # grasp pitch, place clears it). Keep that pitch through lift /
+            # move-over so the held object stays oriented and the place
+            # descent does not need a large wrist re-orientation at the
+            # hover. The ±20° IK retry below relaxes it when the saved
+            # (steep) pitch is unreachable at the higher transit z.
+            ik_target_pitch = self._saved_pitch
+            self._log(f"  Holding-phase pitch: {np.degrees(self._saved_pitch):.1f}° (saved grasp)")
 
         # Transit-time pitch-down preference: applies only when this is a pure
         # transit AND no explicit target_pitch is in play (pick/place restore
@@ -2373,21 +2414,6 @@ class LeRobotSkills:
         # pick_z를 명목값으로 먼저 저장 (place에서 참조, pick 실패 시에도 crash 방지)
         self._pick_z = pick_z
 
-        # Re-center xy directly above the object at the current hover height.
-        # The upstream transit is subgoal-perturbed and can end up to ±100mm
-        # off the requested hover; without this correction the descent goes
-        # diagonally and accumulates IK + cartesian-line error, landing the
-        # fingertip several mm off the object centre. is_transit=False keeps
-        # perturbation off so the recenter itself is tight.
-        try:
-            _, _, _cur_ee = self._get_current_state()
-            recenter_xyz = [pick_position[0], pick_position[1], float(_cur_ee[2])]
-            self.move_to_position(recenter_xyz, target_name=pick_label,
-                                  skill_description=skill_description,
-                                  is_transit=False)
-        except Exception as _e:
-            self._log(f"  [Pick] xy recenter skipped ({_e})")
-
         # Descent to object contact — interaction subgoal, MUST NOT be perturbed.
         if not self.move_to_position(pick_position, target_name=pick_label,
                                      skill_description=skill_description,
@@ -2477,23 +2503,6 @@ class LeRobotSkills:
 
         # Move to place position (skill recording handled inside)
         place_label = f"place on {target_name}" if target_name else None
-
-        # Re-center xy directly above the place target at the current hover
-        # height. Same rationale as the pick recenter: the upstream transit is
-        # subgoal-perturbed and can leave the gripper up to ±100mm off the
-        # dish centre, so descending diagonally from there drops the block on
-        # the dish edge instead of the centre. Purely vertical descent after
-        # this recenter eliminates the diagonal-IK error budget entirely.
-        try:
-            _, _, _cur_ee = self._get_current_state()
-            recenter_xyz = [final_position[0], final_position[1], float(_cur_ee[2])]
-            self.move_to_position(recenter_xyz,
-                                  target_pitch=saved_pitch,
-                                  target_name=place_label,
-                                  skill_description=skill_description,
-                                  is_transit=False)
-        except Exception as _e:
-            self._log(f"  [Place] xy recenter skipped ({_e})")
 
         # Descent to place contact — interaction subgoal, MUST NOT be perturbed.
         if not self.move_to_position(final_position,

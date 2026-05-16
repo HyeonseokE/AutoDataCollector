@@ -1,7 +1,9 @@
 """TrajectoryCandidate → preselective_filter.Candidate.action_chunk.
 
-Decision #5(b) — execution-aligned resampling at recording_fps with
-goal-pad and gripper-hold, then zero-pad to SmolVLA's max_action_dim.
+Execution-aligned resampling at recording_fps with goal-pad and gripper-hold.
+Every candidate is resampled to the same (chunk_size, action_dim) shape so the
+buffer-only selector can take Euclidean distances between action chunks.
+For buffer-only use, pass action_dim = arm_dof + 1 (no zero-padding needed).
 """
 from __future__ import annotations
 
@@ -17,11 +19,12 @@ def trajectory_to_action_chunk(
     current_gripper: float,          # held constant during transit
     arm_dof: int,                    # SO-101 = 6 — gripper appended → real dim arm_dof+1
 ) -> np.ndarray:
-    """Convert a planned joint trajectory to a SmolVLA-shaped action_chunk.
+    """Convert a planned joint trajectory to a fixed-shape action_chunk.
 
     Returns shape (chunk_size, action_dim), zero-padded after the real
     (arm_dof+1) dims. Goal-padded when the trajectory is shorter than
-    chunk_size/fps seconds.
+    chunk_size/fps seconds. For buffer-only use pass action_dim = arm_dof+1
+    so no zero-padding is added.
 
     Steps:
         1. target_times = [0, 1/fps, ..., (chunk_size-1)/fps]

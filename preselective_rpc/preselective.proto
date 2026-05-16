@@ -26,8 +26,28 @@ service PreselectiveAcquirer {
   // Pass an empty selection_ids list with judge_true=false to discard.
   rpc CommitToBuffer(CommitRequest) returns (CommitResponse);
 
+  // Grow the vector DB from a recorded forward demo. The client streams the
+  // episode frame-by-frame; the server encodes each (key_t) with its frozen
+  // VLA and appends one (key_t, value_t) buffer entry per frame.
+  rpc IngestEpisode(stream FrameMessage) returns (IngestResponse);
+
   // Health check + server config snapshot.
   rpc Ready(Empty) returns (ServerInfo);
+}
+
+// One demonstration frame t streamed to IngestEpisode.
+message FrameMessage {
+  string skill_id = 1;            // buffer partition key (e.g. "move_to")
+  string instruction = 2;         // task text I
+  bytes state = 3;                // np.save: (Ds,) float32 — proprioception S_t
+  bytes action_chunk = 4;         // np.save: (H, Da) float32 — raw demo A_{t:t+H-1}
+  // Camera frames O_t: pickled dict[str, ndarray] (HxWxC uint8 or CHW float).
+  bytes images_pickle = 5;
+}
+
+message IngestResponse {
+  int32 frames_ingested = 1;              // (key, value) entries appended
+  map<string, int32> buffer_totals = 2;   // skill_id → entry count after ingest
 }
 
 message PlanRequest {

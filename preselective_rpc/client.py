@@ -4,8 +4,9 @@ Drop-in replacement for the local hook in execution_forward_and_reset.py:
 - `PreselectiveClient.plan_and_select(...)` → returns chosen trajectory dict
 - `PreselectiveClient.commit(...)` → flushes pending selections after judge
 
-The server owns curobo + SmolVLA + buffer; the client just ships context
-(state, goal, image, instruction) and receives back one trajectory.
+The server owns curobo + the buffer-only Selector + buffer; the client just
+ships joint-space context (state, goal, instruction) and receives back one
+trajectory.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import numpy as np
 from preselective_rpc import preselective_pb2, preselective_pb2_grpc
 from preselective_rpc._codec import (
     decode_pickle,
+    encode_jpeg,
     encode_ndarray,
     encode_pickle,
 )
@@ -121,6 +123,73 @@ class PreselectiveClient:
             "committed": int(resp.committed),
             "dropped": int(resp.dropped),
             "buffer_totals": dict(resp.buffer_totals),
+        }
+
+    # --------------------------------------------------------------
+    def ingest_episode(
+        self,
+        dataset_root: Any,
+        chunk_size: int,
+        skill_id: str = "move_to",
+        episode_index: int | None = None,
+        timeout_s: float = 600.0,
+        max_frames: int | None = None,
+    ) -> dict:
+        """Stream a recorded forward demo to the server for vector-DB growth.
+
+        Reads the episode locally (CPU only — no VLA) and streams each frame's
+        (images, state, action_chunk, instruction) to the H100 server, which
+        encodes key_t with its frozen VLA and appends one (key_t, value_t)
+        buffer entry per frame. Returns {frames, buffer_totals, episode}.
+
+        ``max_frames`` caps how many frames are streamed (quick checks).
+        """
+        from preselective_filter.integration import (
+            all_episode_indices,
+            open_chunked_dataset,
+        )
+
+        ds = open_chunked_dataset(dataset_root, chunk_size)
+        ep = (episode_index if episode_index is not None
+              else max(all_episode_indices(ds)))
+        em = ds.meta.episodes[ep]
+        s, e = int(em["dataset_from_index"]), int(em["dataset_to_index"])
+        if max_frames is not None:
+            e = min(e, s + int(max_frames))
+
+        def _frames():
+            for idx in range(s, e):
+                item = ds[idx]
+                # JPEG-compress each camera frame for transport (~10x smaller).
+                # Lossy but negligible for a frozen-encoder feature key.
+                imgs = {
+                    k: encode_jpeg(
+                        v.numpy() if hasattr(v, "numpy") else np.asarray(v)
+                    )
+                    for k, v in item.items()
+                    if k.startswith("observation.images")
+                }
+                instr = item.get("task")
+                if not isinstance(instr, str) or not instr:
+                    tasks = ds.meta.episodes[ep].get("tasks")
+                    instr = str(tasks[0]) if tasks else ""
+                yield preselective_pb2.FrameMessage(
+                    skill_id=str(skill_id),
+                    instruction=str(instr),
+                    state=encode_ndarray(
+                        np.asarray(item["observation.state"], dtype=np.float32)
+                    ),
+                    action_chunk=encode_ndarray(
+                        np.asarray(item["action"], dtype=np.float32)
+                    ),
+                    images_pickle=encode_pickle(imgs),
+                )
+
+        resp = self.stub.IngestEpisode(_frames(), timeout=timeout_s)
+        return {
+            "frames": int(resp.frames_ingested),
+            "buffer_totals": dict(resp.buffer_totals),
+            "episode": int(ep),
         }
 
     # --------------------------------------------------------------

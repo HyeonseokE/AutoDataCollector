@@ -121,51 +121,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "object_detection"))
 from pipeline.base_pipeline import BasePipeline
 
 
-def _map_images_to_policy_keys(
-    raw_imgs: dict,
-    image_keys: list,
-    target_shape: tuple | None,
-) -> dict:
-    """Resize/format raw camera frames to the SmolVLA policy's image_features.
-
-    raw_imgs        : {camera_name: HxWxC uint8 ndarray} from RecordingContext
-    image_keys      : ['observation.images.camera1', 'camera2', ...] (policy)
-    target_shape    : (C, H, W) — same for every image_features entry
-
-    Maps the i-th raw frame onto the i-th policy key (positional). Missing slots
-    are dropped — SmolVLA's preprocessor only requires "at least one" image
-    present. Returned tensors are CHW float32 in [0, 1] with a leading batch
-    dim, ready for the preprocessor pipeline.
-    """
-    if not image_keys or not raw_imgs or target_shape is None:
-        return dict(raw_imgs) if raw_imgs else {}
-    C, H, W = int(target_shape[0]), int(target_shape[1]), int(target_shape[2])
-    out: dict = {}
-    items = list(raw_imgs.items())
-    for i, key in enumerate(image_keys):
-        if i >= len(items):
-            break
-        _, frame = items[i]
-        if frame is None:
-            continue
-        arr = np.asarray(frame)
-        if arr.ndim == 3 and arr.shape[2] == 3:  # HWC RGB/BGR
-            if arr.shape[:2] != (H, W):
-                arr = cv2.resize(arr, (W, H), interpolation=cv2.INTER_AREA)
-            arr = arr.transpose(2, 0, 1)         # HWC → CHW
-        elif arr.ndim == 3 and arr.shape[0] == 3:  # already CHW
-            if arr.shape[1:] != (H, W):
-                hwc = arr.transpose(1, 2, 0)
-                hwc = cv2.resize(hwc, (W, H), interpolation=cv2.INTER_AREA)
-                arr = hwc.transpose(2, 0, 1)
-        else:
-            continue  # unsupported shape — skip
-        if arr.dtype != np.float32:
-            arr = arr.astype(np.float32) / 255.0 if arr.dtype == np.uint8 else arr.astype(np.float32)
-        out[key] = arr[None, ...]  # add batch dim → (1, C, H, W)
-    return out
-
-
 class ForwardAndResetPipeline(BasePipeline):
     """Forward → Judge → Reset 통합 파이프라인"""
 
@@ -361,10 +316,9 @@ class ForwardAndResetPipeline(BasePipeline):
         # Skipped entirely when preselective_filter.transport=grpc (server side
         # owns the planner in that case).
         self._setup_skill_perturbation_on_skills()
-        # Method 3: pre-selective acquisition. Wraps the RNG candidate pick
-        # with an IG·AC selector backed by SmolVLA + a per-skill jsonl buffer.
-        # Silent no-op when preselective_filter.enabled is false.
-        self._setup_preselective_filter_on_skills()
+        # Method 3 (pre-selective acquisition) is wired later, at run time —
+        # see _setup_preselective_filter_on_skills(session_dir). It is deferred
+        # so the FAISS buffer can live inside the run's session folder.
 
         return self._skills
 
@@ -651,20 +605,25 @@ class ForwardAndResetPipeline(BasePipeline):
     # ------------------------------------------------------------------
     # Method 3 — pre-selective acquisition (preselective_filter)
     # ------------------------------------------------------------------
-    def _setup_preselective_filter_on_skills(self) -> None:
+    def _setup_preselective_filter_on_skills(self, session_dir: str | None = None) -> None:
         """Read preselective_filter from recording_config and wire a hook.
 
-        Silent no-op when recording_config is absent or
-        preselective_filter.enabled is false. When enabled, loads SmolVLA
-        via vla_adaptor.setup_preselective_filter, captures the resulting
-        Selector + a per-call context provider, and attaches a candidate
-        selector hook to skills via ``set_skill_candidate_selector``.
+        Called at run time (after the session folder exists) so the FAISS
+        buffer can be created inside it: when the yaml has no explicit
+        ``buffer.root``, the buffer lives at ``<session_dir>/preselective_buffer``.
 
-        See vla_adaptor/INTEGRATION_GUIDE.md for the design rationale.
+        Silent no-op when recording_config is absent or
+        preselective_filter.enabled is false. When enabled, builds a
+        FAISS-retrieval Selector + frozen VLA encoder via
+        preselective_filter.integration.setup_preselective_filter and attaches a
+        candidate selector hook to skills via ``set_skill_candidate_selector``.
         """
         self._preselective_selector = None
-        self._preselective_pending = []  # [(ctx, selection), ...] for add_to_buffer
+        self._preselective_encoder = None
         self._preselective_phase = {"forward": False, "reset": False}
+        self._preselective_debug = False  # overridden from psf_raw.debug_verbose
+        self._preselective_chunk_size = 50  # overridden from psf_raw.selector
+        self._preselective_ingest_thread = None  # background demo-ingest thread
         if not self.recording_config:
             return
         cfg_path = Path(self.recording_config)
@@ -678,19 +637,25 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[preselective_filter] failed to read recording_config: {e}")
             return
         psf_raw = full_cfg.get("preselective_filter") or {}
-        any_en, fwd, reset = self._read_phase_flags(psf_raw)
-        if not any_en:
+        self._preselective_debug = bool(psf_raw.get("debug_verbose", False))
+        # preselective_filter is forward-only by design — reset never plans
+        # with curobo, so there is no enabled_reset knob.
+        fwd = bool(psf_raw.get("enabled_forward", psf_raw.get("enabled", False)))
+        if not fwd:
             return
-        self._preselective_phase = {"forward": fwd, "reset": reset}
+        self._preselective_phase = {"forward": True, "reset": False}
+        self._preselective_chunk_size = int(
+            (psf_raw.get("selector") or {}).get("chunk_size", 50)
+        )
         transport = str(psf_raw.get("transport", "local")).lower()
         print(
-            f"[preselective_filter] phase=forward:{fwd} reset:{reset} transport={transport}"
+            f"[preselective_filter] phase=forward-only transport={transport}"
         )
 
         # ──────────────────────────────────────────────────────────────
         # Branch on transport mode.
-        #   local : SmolVLA + Selector + curobo all in this process. The hook
-        #           runs IG·AC on K candidates curobo already produced.
+        #   local : buffer-only Selector + curobo all in this process. The
+        #           hook runs IG·AC on K candidates curobo already produced.
         #   grpc  : remote H100 server runs both curobo + IG·AC. We install
         #           a GrpcPlannerClient adapter as the skill planner; that
         #           adapter calls server.PlanAndSelect inside plan_batch
@@ -702,22 +667,25 @@ class ForwardAndResetPipeline(BasePipeline):
             return
 
         try:
-            from vla_adaptor import setup_preselective_filter
-            selector = setup_preselective_filter(full_cfg)
+            from preselective_filter.integration import setup_preselective_filter
+            result = setup_preselective_filter(full_cfg, session_dir=session_dir)
         except Exception as e:
             print(f"[preselective_filter] setup failed: {e}; disabling")
             return
-        if selector is None:
+        if result is None:
             return
+        selector, encoder = result
         self._preselective_selector = selector
+        self._preselective_encoder = encoder
 
-        # Build the per-call context provider + selector hook closure.
-        # This bridges the gap between (a) skills_lerobot's plan_batch call
-        # site, which only has joint-space context, and (b) the Selector,
-        # which needs (O, S, I, skill_id, gripper) for IG·AC.
+        # Build the selector hook closure. Bridges skills_lerobot's plan_batch
+        # call site (joint-space context only) to the FAISS-retrieval Selector.
         if hasattr(self, "_skills") and self._skills is not None:
             try:
-                hook = self._build_preselective_hook(selector)
+                _chunk = self._preselective_chunk_size
+                hook = self._build_preselective_hook(
+                    selector, encoder, chunk_size=_chunk,
+                )
                 self._skills.set_skill_candidate_selector(hook)
                 print("[preselective_filter] selector + hook installed on skills")
             except Exception as e:
@@ -736,7 +704,7 @@ class ForwardAndResetPipeline(BasePipeline):
         timeout_s = float(psf_raw.get("transport_timeout_s", 60.0))
         try:
             from preselective_rpc.client import PreselectiveClient
-            from vla_adaptor.grpc_planner_adapter import GrpcPlannerClient
+            from preselective_filter.integration.grpc_planner_adapter import GrpcPlannerClient
         except Exception as e:
             print(f"[preselective_filter] grpc imports failed: {e}; disabling")
             return
@@ -775,35 +743,18 @@ class ForwardAndResetPipeline(BasePipeline):
                 f"(K={n_cand}, no local hook)"
             )
 
-    def _build_preselective_hook(self, selector):
+    def _build_preselective_hook(self, selector, encoder, chunk_size: int = 50):
         """Construct the closure that bridges plan_batch results → Selector.
 
         Returned function matches the signature expected by
         LeRobotSkills.set_skill_candidate_selector:
             fn(cands, current_joints, goal_joint_rad, is_transit) -> int | None
-        """
-        # Cache static config; resolve lazily on first call to avoid import-time deps.
-        from preselective_filter import Candidate, Context
-        from vla_adaptor import trajectory_to_action_chunk
 
-        # Pull policy config (chunk_size, max_action_dim) from the adapter.
-        # selector.policy is SmolVLAAdapter; .policy is the underlying SmolVLAPolicy.
-        try:
-            policy_cfg = selector.policy.policy.config
-            chunk_size = int(policy_cfg.chunk_size)
-            action_dim = int(policy_cfg.max_action_dim)
-            # Expected image keys + shape (C, H, W) for SmolVLA's preprocessor.
-            # We map our raw cameras (e.g., 'top', 'left_wrist') positionally
-            # onto the first N expected keys; missing slots are simply skipped
-            # (the preprocessor only requires "at least one" image present).
-            image_keys = list(policy_cfg.image_features.keys())
-            image_target_shape = (
-                tuple(policy_cfg.image_features[image_keys[0]].shape)
-                if image_keys else None
-            )  # e.g., (3, 256, 256)
-        except Exception as e:
-            print(f"[preselective_filter] cannot read policy config ({e}); skipping hook")
-            return None
+        The frozen VLA encoder turns (latest camera frames + instruction +
+        robot state) into the FAISS key embedding placed on Context.
+        """
+        from preselective_filter import Candidate, Context
+        from preselective_filter.integration import trajectory_to_action_chunk
 
         orchestrator = self
         skills_ref = self._skills
@@ -814,39 +765,31 @@ class ForwardAndResetPipeline(BasePipeline):
             if not is_transit:
                 return None
             try:
-                # ---- Collect current context ----
-                # observation: latest async camera frames (RecordingContext)
-                raw_imgs = orchestrator._latest_observation_dict()
-                obs_dict = _map_images_to_policy_keys(
-                    raw_imgs, image_keys, image_target_shape,
-                )
-                # episode-level instruction (from execute_forward call)
                 instr = str(getattr(orchestrator, "instruction", "") or "")
-                # gripper: current motor position (set during move_to_position prelude)
                 gripper = float(getattr(skills_ref, "current_gripper_pos", 0.0))
                 # skill_id: v1 uses a single bucket for all transits; extend later
-                # to differentiate move/move_and_close/move_and_open via the
-                # hook signature if buffer partitioning needs finer granularity.
+                # to differentiate move/move_and_close/move_and_open if buffer
+                # partitioning needs finer granularity.
                 skill_id = "move_to"
+                state_arr = np.asarray(current_joints, dtype=float)
 
-                # ---- Wrap candidates ----
-                # Times: v1 uses uniform 10Hz waypoint spacing as a stand-in for
-                # the existing constant-velocity parameterization. The bridge
-                # then resamples to chunk_size/fps. See INTEGRATION_GUIDE.md for
-                # the deferred upgrade to real planner-velocity-based times.
+                # FAISS key embedding from the frozen VLA encoder.
+                raw_imgs = orchestrator._latest_observation_dict()
+                key_emb = encoder.encode(raw_imgs, instr, state_arr)
+
+                # Wrap candidates → fixed-shape action chunks (action_dim =
+                # arm_dof+1) so the selector can take buffer-distance metrics.
                 fps = int(orchestrator.recording_fps)
                 wrapped = []
                 for c in cands:
                     wp = c.waypoints
                     arm_dof = int(wp.shape[1])
-                    times = (
-                        __import__("numpy").arange(wp.shape[0], dtype=float) / float(fps)
-                    )
+                    times = np.arange(wp.shape[0], dtype=float) / float(fps)
                     chunk = trajectory_to_action_chunk(
                         waypoints=wp,
                         times=times,
                         chunk_size=chunk_size,
-                        action_dim=action_dim,
+                        action_dim=arm_dof + 1,
                         fps=fps,
                         current_gripper=gripper,
                         arm_dof=arm_dof,
@@ -856,14 +799,16 @@ class ForwardAndResetPipeline(BasePipeline):
                     ))
 
                 ctx = Context(
-                    observation=obs_dict,
-                    state=__import__("numpy").asarray(current_joints, dtype=float),
+                    observation=np.zeros(0, dtype=np.float32),
+                    state=state_arr,
                     instruction=instr,
                     skill_id=skill_id,
+                    key_embedding=key_emb,
                 )
                 selection = selector.select(ctx, wrapped)
-                # Defer add_to_buffer until end-of-episode TRUE-judge gate.
-                orchestrator._preselective_pending.append((ctx, selection))
+                # No buffer write here — the vector DB is grown post-episode by
+                # ingesting the recorded forward demo (see _demo_ingest_worker).
+                # The selector only *reads* the buffer for IG·AC.
                 return int(selection.chosen_index)
             except Exception as e:
                 print(f"[preselective_filter] hook exception: {e}")
@@ -874,7 +819,8 @@ class ForwardAndResetPipeline(BasePipeline):
     def _latest_observation_dict(self) -> dict:
         """Return latest camera frames as {camera_name: np.ndarray}.
 
-        Falls back to {} if the async capture surface isn't available.
+        Falls back to {} if the async capture surface isn't available — the
+        VLA encoder tolerates an empty image dict (language+state only).
         """
         try:
             from record_dataset.context import RecordingContext
@@ -886,16 +832,111 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception:
             return {}
 
+    def _start_demo_ingest_async(self) -> None:
+        """Kick off demo ingestion in the background.
+
+        The per-frame VLA encoding is GPU-heavy (tens of seconds). It is run on
+        a daemon thread so it overlaps the NEXT episode's codegen/verify phase
+        (no robot motion, GPU idle). ``_await_demo_ingest`` blocks before the
+        next rollout so the new demo is in the vector DB before IG·AC runs.
+        """
+        import threading
+
+        self._await_demo_ingest()  # ensure no prior ingest is still running
+        t = threading.Thread(
+            target=self._demo_ingest_worker, name="demo-ingest", daemon=True,
+        )
+        self._preselective_ingest_thread = t
+        t.start()
+
+    def _await_demo_ingest(self) -> None:
+        """Block until the background demo ingestion finishes (if running)."""
+        t = getattr(self, "_preselective_ingest_thread", None)
+        if t is None:
+            return
+        if t.is_alive():
+            import time as _t
+            t0 = _t.time()
+            t.join()
+            if self._preselective_debug:
+                print(
+                    f"[preselective_filter] waited "
+                    f"{_t.time() - t0:.1f}s for demo ingestion"
+                )
+        self._preselective_ingest_thread = None
+
+    def _demo_ingest_worker(self) -> None:
+        """Grow the vector DB from the just-saved forward demo episode.
+
+        Local mode  : encode every frame here with the in-process VLA and
+                      append to the local FAISS buffer.
+        gRPC mode   : stream the episode to the H100 server, which encodes
+                      keys with its VLA and grows its server-side buffer.
+
+        Either way the newest episode of the recorded LeRobot dataset (the
+        forward demo that just passed the strict TRUE judge) is ingested
+        per-timestep — see preselective_filter.integration.demo_ingest.
+        """
+        recorder = getattr(self, "dataset_recorder", None)
+        if recorder is None:
+            return
+        ds = getattr(recorder, "_dataset", None)
+        if ds is None:
+            return
+        chunk = int(getattr(self, "_preselective_chunk_size", 50))
+        grpc_client = getattr(self, "_preselective_grpc_client", None)
+        try:
+            if grpc_client is not None:
+                res = grpc_client.ingest_episode(
+                    dataset_root=str(ds.root), chunk_size=chunk,
+                )
+                if self._preselective_debug:
+                    print(
+                        f"[preselective_filter] grpc ingested {res['frames']} "
+                        f"demo frames (ep {res['episode']}); "
+                        f"buffer totals={res['buffer_totals']}"
+                    )
+                return
+
+            selector = getattr(self, "_preselective_selector", None)
+            encoder = getattr(self, "_preselective_encoder", None)
+            if selector is None or encoder is None:
+                return
+            from preselective_filter.integration.demo_ingest import (
+                all_episode_indices,
+                ingest_episode,
+                open_chunked_dataset,
+            )
+            dataset = open_chunked_dataset(ds.root, chunk)
+            last_ep = max(all_episode_indices(dataset))
+            n = ingest_episode(
+                dataset, last_ep, encoder, selector.buffer,
+                instruction_fallback=str(getattr(self, "instruction", "") or ""),
+                debug_verbose=self._preselective_debug,
+            )
+            if self._preselective_debug:
+                print(
+                    f"[preselective_filter] ingested {n} demo frames "
+                    f"(forward ep {last_ep}); buffer totals={selector.buffer.summary()}"
+                )
+        except Exception as e:
+            print(f"[preselective_filter] demo ingest failed: {e}")
+
     def _teardown_preselective_filter(self) -> None:
-        """Release SmolVLA + buffer resources at session end."""
+        """Release the VLA encoder's GPU memory at session end."""
+        # Let any in-flight background demo ingestion finish before the
+        # encoder is freed (the worker thread still uses it).
+        self._await_demo_ingest()
         sel = getattr(self, "_preselective_selector", None)
-        if sel is not None:
+        enc = getattr(self, "_preselective_encoder", None)
+        if sel is not None or enc is not None:
             try:
-                from vla_adaptor import teardown_preselective_filter
-                teardown_preselective_filter(sel)
+                from preselective_filter.integration import teardown_preselective_filter
+                teardown_preselective_filter(sel, enc)
             except Exception:
                 pass
             self._preselective_selector = None
+            self._preselective_encoder = None
         # Close gRPC channel if we were in remote mode.
         grpc_cli = getattr(self, "_preselective_grpc_client", None)
         if grpc_cli is not None:
@@ -2092,11 +2133,6 @@ class ForwardAndResetPipeline(BasePipeline):
                 if self.record_dataset:
                     self._start_episode_recording(task=instruction)
 
-                # Method 3: reset per-episode pending-selection list. Selector
-                # hook (when installed) appends (ctx, selection) tuples to this
-                # list per move_to_position call; only TRUE-judge episodes are
-                # committed to the buffer (see line ~1942).
-                self._preselective_pending = []
                 # gRPC mode: drop any stale selection_ids the client may still
                 # be tracking from a previous (uncommitted) episode.
                 _grpc_cli = getattr(self, "_preselective_grpc_client", None)
@@ -2109,6 +2145,11 @@ class ForwardAndResetPipeline(BasePipeline):
                 import builtins
                 builtins._current_execution_dir = forward_dir
                 builtins._scene_summary = self.multi_turn_info.get("turn0_response", "") if self.multi_turn_info else ""
+
+                # Method 3: the previous episode's demo ingestion ran in the
+                # background during codegen — block here so the new demo is in
+                # the vector DB before this rollout's IG·AC selection.
+                self._await_demo_ingest()
 
                 # Ensure skills exist before phase-gating so the context manager
                 # can actually detach subsystems when enabled_forward=false.
@@ -2243,74 +2284,19 @@ class ForwardAndResetPipeline(BasePipeline):
                 if self.record_dataset:
                     should_discard = judge_prediction == "FALSE"
 
-                    # Method 3: commit pending selections to buffer ONLY on
-                    # strict TRUE judge (decision #6). UNCERTAIN episodes are
-                    # kept in the dataset (manual review) but NOT in buffer to
-                    # avoid IG/AC poisoning.
-                    selector = getattr(self, "_preselective_selector", None)
-                    pending = getattr(self, "_preselective_pending", [])
-                    grpc_client = getattr(self, "_preselective_grpc_client", None)
-
-                    if grpc_client is not None:
-                        # gRPC mode: server holds the pending selections by
-                        # selection_id. Tell it to commit (or drop) them now.
-                        ep_id = f"ep_{episode_idx}" if 'episode_idx' in dir() else ""
-                        try:
-                            res = grpc_client.commit(
-                                judge_true=(judge_prediction == "TRUE"),
-                                episode_id=ep_id,
-                            )
-                            if judge_prediction == "TRUE":
-                                print(
-                                    f"[preselective_filter] grpc committed "
-                                    f"{res['committed']} selections to buffer"
-                                )
-                            else:
-                                print(
-                                    f"[preselective_filter] grpc dropped "
-                                    f"{res['dropped']} selections (judge={judge_prediction})"
-                                )
-                            totals = res.get("buffer_totals") or {}
-                            if totals:
-                                breakdown = ", ".join(
-                                    f"{sid}={n}" for sid, n in sorted(totals.items())
-                                )
-                                print(
-                                    f"[preselective_filter] buffer totals "
-                                    f"(skills={len(totals)}, entries={sum(totals.values())}): "
-                                    f"{breakdown}"
-                                )
-                        except Exception as e:
-                            print(f"[preselective_filter] grpc commit failed: {e}")
-                    elif (selector is not None
-                            and judge_prediction == "TRUE"
-                            and pending):
-                        committed = 0
-                        for ctx, selection in pending:
-                            try:
-                                selector.add_to_buffer(ctx, selection)
-                                committed += 1
-                            except Exception as e:
-                                print(f"[preselective_filter] add_to_buffer failed: {e}")
-                        print(f"[preselective_filter] committed {committed}/{len(pending)} selections to buffer")
-                        # Per-skill cumulative buffer summary after commit.
-                        try:
-                            totals = selector.buffer.summary()
-                            if totals:
-                                breakdown = ", ".join(
-                                    f"{sid}={n}" for sid, n in sorted(totals.items())
-                                )
-                                grand = sum(totals.values())
-                                print(
-                                    f"[preselective_filter] buffer totals "
-                                    f"(skills={len(totals)}, entries={grand}): {breakdown}"
-                                )
-                        except Exception as e:
-                            print(f"[preselective_filter] buffer summary failed: {e}")
-                    self._preselective_pending = []
-
                     # _end_episode_recording이 save_episode 전에 buffer snapshot을 떠서 반환
                     episode_df = self._end_episode_recording(discard=should_discard)
+
+                    # Method 3: on a strict TRUE judge, grow the vector DB from
+                    # the just-saved forward demo per-timestep (key_t, value_t).
+                    # Runs in the background so it overlaps the next episode's
+                    # codegen; the next rollout awaits it. Local mode encodes
+                    # here; gRPC mode streams the episode to the H100 server.
+                    if not should_discard and judge_prediction == "TRUE" and (
+                        getattr(self, "_preselective_selector", None) is not None
+                        or getattr(self, "_preselective_grpc_client", None) is not None
+                    ):
+                        self._start_demo_ingest_async()
 
                     if not should_discard and episode_df is not None:
                         # Skill recording 시각화 저장 (성공한 에피소드만)
@@ -3786,6 +3772,9 @@ class ForwardAndResetPipeline(BasePipeline):
         session_dir, episodes_per_seed, all_results = self._init_session(
             num_episodes, instruction, objects, save_dir,
         )
+        # Method 3: wire the IG·AC selector now that the session folder exists,
+        # so the FAISS buffer lands inside <session_dir>/preselective_buffer.
+        self._setup_preselective_filter_on_skills(session_dir)
         seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
 
         # 헤더 출력
@@ -3917,6 +3906,8 @@ class ForwardAndResetPipeline(BasePipeline):
         session_dir, episodes_per_seed, all_results = self._init_session(
             num_episodes, instruction, objects, save_dir, session_dir=session_dir,
         )
+        # Method 3: wire the IG·AC selector against the resumed session folder.
+        self._setup_preselective_filter_on_skills(session_dir)
         batch_slots, seed_positions, batch_attempted = self._load_resume_state(session_dir)
 
         # 헤더 출력

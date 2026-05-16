@@ -1,15 +1,15 @@
-"""Method 3 — Skill-wise Pre-selective Acquisition.
+"""Method 3 — Skill-wise Pre-selective Acquisition (buffer-only).
 
-Spec: 구현내용정리_modelAC_updated_nuance_final.md
+Buffer-only variant: the pretrained VLA entropy proxy has been removed.
+IG and AC are computed purely from the per-skill buffer.
 """
-from .protocols import BufferStore, PolicyAdapter
+from .protocols import BufferStore
 from .selector import Selector, SelectorConfig
 from .types import (
     ActionChunk,
     BufferEntry,
     Candidate,
     Context,
-    FMOutput,
     Instruction,
     Observation,
     ScoreReport,
@@ -24,10 +24,8 @@ __all__ = [
     "BufferStore",
     "Candidate",
     "Context",
-    "FMOutput",
     "Instruction",
     "Observation",
-    "PolicyAdapter",
     "ScoreReport",
     "Selection",
     "Selector",

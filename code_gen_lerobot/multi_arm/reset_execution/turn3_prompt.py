@@ -224,7 +224,7 @@ cur_left = current_positions["left_arm"]
 cur_right = current_positions["right_arm"]
 tgt_left = target_positions["left_arm"]
 tgt_right = target_positions["right_arm"]
-approach_height = 0.20
+approach_height = 0.10
 
 # === STEP 1: Move 1st object to target (no re-detection needed) ===
 # Determine which arm to use based on workspace images.
@@ -438,7 +438,7 @@ def execute_reset_task():
         cur_right = current_positions["right_arm"]
         tgt_left = target_positions["left_arm"]
         tgt_right = target_positions["right_arm"]
-        approach_height = 0.20
+        approach_height = 0.10
 
         skills.move_to_initial_state()
 
@@ -478,7 +478,7 @@ if __name__ == "__main__":
 4. **Re-detection (MANDATORY)**: After each subtask (after `clear_subtask()`), call `skills.move_to_initial_state()` to clear arms from camera view, then `skills.detect_objects([...all object names...])` to update positions. The call AUTOMATICALLY merges fresh detections into `cur_left` / `cur_right` in-place AND preserves Turn 2 point labels — no `updated = ...` / conditional update boilerplate. Skip re-detection only after the very last subtask. The 1st object does NOT need re-detection.
    - **CRITICAL**: After `skills.detect_objects(...)`, you MUST **re-extract ALL local variables** from `cur_left` / `cur_right`. The dict entries are updated in-place, but previously extracted variables still reference the OLD values.
 5. Always start with `skills.move_to_initial_state()`, end with `skills.move_to_initial_state()` then `skills.move_to_free_state()`.
-6. Use `approach_height = 0.20` for approach/retreat movements.
+6. Use `approach_height = 0.10` for approach/retreat movements.
 7. ALWAYS pass `left_skill_description`/`right_skill_description` and `left_verification_question`/`right_verification_question` for every arm that is NOT `"wait"`.
 8. Always include try/finally with `skills.disconnect()` for cleanup.
 9. **Unstacking**: If objects are stacked, always unstack from top to bottom (highest z first).

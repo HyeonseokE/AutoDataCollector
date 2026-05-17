@@ -96,6 +96,11 @@ fi
 conda activate "$ENV_NAME"
 info "active : $(python --version) @ $CONDA_PREFIX"
 
+# Force every `pip` below to run as the *active env's* python. A bare `pip` on
+# PATH can resolve to a system pip (e.g. /usr/bin/pip3) and then install into
+# /usr/local — "Permission denied", or packages built as legacy "UNKNOWN 0.0.0".
+pip() { python -m pip "$@"; }
+
 # ──────────────────────────────────────────────────────────────────────
 # 3. libstdc++ activation hook (CXXABI_1.3.15 for pinocchio / scipy)
 # ──────────────────────────────────────────────────────────────────────
@@ -140,8 +145,13 @@ if lerobot_is_vendored; then
   info "vendored lerobot active: $VENDORED_LEROBOT"
 else
   warn "lerobot missing or shadowed by a non-vendored copy — reinstalling"
-  # Loop: remove EVERY lerobot install (conda env + ~/.local can both have one).
-  while pip uninstall -y lerobot >/dev/null 2>&1; do
+  # Remove EVERY lerobot install. NOTE: `pip uninstall` exits 0 even when the
+  # package is absent (it just prints "Skipping ... not installed"), so gating
+  # the loop on its exit code spins forever. Gate on `pip show` instead — it
+  # exits non-zero when nothing is installed — and cap iterations as a safety net.
+  for _ in $(seq 1 20); do
+    pip show lerobot >/dev/null 2>&1 || break
+    pip uninstall -y lerobot >/dev/null 2>&1 || true
     info "  removed a stray lerobot install"
   done
   info "pip install -e lerobot[pi,smolvla]  (pulls transformers 5.x, accelerate, …)"
@@ -149,8 +159,8 @@ else
   if ! lerobot_is_vendored; then
     err "lerobot STILL not the vendored copy — a stray install is shadowing it."
     err "  fix manually, then re-run this script:"
-    err "    while pip uninstall -y lerobot 2>/dev/null; do :; done"
-    err "    pip install -e lerobot[pi,smolvla] --ignore-requires-python"
+    err "    while python -m pip show lerobot >/dev/null 2>&1; do python -m pip uninstall -y lerobot; done"
+    err "    python -m pip install -e lerobot[pi,smolvla] --ignore-requires-python"
     exit 1
   fi
   info "vendored lerobot installed"
@@ -191,6 +201,15 @@ if ! python -c "import grpc, grpc_tools" 2>/dev/null; then
   pip install grpcio grpcio-tools
 else
   info "grpcio already present"
+fi
+
+# faiss — preselective_filter 의 FAISS 벡터 버퍼(FaissBufferStore)가 필요로 함.
+# 프로젝트 메타데이터에 빠져 있어 여기서 명시적으로 설치한다.
+if ! python -c "import faiss" 2>/dev/null; then
+  info "pip install faiss-cpu  (FAISS vector buffer)"
+  pip install faiss-cpu
+else
+  info "faiss already present"
 fi
 
 if ! python -c "import sys; sys.path.insert(0, '.'); from preselective_rpc.client import PreselectiveClient" 2>/dev/null; then

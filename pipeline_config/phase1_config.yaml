@@ -1,0 +1,79 @@
+# ============================================================
+# Phase1 Config — Method3 State Coverage Seeding (final_method3_spec §4-5)
+# ============================================================
+# buffer-aware subgoal scoring 의 전용 설정 파일.
+#
+# 이 파일이 존재하면 recording_config_ws*.yaml 의 perturbation.subgoal 보다
+# 우선 적용된다 (실행 시 "[Perturbation] Phase1 config ← ..." 로그로 확인).
+#
+# Phase1 은 별도 명령이 아니라 recording 파이프라인에 내장돼 실행된다:
+#     ./run_forward_and_reset_ws3.sh
+# mode: buffer_aware 이면 그 세션 동안 Phase1 subgoal scoring 이 활성화된다.
+# ============================================================
+
+subgoal:
+  # --- 활성화 ---
+  enabled_forward: true        # forward execution 에서 Phase1 ON
+  enabled_reset: false         # reset execution 에서는 OFF (forward-only)
+
+  # --- mode ---
+  #   buffer_aware = Phase1 buffer-aware subgoal scoring
+  mode: buffer_aware
+
+  # --- 후보 생성 (§4.2) ---
+  n_candidates: 32             # K — subgoal 후보 수
+  sigma: 0.05                  # 후보 분포 폭 (m)
+  clip_factor: 1.0             # 후보 최대 반경 = clip_factor * sigma
+  candidate_dist: hemisphere     # uniform_ball | gaussian | hemisphere
+  robot_origin: [0.0, 0.0, 0.0]
+  max_resample: 200            # valid 후보 rejection 재샘플 상한
+
+  # --- per-skill override (skill_id 별 다른 분포) ---
+  # 항목이 없으면 위 전역 값을 그대로 사용. 지원 키: sigma / clip_factor / n_candidates.
+  # move_initial: home 자세는 카메라 FOV 가림을 피하려고 좁은 분포만 허용.
+  #   R = clip_factor × sigma = 1.0 × 0.02 = 0.02 m  (≈ ±2cm).
+  #   다음 단계 detect_objects 의 상단 카메라 시야에 팔이 들어와 검출이 망가지는
+  #   것을 방지. 글로벌(현재 5cm) 보다 의미 있게 좁음.
+  per_skill:
+    move_initial:
+      sigma: 0.02
+      clip_factor: 1.0
+
+  # --- scoring (§5.3-5.4) ---
+  k_nn: 5                      # buffer kNN novelty 의 k
+  preview_points: 20           # InterpPlan canonical preview state 수 T
+  end_fraction: 0.2            # T_end — 평가할 preview 마지막 구간 비율
+  s_min: 0.01                  # minimum scale floor s_g=max(d̄_NN, s_min) (m)
+  eps: 1.0e-6                  # log scale 분모 안정화
+  min_buffer_size: 5           # 미만이면 cold-start; 실제 임계 max(이값, k_nn, 2)
+
+  # --- subgoal 위치 제약 (§4.2 reachable/safe) ---
+  # null 이면 해당 검사 비활성. 테이블 충돌 방지하려면 z_min 설정.
+  reachability:
+    z_min: null                # subgoal z 하한 (m)
+    z_max: null                # subgoal z 상한 (m)
+    x_bounds: null             # workspace AABB x [min, max]
+    y_bounds: null             # workspace AABB y [min, max]
+
+  # --- buffer 영속화 ---
+  # 상대경로 → 실행 세션 폴더(results/session_*) 안에 .npz 생성/로드.
+  buffer_file: subgoal_buffer.npz
+
+  # --- 디버깅 ---
+  debug_verbose: true          # [Subgoal-Phase1][debug] 로그 출력
+
+
+# ============================================================
+# Phase1 Readiness Hook — Stage 1 wire-in (final_method3_spec §15.1)
+# ============================================================
+# 종료 규칙 (§15.3):
+#   stop ⇔ (ep ≥ B₁_min ∧ R_ready > τ_ready)  ∨  (ep ≥ B₁_max)
+readiness:
+  enabled: true              # opt-in. true 로 바꿔야 hook 활성.
+  phase1_min: 20              # B₁_min — 이 미만에선 측정 skip
+  phase1_max: 50              # B₁_max — 도달 시 readiness 무관 강제 종료
+  tau_ready: 0.7              # R_ready 임계값 [0,1]. 높을수록 더 모음.
+  k_min: 3                    # covered window 최소 neighbor 수 (§9.1)
+  radius_k: 5                 # ρ_m (state-neighborhood radius) 계산용 kNN k
+  radius_quantile: 0.7        # ρ_m quantile (§16)
+  auto_stop_on_ready: true    # false → 측정·로그만, 종료는 안 함

@@ -1,0 +1,179 @@
+# Recording Configuration
+# LeRobot 데이터셋 레코딩 관련 설정
+
+# =============================================================================
+# Dataset Configuration
+# =============================================================================
+dataset_repo_id: "CoRL2026/Stack_RGBblock_on_bluedish_10fps" # Hugging Face Hub repository ID (e.g., "username/repo_name") or local path
+recording_fps: 10
+robot_type: "so101"
+vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv
+
+# Wrist-camera transit orientation bias.
+# Multi-IK keeps only solutions whose gripper pitch ≤ this value (degrees)
+# during is_transit=True moves. Negative = tilted down. With this, the
+# wrist cam consistently looks at the workspace instead of pointing up.
+# Reachability is preserved: if no solution meets the bound, falls back
+# to the unfiltered candidate set. Set to null/comment-out to disable.
+transit_pitch_max_deg: -30.0
+
+# =============================================================================
+# Camera Configuration
+# =============================================================================
+# 공식 LeRobot bi_so_follower 패턴:
+#   - shared: 특정 로봇에 귀속되지 않는 공용 카메라 (탑뷰 등)
+#             feature name: observation.images.{name}
+#   - left_arm / right_arm: 각 로봇에 물리적으로 장착된 카메라
+#             feature name: observation.images.left_{name}, observation.images.right_{name}
+
+cameras:
+  ## 공용 카메라 (워크스페이스 전체 촬영 — 물체 검출, judge 등에 사용)
+  shared:
+    - name: "top"
+      type: "realsense"
+      serial_number: "254622075836"
+      enabled: true
+      enable_depth: true
+      width: 640
+      height: 480
+      fps: 30
+
+  ## Left arm 카메라 (ROBOT_IDS[0]에 매핑)
+  left_arm:
+    - name: "wrist"
+      type: "opencv"
+      enabled: true
+      index_or_path: "/dev/video1"
+      width: 640
+      height: 480
+      fps: 30
+      fourcc: "MJPG"
+
+  ## Right arm 카메라 (ROBOT_IDS[1]에 매핑)
+  right_arm:
+    - name: "wrist"
+      type: "opencv"
+      enabled: true
+      index_or_path: "/dev/video8"
+      width: 640
+      height: 480
+      fps: 30
+      fourcc: "MJPG"
+
+# =============================================================================
+# Skill Features Configuration
+# =============================================================================
+## skill.* feature 개별 on/off 설정
+## false로 설정하면 해당 feature가 dataset에 기록되지 않음
+skill_features:
+  natural_language: true    # skill.natural_language (자연어 스킬 설명)
+  verification_question: true  # skill.verification_question (스킬 성공 확인 질문)
+  type: true               # skill.type (move_to, pick, place 등)
+  progress: true           # skill.progress (0.0~1.0 진행률)
+  goal_position:
+    joint: true            # skill.goal_position.joint (목표 joint 위치)
+    robot_xyzrpy: true     # skill.goal_position.robot_xyzrpy (robot 좌표계)
+    gripper: true          # skill.goal_position.gripper (gripper 상태)
+
+# =============================================================================
+# Sub-task Features Configuration (Reset recording용 상위 계층 라벨)
+# =============================================================================
+## subtask.* feature 개별 on/off 설정
+## 여러 skill을 묶는 상위 계층 라벨 (예: "move red block to [0.29, 0.12, 0.01]")
+subtask_features:
+  natural_language: true      # subtask.natural_language (자연어 서브태스크 설명)
+  object_name: true           # subtask.object_name (대상 객체 이름)
+  target_position: true       # subtask.target_position (목표 위치 [x, y, z])
+
+# =============================================================================
+# Observation Features Configuration
+# =============================================================================
+## observation.* 추가 feature 개별 on/off 설정
+## 활성화 시 매 프레임마다 FK(순운동학)를 계산하여 EE 자세를 기록합니다
+## FK 계산 비용은 ~0.1ms로 50Hz 제어 루프에 영향 없음
+observation_features:
+  ee_pos:
+    robot_xyzrpy: true    # observation.ee_pos.robot_xyzrpy (robot base_link 좌표계 EE 자세 [x,y,z,r,p,y])
+  gripper_binary: true    # observation.gripper_binary (그리퍼 열림=1.0 / 닫힘=0.0)
+  radian:
+    state: true            # observation.radian.state (캘리브레이션 중앙 기준 관절 위치, 라디안)
+    action: true           # observation.radian.action (캘리브레이션 중앙 기준 목표 관절 위치, 라디안)
+    state_urdf0: true      # observation.radian.state_urdf0 (URDF 0° 기준 관절 위치, 라디안)
+    action_urdf0: true     # observation.radian.action_urdf0 (URDF 0° 기준 목표 관절 위치, 라디안)
+
+# =============================================================================
+# Stochastic Perturbation Configuration
+# =============================================================================
+## (Phase 5) ws2 와 동일 schema. ws1 은 robot2 단일 arm.
+perturbation:
+  subgoal:
+    enabled_forward: true        # forward execution
+    enabled_reset: false        # forward-only by default
+    sigma: 0.05                  # candidate Gaussian std-dev (두 mode 공통)
+    clip_factor: 2.0             # truncate at clip_factor * sigma
+    # mode: gaussian      = legacy 3D blob (단일 랜덤 offset)
+    #       buffer_aware  = Phase1 buffer-aware subgoal scoring
+    #         (K candidates → canonical preview → 마지막 20% state novelty
+    #          vs per-skill buffer → argmax). 문서: phase1_subgoal_scoring_core
+    mode: gaussian
+    # --- buffer_aware mode 전용 (mode: gaussian 이면 무시됨) ---
+    n_candidates: 32             # K — subgoal 후보 수
+    k_nn: 5                      # buffer kNN novelty 의 k
+    min_buffer_size: 5           # 미만이면 cold-start; 실제 임계값 max(이값, k_nn, 2)
+    candidate_dist: uniform_ball # 후보 분포: uniform_ball(공 부피균일) | gaussian(레거시)
+    max_resample: 200            # valid 후보 rejection 재샘플 상한 (문서 §1)
+    preview_points: 20           # §5.4 InterpPlan canonical preview state 수 T
+    end_fraction: 0.2            # §5.3 T_end — 평가할 preview 마지막 구간 비율
+    s_min: 0.01                  # §5.4 minimum scale floor s_g=max(d̄_NN, s_min) (m)
+    # subgoal 위치 제약 (문서 §1 reachable/safe). null 이면 해당 검사 비활성;
+    # 로봇 reach annulus 는 move_to_position 이 항상 적용. 테이블 충돌을 막으려면
+    # z_min 을 테이블 높이(base_link z) + 여유로 설정.
+    reachability:
+      z_min: null                # subgoal z 하한 (m)
+      z_max: null                # subgoal z 상한 (m)
+      x_bounds: null             # workspace AABB x: [min, max]
+      y_bounds: null             # workspace AABB y: [min, max]
+    # buffer_file: state-buffer 를 담는 단일 .npz 파일.
+    #   상대경로 → 실행 세션 디렉터리(results/session_*) 안에 생성/로드.
+    #   절대경로 → 그 경로 그대로. null → 메모리 전용 (이 run 동안만 grow).
+    buffer_file: null
+    debug_verbose: false         # true → 버퍼 적재/판단 score/선택 디버그 로그 출력
+
+  skill:
+    enabled_forward: true        # forward execution
+    enabled_reset: false        # forward-only by default
+    n_candidates: 4
+    curobo_robot_cfg_path: robot_configs/curobo/so101_robot2.yml
+    curobo_num_trajopt_seeds: 4
+    curobo_num_ik_seeds: 16
+    curobo_use_cuda_graph: true   # 매번 다른 plan 형태라 graph re-compile 비용 큼
+    curobo_via_offset_mag: 0.10    # m — via-point 가 line 에서 떨어지는 거리
+    curobo_junction_smooth_k: 5     # cubic spline blend at via junction
+    # K_max — candidate 당 최대 via 개수.
+    #   1 (default): 모든 via candidate 가 K=1 (단일 via). VRAM 최소.
+    #   2          : random K ∈ {1, 2} mix → path topology 다양성 ↑.
+    #                cspace_batch 1.5× (N·(K_max+1)) → wall ~25% 증가.
+    curobo_max_vias_per_candidate: 2
+    # SO-101: wrist_roll (joint index 4) 는 cartesian IK 가 이미 maintain_wrist_roll
+    # 로 start 값에 고정. curobo plan 도 동일하게 빼서 transit 중 gripper roll wiggle 제거.
+    # 빈 리스트 [] 로 두면 5D 전체 plan.
+    fixed_joint_indices: [4]
+    arm_joint_count: 5      # SO-101 = 5-DoF arm
+
+# =============================================================================
+# Method 3 — Pre-selective Acquisition (preselective_filter via vla_adaptor)
+# =============================================================================
+# Retrieval-augmented IG·AC selector (FAISS vector DB + frozen VLA encoder
+# key). See recording_config_ws3.yaml for the full description.
+preselective_filter:
+  enabled_forward: false        # forward-only (no reset phase)
+  debug_verbose: false                                # P1 logging (per-cand scores, latency, buffer counts)
+  policy:
+    checkpoint: "lerobot/pi05_base"     # frozen PI0.5 — HF hub id or local path
+    device: "cuda"
+    state_weight: 1.0                   # continuous-state block weight in the FAISS key
+  # buffer: created automatically under the run's session folder
+  #         (<session_dir>/preselective_buffer) — not configurable here.
+  selector:
+    context_k: 8           # k — context-kNN size for AC (similar-state neighbours)
+    chunk_size: 50         # action-chunk resampling horizon (buffer comparison shape)

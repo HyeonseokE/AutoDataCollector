@@ -1,0 +1,176 @@
+# ============================================================
+# Phase2 Config — Method3 MI-based Acquisition (final_method3_spec §6-§16)
+# ============================================================
+
+# =============================================================================
+# Skill planner transport — Phase2 candidate-batch 어디서 생성·선택할지
+# =============================================================================
+# mode:
+#   disabled : skill planner 미설치. robot 은 cartesian-line trajectory 만 사용
+#              → method3 phase2 useful-OOD selection 비활성. (default)
+#   grpc     : H100 server (grpc_server.server) 가 모든 무거운 작업 담당.
+#              client 는 server 가 고른 *단 1개의 trajectory* 만 받아 실행.
+#              세부 server 설정 (endpoint / policy / buffer 등) 은
+#              ``pipeline_config/phase2_server_infer_settings.yaml`` 에서 읽음.
+#   local    : 같은 프로세스의 CuroboBackend + method3 phase2 selector.
+#              (로컬 GPU 부족 시 비권장)
+skill_planner_transport:
+  mode: grpc                     # disabled | grpc | local
+
+# --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
+phase1_trained_vla_path: "CoRL2026-CSI/smol_phase1_pnp_30" # local path | hf repo
+
+# phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
+# 2026-05-20: ws3 의 100 episode 확장에 맞춰 100용 dataset 으로 통일.
+# (30/50/100 dataset 모두 동일 30 episode base 에서 출발하므로 P_phase1 빌드
+# 시점에 어떤 dataset 이든 같은 결과지만, recording 과 동일 repo 를 가리키도록 일치시킴.)
+phase1_dataset_path: "CoRL2026-CSI/pnp_ours_100_table2"
+
+# --- 전체 budget & phase 전환 (§15.3) ---
+budget: 100                    # B — 전체 acquisition episode 수
+phase1_min: 20                 # B_{1,min} — Phase1 최소 guard
+phase1_max: 50                 # B_{1,max} — Phase1 최대 guard
+tau_ready: 0.7                 # §15.1 — Phase2-readiness 전환 임계값
+saturation_window: 10          # §15.2 — W (최근 accepted score 평균 window)
+enable_phase2_early_stop: true # false → 공정비교용 (t=B 까지 강제 진행)
+
+# --- DCT action descriptor (§4.2) — re-embedding·Phase2 공통 K ---
+dct_coeffs: 3                  # K — z^a ∈ R^{K·action_dim}
+
+# --- run 로그 ---
+verbose: false                 # true → [method3:acq] run narration 로그
+
+# --- Phase2-readiness (§15.1) ---
+readiness:
+  k_min: 3                     # covered window 최소 neighbor 수
+  radius_k: 5                  # ρ_m 계산용 kNN k
+  radius_quantile: 0.7         # ρ_m quantile (§16)
+
+# --- MI-side usefulness + Useful-OOD selection (§8-13, useful_ood_updated) ---
+mi_selection:
+  k_nn_a: 5                    # §8 action-space kNN 의 k
+  q_quantile: 0.5              # §8 ΔH_A top-quantile 비율
+  k_min: 3                     # §9.1 covered window 최소 neighbor 수
+  radius_k: 5                  # §16 ρ_m 계산용 kNN k
+  radius_quantile: 0.7         # §16 ρ_m quantile
+  s_min_a: 0.001               # §9.3 local support scale floor
+  eps: 1.0e-6                  # log/정규화 분모 안정화
+  beta: 1.0                    # §11 ΔH_A 가중
+  lambda: 1.0                  # §11 ΔH_A|S 가중
+  tau_MI: 0.0                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI (기본 0 = batch 평균 이상)
+  # accept_threshold 는 tau_MI 의 deprecated alias (구 yaml 호환). tau_MI 가 우선이지만
+  # accept_threshold 만 지정해도 자동 매핑된다.
+  amb_agg: mean                # §9.4 covered aggregation: mean | max
+  min_covered_windows: 1       # §9.1 T_min — 미만이면 under-covered
+  debug_verbose: false         # true → [Phase2-MI][debug] per-candidate 로그
+
+# --- VLA-side informativeness U_VLA (§12, useful_ood_updated) ---
+# Phase1-trained VLA 의 R-stochastic denoising loss 로 model-side novelty 점수.
+# Useful-OOD rule (§13.2) 의 argmax 분기에서 우선순위를 결정한다.
+vla_informativeness:
+  enabled: false               # true 시 mi_selector.select() 에 LeRobotVLAInformativenessScorer 주입
+  R: 8                         # §12.1 stochastic denoise eval 횟수
+  agg: mean                    # trajectory-level aggregator: mean | max
+  # 정책 체크포인트는 preselective_filter / re-embedding 의 phase1_trained_vla_path 와 공유.
+
+# =============================================================================
+# Skill-level perturbation — Phase2 candidate generator 의 dependency
+# =============================================================================
+# 옛 yaml 명: ``recording_config_ws*.yaml.perturbation.skill``
+# 의미: curobo plan_batch 가 K transit candidate 를 1회 GPU 호출로 생성.
+# Phase2 의 _skill_candidate_selector hook 이 이 K candidate 를 받아 §13.2
+# Useful-OOD rule 로 ξ* 를 고른다.
+#
+# 활성화 조건: enabled_forward=true 여야 plan_batch 가 호출됨 → Phase2 의 hook 도
+# trigger. false 면 hook 등록은 돼도 *trigger 되는 자리가 없어* useful-OOD
+# selection 이 실제로 안 굴러간다. Phase2 acquisition 의 정상 동작에 필수.
+skill_perturbation:
+  enabled_forward: true
+  enabled_reset: false
+  # GPU-accelerated curobo motion planner with via-point diversity.
+  n_candidates: 128
+  curobo_robot_cfg_path: robot_configs/curobo/so101_robot4.yml
+  curobo_num_trajopt_seeds: 4
+  curobo_num_ik_seeds: 16
+  curobo_use_cuda_graph: true     # graph capture 1회 → plan latency 50ms→5ms
+  curobo_via_offset_mag: 0.10     # m — via-point 가 직선에서 떨어지는 거리
+  curobo_junction_smooth_k: 5     # cubic spline blend at via junction
+  # K_max — candidate 당 최대 via 개수. 0=direct-only / 1=default / 2+ 더 다양
+  curobo_max_vias_per_candidate: 1
+  # SO-101: wrist_roll (joint index 4) 는 cartesian IK 가 start 값에 고정.
+  fixed_joint_indices: [4]
+  arm_joint_count: 5
+
+# --- re-embedding (§6) ---
+reembedding:
+  skip_invalid: false          # true → validity_flag=False entry 건너뜀
+  show_progress: true          # tqdm progress bar (false → 무음)
+  frame_stride: 1              # 매 N번째 entry 만 re-embed (1 = spec 정석/전체, 기본).
+                               # 5~10 → dense temporal sampling 의 redundancy 활용
+                               # wall-clock 가속이 필요할 때만.
+  batch_size: 32               # GPU batched VLA forward 의 배치 크기.
+                               # encoder 가 encode_batch 지원 시 N개 한 forward 로
+                               # 처리해 GPU 활용도 N배. 1 = single-loop legacy.
+
+# =============================================================================
+# Phase2 Server (H100 gRPC) — 옛 phase2_server_infer_settings.yaml 통합 (2026-05-21)
+# =============================================================================
+# skill_planner_transport.mode=grpc 일 때 server-side 운영을 결정. policy.checkpoint
+# 는 *제거* — 위의 phase1_trained_vla_path 가 *유일한 SoT*. mismatch race 가
+# 사라진다 (옛 두 yaml 별개 관리로 인한 buggy state).
+
+# --- gRPC transport endpoint (client ↔ server 통신) ---
+transport:
+  address: "127.0.0.1:50061"
+  timeout_s: 60.0
+  debug_verbose: true                  # true → [skill_planner_transport] 로그 출력
+
+# --- server-side frozen VLA encoder runtime config ---
+# checkpoint 는 위의 ``phase1_trained_vla_path`` 가 SoT — 여기 다시 적지 않음.
+policy:
+  family: smolvla                       # null → checkpoint 이름에서 자동 추론 (pi0/pi05/smolvla/groot)
+  device: "cuda"
+  autocast_dtype: bfloat16              # bfloat16 | float16 | float32
+  state_weight: 1.0                     # state concat 의 weight
+
+# --- action chunk re-sampling horizon ---
+# server 가 TrajectoryCandidate.waypoints 를 Phase2Candidate.action_chunks
+# 로 변환할 때의 chunk_size (DCT descriptor 입력 길이와 동기화).
+selector:
+  chunk_size: 50
+
+# --- server-local SkillVectorDB 영속화 ---
+# server 가 boot/restart 사이에도 buffer 를 유지하기 위한 sidecar npz.
+# save_dir 이 relative path 면 server.py 실행 위치 기준.
+buffer:
+  save_dir: "grpc_server/buffer"
+  filename: "server_skill_wise_vector_db.npz"
+
+# =============================================================================
+# 원격 H100 SSH 연결 — grpc_server/launch_remote_server.sh 가 이 섹션을 읽어
+# ssh 옵션을 자동 구성한다. ``~/.ssh/config`` 를 따로 건드릴 필요 없이 여기에
+# 채우면 됨.
+# 우선순위:
+#   1) shell env var (REMOTE_HOST, SERVER_GPU_ID 등) — 임시 override
+#   2) 아래 yaml 값                                  — 기본 source-of-truth
+# alias 와 user/hostname 둘 다 채우면 alias 가 ~/.ssh/config 에 등록된 경우만 우선.
+# =============================================================================
+remote:
+  # [선택] ~/.ssh/config 의 Host alias 를 미리 등록해뒀다면 여기에 그대로.
+  ssh_alias: "h100"
+
+  # [alias 가 없을 때 필수] 직접 연결 정보. ssh 명령에 -o 와 -i 로 전달.
+  user: "csiwoo"
+  hostname: "61.107.202.230"
+  port: 22
+  identity_file: ""                      # 예: "~/.ssh/id_ed25519"  (~ 자동 expand)
+
+  # [필수] 원격 서버 운영
+  project_path: "/home/csiwoo/CORL2026/AutoDataCollector"
+  conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
+  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES
+  tmux_session: "phase2_server"          # 재시작 시 reuse
+
+  # [선택] 동작 옵션
+  git_pull_before_start: false
+  ready_timeout_s: 360                   # smolvla 부팅 1~2분, pi05_base 2~5분 → 여유 360s

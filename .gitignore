@@ -49,7 +49,13 @@ openai_api_key.json
 google_aistudio_key.json
 
 # Workspace-specific configs & calibrations (machine/robot별 관리)
-pipeline_config/
+# pipeline_config — 공개 yaml 은 tracked. secret/이미지 류만 ignore.
+# (옛날엔 디렉토리 통째 무시 → phase2_config.yaml 등 원격 sync 안 되어 server
+#  boot fail. 2026-05-21 회복.)
+pipeline_config/paid_api_config.yaml
+pipeline_config/free_api_config.yaml
+pipeline_config/cad_images/
+pipeline_config/side_view_images/
 robot_configs/
 
 # Legacy folders (DO NOT MODIFY)

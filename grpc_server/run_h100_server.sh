@@ -47,7 +47,7 @@ bold "step 2/4  activate conda env: $ENV_NAME"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 
-# ── 3. preflight: config + urdf must exist, preselective must be enabled ──
+# ── 3. preflight: config + urdf must exist, phase2 grpc 활성화 확인 ──
 bold "step 3/4  preflight"
 if [[ ! -f "$RECORDING_CONFIG" ]]; then
   err "recording config not found: $RECORDING_CONFIG"
@@ -58,13 +58,38 @@ if [[ ! -f "$URDF" ]]; then
   err "URDF not found: $URDF   (set URDF=... to override)"
   exit 1
 fi
-python - "$RECORDING_CONFIG" <<'PYEOF'
-import sys, yaml
-psf = (yaml.safe_load(open(sys.argv[1])) or {}).get("preselective_filter") or {}
-if not bool(psf.get("enabled_forward", psf.get("enabled", False))):
-    sys.exit("XX preselective_filter.enabled_forward must be true — "
-             "the server has nothing to do otherwise.")
-print("  config OK — preselective_filter.enabled_forward is true")
+# 옛 preflight 는 recording_config 의 ``preselective_filter.enabled_forward`` 를
+# 검사. 그러나 phase2_server_infer_settings.yaml → phase2_config.yaml 통합 +
+# recording_config_ws3.yaml 의 preselective_filter 섹션 제거 이후에는 그 키가
+# 없음. 새 source-of-truth 는 ``phase2_config.yaml.skill_planner_transport.mode``
+# (= "grpc" 일 때 server 가 동작해야 함).
+PROJ_ROOT_PYEOF="$PROJ_ROOT" python - "$RECORDING_CONFIG" <<'PYEOF'
+import os, sys, yaml
+from pathlib import Path
+proj_root = Path(os.environ.get("PROJ_ROOT_PYEOF", "."))
+rec_cfg = yaml.safe_load(open(sys.argv[1])) or {}
+ph2_path = proj_root / "pipeline_config" / "phase2_config.yaml"
+ph2_cfg = {}
+if ph2_path.exists():
+    try:
+        ph2_cfg = yaml.safe_load(open(ph2_path)) or {}
+    except Exception as e:
+        sys.exit(f"XX phase2_config.yaml parse error: {e}")
+# 1) skill_planner_transport.mode == 'grpc' 우선
+mode = ((ph2_cfg.get("skill_planner_transport") or {}).get("mode") or "").strip().lower()
+if mode == "grpc":
+    print("  config OK — phase2_config.yaml: skill_planner_transport.mode=grpc")
+    sys.exit(0)
+# 2) legacy fallback — recording_config 의 preselective_filter.enabled_forward
+psf = rec_cfg.get("preselective_filter") or {}
+if bool(psf.get("enabled_forward", psf.get("enabled", False))):
+    print("  config OK — recording_config.preselective_filter.enabled_forward=true (legacy)")
+    sys.exit(0)
+sys.exit(
+    "XX phase2 server 가 동작할 trigger 없음. 다음 중 하나가 필요:\n"
+    "    (A) pipeline_config/phase2_config.yaml.skill_planner_transport.mode: grpc   ← 권장\n"
+    "    (B) recording_config_*.yaml.preselective_filter.enabled_forward: true       ← legacy"
+)
 PYEOF
 
 # ── 4. start the server (foreground; Ctrl+C to stop) ─────────────────────

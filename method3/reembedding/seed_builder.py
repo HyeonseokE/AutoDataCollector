@@ -35,6 +35,34 @@ class ReembeddingConfig:
     dct_coeffs: int = 3          # §4.2 K — DCT action descriptor 저주파 성분 수
     skip_invalid: bool = False   # True → validity_flag=False entry 를 건너뜀
                                  # (기본 False — §6 은 dataset 전체 re-embed)
+    show_progress: bool = True   # tqdm progress bar (False → 무음)
+    frame_stride: int = 1        # 매 frame_stride 번째 entry 만 re-embed.
+                                 # 1 = spec 정석 (전체). 5~10 = dense temporal
+                                 # sampling 의 redundancy 를 활용한 wall-clock
+                                 # speedup. retrieval-key 정확도는 거의 동일.
+
+
+def _fallback_progress(iterable, total: int, label: str):
+    """tqdm 미설치 시 ~5% 단위로 줄바꿈 없이 캐리지리턴 카운터만 찍는다."""
+    import sys
+    import time
+    step = max(1, total // 20)
+    start = time.monotonic()
+    for i, x in enumerate(iterable):
+        yield x
+        done = i + 1
+        if done == total or done % step == 0:
+            pct = 100.0 * done / max(1, total)
+            elapsed = time.monotonic() - start
+            rate = done / max(1e-6, elapsed)
+            eta = (total - done) / max(1e-6, rate)
+            sys.stdout.write(
+                f"\r[reembed][{label}] {done}/{total} ({pct:5.1f}%) "
+                f"{rate:.1f} frame/s  ETA {eta:5.1f}s"
+            )
+            sys.stdout.flush()
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
 
 def state_retrieval_key(
@@ -72,7 +100,25 @@ def build_phase1_vector_db(
     """
     cfg = config or ReembeddingConfig()
     db = SkillVectorDB()
-    for idx in range(len(raw_dataset)):
+    stride = max(1, int(cfg.frame_stride))
+    N_full = len(raw_dataset)
+    indices = range(0, N_full, stride)
+    N = len(indices)
+    if stride > 1:
+        print(f"[reembed] frame_stride={stride} → 처리할 entry {N_full} → {N} "
+              f"({100.0 * N / max(1, N_full):.1f}%)")
+    # progress bar — 9k+ frames × VLA forward 의 진행 가시화. tqdm 미설치 시
+    # silent fallback (간단 % 로그). show_progress=False 면 무음.
+    if cfg.show_progress:
+        try:
+            from tqdm.auto import tqdm
+            iterator = tqdm(indices, desc="[reembed] skill-wise DB build",
+                            unit="frame", dynamic_ncols=True, total=N)
+        except ImportError:
+            iterator = _fallback_progress(indices, N, "skill-wise DB")
+    else:
+        iterator = indices
+    for idx in iterator:
         entry = raw_dataset.get(idx)
         if cfg.skip_invalid and not entry.validity_flag:
             continue

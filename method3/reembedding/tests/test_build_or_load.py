@@ -61,8 +61,8 @@ class TestBuildOrLoad:
         )
         assert isinstance(db, SkillVectorDB)
         assert db.total_size() == 6
-        # 캐시 파일 생성됨
-        assert (tmp_path / "phase1_vector_db.npz").exists()
+        # 캐시 파일 생성됨 (이름은 skill_wise_vector_db.npz — spec §14 누적 의미)
+        assert (tmp_path / "skill_wise_vector_db.npz").exists()
 
     def test_returns_cached_when_present(self, tmp_path):
         ds = _SyntheticRawDataset(n_entries=6)

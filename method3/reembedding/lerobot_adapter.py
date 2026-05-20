@@ -77,6 +77,7 @@ class LeRobotPhase1RawAdapter:
         proprio_key: str | None = None,
         observation_key: str | None = None,
         skill_id_default: str = "move",
+        video_backend: str = "pyav",
     ) -> None:
         """
         Args:
@@ -85,6 +86,9 @@ class LeRobotPhase1RawAdapter:
             proprio_key: proprioception 컬럼 override. None 이면 _PROPRIO_KEYS 순회.
             observation_key: VLA 입력 이미지 컬럼 override. None 이면 _OBSERVATION_KEYS 순회.
             skill_id_default: skill.type 컬럼 부재 시 사용할 기본 skill_id.
+            video_backend: video decoder. 기본 ``"pyav"`` — 시스템 libavutil 부재로
+                ``torchcodec`` 가 로드 실패하는 환경에서도 동작. ``"torchcodec"`` 가
+                필요하면 명시. LeRobotDataset 의 그것과 같은 의미.
         """
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
         from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -92,9 +96,14 @@ class LeRobotPhase1RawAdapter:
         # repo_id 로 받으면 HF_LEROBOT_HOME 아래에서 찾고, 절대경로면 그대로.
         repo_path = Path(repo_id_or_path)
         if repo_path.is_absolute() and repo_path.exists():
-            self._dataset = LeRobotDataset(repo_id=str(repo_path), root=str(repo_path))
+            self._dataset = LeRobotDataset(
+                repo_id=str(repo_path), root=str(repo_path),
+                video_backend=video_backend,
+            )
         else:
-            self._dataset = LeRobotDataset(repo_id=str(repo_id_or_path))
+            self._dataset = LeRobotDataset(
+                repo_id=str(repo_id_or_path), video_backend=video_backend,
+            )
         self._H = int(action_horizon)
         self._proprio_key = proprio_key or self._pick_first_present(_PROPRIO_KEYS)
         self._observation_key = observation_key or self._pick_first_present(_OBSERVATION_KEYS)
@@ -119,12 +128,23 @@ class LeRobotPhase1RawAdapter:
         Returns: [(global_idx, episode_index, frame_in_episode), ...]
         """
         ep_meta = self._dataset.meta.episodes
+        # LeRobot v3.0 에서 meta.episodes 가 pandas DataFrame → datasets.Dataset
+        # 로 바뀐 영향: pandas 의 ``iterrows()`` 는 datasets.Dataset 에 없다.
+        # 두 가지 다 지원하도록 row iterator 를 통일한다.
+        if hasattr(ep_meta, "iterrows"):
+            rows = (row for _, row in ep_meta.iterrows())
+        elif hasattr(ep_meta, "to_pandas"):
+            rows = (row for _, row in ep_meta.to_pandas().iterrows())
+        else:
+            # datasets.Dataset 또는 list[dict] — row 가 dict-like.
+            rows = iter(ep_meta)
+
         # episodes parquet — column 명이 LeRobot 버전마다 다를 수 있어 안전 접근.
         from_col = "dataset_from_index"
         to_col = "dataset_to_index"
         idx_col = "episode_index"
         out: list[tuple[int, int, int]] = []
-        for _, row in ep_meta.iterrows():
+        for row in rows:
             ei = int(row[idx_col])
             f0 = int(row[from_col])
             f1 = int(row[to_col])

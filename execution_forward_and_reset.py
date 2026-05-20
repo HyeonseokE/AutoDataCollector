@@ -683,7 +683,7 @@ class ForwardAndResetPipeline(BasePipeline):
         session_dir 가 확정된 시점에 호출된다 (run_multiple_episodes / resume).
         ``method3_phase != "phase2"`` 면 silent no-op.
 
-        1. ``<session_dir>/phase1_vector_db.npz`` 캐시 hit → 그대로 로드.
+        1. ``<session_dir>/skill_wise_vector_db.npz`` 캐시 hit → 그대로 로드.
         2. miss → ``phase1_trained_vla_path`` 로 frozen encoder 로드 +
            ``phase1_dataset_path`` LeRobot dataset 으로 §6 Step 3-4 (re-embedding)
            수행 → SkillVectorDB 생성·저장.
@@ -5083,7 +5083,7 @@ def main():
         default="phase1",
         help="Method3 phase. phase1 = subgoal seeding (buffer-aware, default). "
              "phase2 = MI-based selection (Q2). phase2 requires --phase1-trained-vla-path "
-             "and either --phase1-dataset-path or a cached phase1_vector_db.npz in session_dir."
+             "and either --phase1-dataset-path or a cached skill_wise_vector_db.npz in session_dir."
     )
     parser.add_argument(
         "--phase1-trained-vla-path",
@@ -5097,7 +5097,7 @@ def main():
         type=str,
         default=None,
         help="(--phase phase2) §6 re-embedding 의 Phase1 raw dataset (LeRobot repo_id "
-             "또는 local path). 캐시된 phase1_vector_db.npz 가 있으면 무시."
+             "또는 local path). 캐시된 skill_wise_vector_db.npz 가 있으면 무시."
     )
 
     args = parser.parse_args()

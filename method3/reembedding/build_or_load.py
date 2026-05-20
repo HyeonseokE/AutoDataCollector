@@ -1,11 +1,15 @@
 """§6 entry — Phase2 시작 시 호출하는 build-or-load 진입점.
 
-Phase1 vector DB (``P_phase1``) 의 lifecycle:
+Skill-wise vector DB ``B_t^{(m)}`` 의 lifecycle (spec §14):
 
-  1. session_dir 에 캐시 파일(``phase1_vector_db.npz``) 이 있으면 그대로 로드.
+  1. session_dir 에 캐시 파일(``skill_wise_vector_db.npz``) 이 있으면 그대로 로드.
   2. 없으면 ``phase1_trained_vla_path`` 로 encoder + ``phase1_dataset_path``
      LeRobot dataset 으로 §6 Step 3-4 (re-embedding) 수행 → SkillVectorDB 생성·
      저장 → 반환.
+
+이름은 ``skill_wise`` — spec §14 의 ``B_t^{(m)} = P_phase1 ∪ D_phase2,t`` 에 따라
+같은 DB 가 phase2 진행 중 누적된다. 처음 build 시점엔 P_phase1 만 들어있지만 그
+파일 자체가 phase1 전용은 아니다.
 
 ``phase1_trained_vla_path`` 는 원래 §6 Step 1-2 로 Phase1 raw 에서 학습·freeze
 된 encoder 경로지만, 아직 학습 안 된 동안엔 임시로 pretrained VLA 체크포인트
@@ -28,7 +32,9 @@ from method3.reembedding.seed_builder import (
 from method3.reembedding.vla_encoder import VLAStateEncoder
 
 
-_DEFAULT_VECTOR_DB_FILENAME = "phase1_vector_db.npz"
+# skill-wise vector DB 캐시 파일명. spec §14 의 ``B_t^{(m)} = P_phase1 ∪ D_phase2,t``
+# 가 같은 DB 에 누적되므로 "phase1" 한정으로 오해되지 않도록 skill-wise 로 명명.
+_DEFAULT_VECTOR_DB_FILENAME = "skill_wise_vector_db.npz"
 
 
 def build_or_load_phase1_vector_db(
@@ -104,7 +110,7 @@ def build_or_load_phase1_vector_db(
                     "observation_loader is required (raw_dataset has no "
                     "`load_observation` method to fall back on)")
 
-        print(f"[reembed] building P_phase1 vector DB ... "
+        print(f"[reembed] building skill-wise vector DB (initial = P_phase1) ... "
               f"(raw_dataset={len(raw_dataset)} entries → {vdb_path})")
         db = build_phase1_vector_db(
             raw_dataset, encoder, observation_loader,

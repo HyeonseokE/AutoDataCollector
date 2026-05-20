@@ -338,7 +338,16 @@ class ForwardAndResetPipeline(BasePipeline):
         # as subgoal — created only when perturbation.skill.enabled_* is true.
         # Skipped entirely when preselective_filter.transport=grpc (server side
         # owns the planner in that case).
-        self._setup_skill_perturbation_on_skills()
+        #
+        # 2026-05-21: method3_phase='phase1' 이면 skill perturbation 비활성.
+        # Phase1 은 *spec 상 cartesian baseline* — curobo plan_batch 호출은 의도가
+        # 아니고, client GPU 부담만 가중 (RTX 3050 OOM → 어차피 cartesian fallback).
+        # Phase2 에서만 perturbation 활성 (= acquisition 의 candidate generator).
+        if getattr(self, "method3_phase", "phase1") == "phase1":
+            print("[skill_perturbation] method3_phase=phase1 → skill perturbation SKIPPED "
+                  "(Phase1 은 cartesian baseline; Phase2 에서만 활성)")
+        else:
+            self._setup_skill_perturbation_on_skills()
         # Method 3 (pre-selective acquisition) is wired later, at run time —
         # see _setup_skill_planner_transport(session_dir). It is deferred
         # so the FAISS buffer can live inside the run's session folder.
@@ -4536,8 +4545,8 @@ class ForwardAndResetPipeline(BasePipeline):
         if not config_path.exists():
             # schedule_mode 도 함께 기록 — cleanup_dataset_for_resume 가 round_robin
             # 의 dataset save 순서를 복원하는 데 필요 (sorted-name ≠ save-order).
-            # hook setup 보다 _init_session 이 먼저 호출되므로 yaml 을 직접 읽음.
-            _sched_mode = "seed_major"
+            # 기본 round_robin; yaml 에 schedule_mode: seed_major 명시 시만 legacy.
+            _sched_mode = "round_robin"
             _ph1_path = Path(__file__).resolve().parent / "pipeline_config" / "phase1_config.yaml"
             if _ph1_path.exists():
                 try:
@@ -4545,7 +4554,7 @@ class ForwardAndResetPipeline(BasePipeline):
                     with open(_ph1_path, "r") as _f:
                         _ph1 = _yaml.safe_load(_f) or {}
                     _sched_mode = str((_ph1.get("readiness") or {}).get(
-                        "schedule_mode", "seed_major"))
+                        "schedule_mode", "round_robin"))
                 except Exception:
                     pass
             session_config = {
@@ -4730,7 +4739,6 @@ class ForwardAndResetPipeline(BasePipeline):
                             "cfg", None)
         schedule_mode = getattr(_hook_cfg, "schedule_mode", "seed_major")
         is_round_robin = (schedule_mode == "round_robin")
-        seed_episode_counts = [0] * self.num_random_seeds
         print(f"  Schedule: {schedule_mode}")
 
         # 에피소드 루프 — schedule_iter 가 (exec_idx, batch, slot, ep_num, round_last) 산출.
@@ -4802,7 +4810,6 @@ class ForwardAndResetPipeline(BasePipeline):
                     self._all_previous_seed_positions.append(seed_positions[0])
 
                 self._update_results(all_results, result, episode_num, skip_reset)
-                seed_episode_counts[batch_index] += 1
 
             except Exception as e:
                 print(f"\n{RED}[{episode_num:02d}/{num_episodes:02d}] Error: {e}{RESET}")
@@ -4816,10 +4823,12 @@ class ForwardAndResetPipeline(BasePipeline):
                 if _do_check:
                     _sel = getattr(self, "_subgoal_selector", None)
                     _buf = getattr(_sel, "buffer", None) if _sel is not None else None
-                    if _hook.should_stop(episode_num, _buf,
-                                         seed_episode_counts=seed_episode_counts):
+                    _episodes_done = execution_idx + 1
+                    if _hook.should_stop(_episodes_done, _buf,
+                                         episode_label=episode_num):
                         print(MAGENTA + BOLD +
-                              f"  [method3:phase1] loop terminated early at ep={episode_num} "
+                              f"  [method3:phase1] loop terminated early — "
+                              f"done={_episodes_done} folder=ep{episode_num} "
                               f"(reason={_hook.stop_reason})  ".center(70) + RESET)
                         break
 
@@ -4995,11 +5004,7 @@ class ForwardAndResetPipeline(BasePipeline):
                                 "cfg", None)
             schedule_mode = getattr(_hook_cfg, "schedule_mode", "seed_major")
             is_round_robin = (schedule_mode == "round_robin")
-            seed_episode_counts = [
-                sum(1 for s in batch_slots[b] if s)
-                for b in range(self.num_random_seeds)
-            ]
-            print(f"  Schedule: {schedule_mode}  pre-resume seed_counts={seed_episode_counts}")
+            print(f"  Schedule: {schedule_mode}")
 
             # 에피소드 루프 — schedule_iter 가 (exec, batch, slot, ep_num, round_last) 산출.
             for execution_idx, batch_index, slot, episode_num, is_round_last in schedule_iter(
@@ -5060,7 +5065,6 @@ class ForwardAndResetPipeline(BasePipeline):
                     if judge_pred == 'TRUE':
                         batch_slots[batch_index][slot] = True
                     self._update_results(all_results, result, episode_num, skip_reset)
-                    seed_episode_counts[batch_index] += 1
 
                 except Exception as e:
                     print(f"\n{RED}[{episode_num:02d}/{num_episodes:02d}] Error: {e}{RESET}")
@@ -5074,10 +5078,15 @@ class ForwardAndResetPipeline(BasePipeline):
                     if _do_check:
                         _sel = getattr(self, "_subgoal_selector", None)
                         _buf = getattr(_sel, "buffer", None) if _sel is not None else None
-                        if _hook.should_stop(episode_num, _buf,
-                                             seed_episode_counts=seed_episode_counts):
+                        # 누적 episodes_done = batch_slots 의 True 개수.
+                        # 이전 run + 이번 run 의 success 합. round_robin 에서
+                        # phase1_min/max 가 *누적* 카운트와 비교돼야 정합.
+                        _episodes_done = sum(int(s) for row in batch_slots for s in row)
+                        if _hook.should_stop(_episodes_done, _buf,
+                                             episode_label=episode_num):
                             print(MAGENTA + BOLD +
-                                  f"  [method3:phase1] resume loop terminated early at ep={episode_num} "
+                                  f"  [method3:phase1] resume loop terminated early — "
+                                  f"done={_episodes_done} folder=ep{episode_num} "
                                   f"(reason={_hook.stop_reason})  ".center(70) + RESET)
                             break
                 time.sleep(2)

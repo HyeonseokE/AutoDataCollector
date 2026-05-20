@@ -767,17 +767,11 @@ class ForwardAndResetPipeline(BasePipeline):
         if not session_dir:
             print("[Method3 phase2] session_dir is None — vector DB load skipped")
             return
-        # 2026-05-21: grpc mode 에서는 *server 가 P_phase1 build/own*. client 측
-        # build 는 redundant + npz 가 사용 안 됨 (server 의 SkillVectorDB 가
-        # useful-OOD selection 의 reference). client 는 ingest_episode 만 책임.
-        if getattr(self, "_skill_planner_grpc_client", None) is not None:
-            print("[Method3 phase2] grpc mode — server-owned P_phase1, "
-                  "skip client-side build (server 가 자체 build/load)")
-            self._phase2_vector_db = None
-            self._phase2_selector = None
-            self._phase2_vla_scorer = None
-            self._phase2_g_seed_buffer = self._load_phase2_g_seed_buffer(session_dir)
-            return
+        # 2026-05-21 architecture (옵션 C):
+        #   client 가 *local* (RTX 3050) 에서 build → 결과 npz 를 server cache
+        #   path 로 *scp 자동 업로드* → server 가 다음 부팅 시 그 cache load.
+        # server-side 는 yaml.server_build_phase1: false 로 비활성 (= load only).
+        # client 가 P_phase1 ownership 보유, server 는 *kNN reference + accumulate*.
         try:
             from method3.reembedding.build_or_load import (
                 build_or_load_phase1_vector_db,
@@ -801,6 +795,10 @@ class ForwardAndResetPipeline(BasePipeline):
                 f"{len(self._phase2_vector_db.skill_ids())} skills "
                 f"(skills={self._phase2_vector_db.skill_ids()})"
             )
+            # grpc mode + build 성공 시 → 결과 npz 를 *server cache path 로 자동 scp*.
+            # server 가 다음 부팅 시 그 cache load. yaml.remote 의 ssh 정보 사용.
+            if getattr(self, "_skill_planner_grpc_client", None) is not None:
+                self._upload_p_phase1_to_server(session_dir)
         except Exception as e:
             print(f"[Method3 phase2] P_phase1 load/build FAILED: {e}")
             import traceback; traceback.print_exc()
@@ -930,6 +928,54 @@ class ForwardAndResetPipeline(BasePipeline):
         return self._phase2_selector.select(
             candidates, vla_scorer=self._phase2_vla_scorer,
         )
+
+    def _upload_p_phase1_to_server(self, session_dir: str) -> None:
+        """client 가 build 한 P_phase1 npz 를 server 의 cache path 로 scp.
+
+        yaml.remote 의 user/hostname/identity_file 정보로 ssh tunnel 없이 직접
+        scp. server 가 다음 부팅 시 그 cache load (= 자동 ready). 실패는 warn
+        만 — acquisition 자체는 client 측 _phase2_vector_db 가 있어 진행 가능.
+        """
+        import subprocess, yaml
+        from pathlib import Path
+        local_npz = Path(session_dir) / "skill_wise_vector_db.npz"
+        if not local_npz.exists():
+            print(f"[upload] local npz not found: {local_npz} — skip scp")
+            return
+        # yaml.remote 정보 — phase2_config.yaml 의 remote 섹션
+        try:
+            with open(Path(__file__).resolve().parent / "pipeline_config" / "phase2_config.yaml") as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[upload] yaml read failed ({e}) — skip scp")
+            return
+        r = cfg.get("remote") or {}
+        user = (r.get("user") or "").strip()
+        host = (r.get("hostname") or "").strip()
+        proj = r.get("project_path") or "~/AutoDataCollector"
+        identity = (r.get("identity_file") or "").strip()
+        if not (user and host):
+            print("[upload] yaml.remote.user/hostname 미설정 — skip scp")
+            return
+        remote_path = f"{user}@{host}:{proj}/grpc_server/buffer/server_skill_wise_vector_db.npz"
+        scp_cmd = ["scp", "-o", "StrictHostKeyChecking=accept-new"]
+        if identity:
+            scp_cmd += ["-i", str(Path(identity).expanduser())]
+        scp_cmd += [str(local_npz), remote_path]
+        # OpenSSL ABI 우회 (conda env)
+        env = {k: v for k, v in __import__("os").environ.items()
+               if k not in ("LD_LIBRARY_PATH", "LD_PRELOAD")}
+        try:
+            print(f"[upload] scp → {remote_path}")
+            res = subprocess.run(scp_cmd, env=env, capture_output=True, text=True, timeout=120)
+            if res.returncode == 0:
+                print(f"[upload] ✓ uploaded {local_npz.stat().st_size // 1024} KB → "
+                      f"server cache. *server restart 권장*: "
+                      f"bash grpc_server/launch_remote_server.sh stop && bash grpc_server/launch_remote_server.sh")
+            else:
+                print(f"[upload] scp failed (exit {res.returncode}): {res.stderr[:200]}")
+        except Exception as e:
+            print(f"[upload] scp exception: {e}")
 
     def _load_phase2_g_seed_buffer(self, session_dir: str | None):
         """Phase1 누적 ``subgoal_buffer.npz`` 를 anchor buffer 로 로드 (§7).
@@ -4488,16 +4534,31 @@ class ForwardAndResetPipeline(BasePipeline):
             self._verify_resume_layout(session_dir, config_path, num_episodes, episodes_per_seed)
 
         if not config_path.exists():
+            # schedule_mode 도 함께 기록 — cleanup_dataset_for_resume 가 round_robin
+            # 의 dataset save 순서를 복원하는 데 필요 (sorted-name ≠ save-order).
+            # hook setup 보다 _init_session 이 먼저 호출되므로 yaml 을 직접 읽음.
+            _sched_mode = "seed_major"
+            _ph1_path = Path(__file__).resolve().parent / "pipeline_config" / "phase1_config.yaml"
+            if _ph1_path.exists():
+                try:
+                    import yaml as _yaml
+                    with open(_ph1_path, "r") as _f:
+                        _ph1 = _yaml.safe_load(_f) or {}
+                    _sched_mode = str((_ph1.get("readiness") or {}).get(
+                        "schedule_mode", "seed_major"))
+                except Exception:
+                    pass
             session_config = {
                 "num_episodes": num_episodes,
                 "num_random_seeds": self.num_random_seeds,
                 "episodes_per_seed": episodes_per_seed,
                 "instruction": instruction,
                 "objects": objects,
+                "schedule_mode": _sched_mode,
             }
             with open(config_path, 'w') as f:
                 json.dump(session_config, f, indent=2)
-            print(f"  [Session] Config saved: {config_path}")
+            print(f"  [Session] Config saved: {config_path} (schedule_mode={_sched_mode})")
 
         all_results = {
             'num_episodes': num_episodes,
@@ -4662,33 +4723,47 @@ class ForwardAndResetPipeline(BasePipeline):
         print(f"  Save Dir: {session_dir}")
         print(MAGENTA + "=" * 70 + RESET)
 
-        # 에피소드 루프
-        for episode_idx in range(num_episodes):
-            episode_num = episode_idx + 1
-            batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
-            is_batch_last = (episode_idx % episodes_per_seed == episodes_per_seed - 1) or (episode_idx == num_episodes - 1)
-            next_batch_index = batch_index + 1
+        # 스케줄 결정 — readiness hook 의 schedule_mode 가 좌우 (default seed_major).
+        # round_robin: seed0·1, seed1·1, ..., seedN·1, seed0·2, ... 형태로 cycle.
+        from method3_integration.scheduling import schedule_iter
+        _hook_cfg = getattr(getattr(self, "_phase1_readiness_hook", None),
+                            "cfg", None)
+        schedule_mode = getattr(_hook_cfg, "schedule_mode", "seed_major")
+        is_round_robin = (schedule_mode == "round_robin")
+        seed_episode_counts = [0] * self.num_random_seeds
+        print(f"  Schedule: {schedule_mode}")
+
+        # 에피소드 루프 — schedule_iter 가 (exec_idx, batch, slot, ep_num, round_last) 산출.
+        for execution_idx, batch_index, slot, episode_num, is_round_last in schedule_iter(
+                num_episodes, episodes_per_seed, self.num_random_seeds, schedule_mode):
 
             self.current_episode = episode_num
             self._current_batch_index = batch_index
-            self._current_slot = episode_idx % episodes_per_seed
+            self._current_slot = slot
 
             # Per-episode perturbation RNG seed (no-op if perturbation disabled).
-            self._seed_episode_perturbation(batch_index, self._current_slot)
+            self._seed_episode_perturbation(batch_index, slot)
 
             print("\n" + CYAN + "=" * 70 + RESET)
-            print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1})  ".center(70) + RESET)
+            print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode "
+                  f"(Batch {batch_index+1}, Slot {slot})  ".center(70) + RESET)
             print(CYAN + "=" * 70 + RESET)
 
             episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
 
-            # Reset target: 기본은 현재 seed, 배치 전환 시 콜백으로 갱신
+            # Reset target & next-seed handling.
+            # round_robin: 매 episode 마다 next seed 가 cycle 로 바뀜 → pre_reset_cb 항상 set.
+            # seed_major:  batch 의 마지막 slot 일 때만 pre_reset_cb 설정.
             reset_target = seed_positions[batch_index]
+            if is_round_robin:
+                next_batch_index = (batch_index + 1) % self.num_random_seeds
+                _need_cb = True
+            else:
+                next_batch_index = batch_index + 1
+                _need_cb = is_round_last and next_batch_index < self.num_random_seeds
 
-            # 배치 마지막이면: Forward 후 다음 seed 생성 → Reset target 갱신 콜백
-            # 단, 전체 마지막 에피소드이거나 마지막 배치이면 seed gen 생략
             pre_reset_cb = None
-            if is_batch_last and next_batch_index < self.num_random_seeds:
+            if _need_cb:
                 _next_idx = next_batch_index
                 _sp = seed_positions
                 _sd = session_dir
@@ -4703,9 +4778,9 @@ class ForwardAndResetPipeline(BasePipeline):
                 pre_reset_cb = _make_next_seed
 
             try:
-                _slot = episode_idx % episodes_per_seed
                 _ep_dir = episode_dir
                 _bi = batch_index
+                _slot = slot
                 def _post_judge(res):
                     jp = res['judge'].get('prediction', 'UNCERTAIN')
                     from pipeline.save_logs import save_batch_info as _sbi
@@ -4722,30 +4797,31 @@ class ForwardAndResetPipeline(BasePipeline):
                     post_judge_callback=_post_judge,
                 )
 
-                # first_episode_positions → seed_positions[0] 초기 설정
-                # (seed_01_setup 폴더/파일은 run() 내부에서 이미 저장됨)
                 if seed_positions[0] is None and self.first_episode_positions is not None:
                     seed_positions[0] = copy.deepcopy(self.first_episode_positions)
                     self._all_previous_seed_positions.append(seed_positions[0])
 
                 self._update_results(all_results, result, episode_num, skip_reset)
+                seed_episode_counts[batch_index] += 1
 
             except Exception as e:
                 print(f"\n{RED}[{episode_num:02d}/{num_episodes:02d}] Error: {e}{RESET}")
                 import traceback; traceback.print_exc()
                 all_results['episodes'].append({'episode': episode_num, 'result': None, 'success': False, 'error': str(e)})
 
-            # Method3 Stage 1 — Phase1 readiness check after each episode.
-            # Disabled (no-op) when method3_phase1.enabled is false in yaml.
+            # Hook check — round_robin: end-of-round 만. seed_major: 매 episode.
             _hook = getattr(self, "_phase1_readiness_hook", None)
             if _hook is not None and _hook.enabled:
-                _sel = getattr(self, "_subgoal_selector", None)
-                _buf = getattr(_sel, "buffer", None) if _sel is not None else None
-                if _hook.should_stop(episode_num, _buf):
-                    print(MAGENTA + BOLD +
-                          f"  [method3:phase1] loop terminated early at ep={episode_num} "
-                          f"(reason={_hook.stop_reason})  ".center(70) + RESET)
-                    break
+                _do_check = is_round_last if is_round_robin else True
+                if _do_check:
+                    _sel = getattr(self, "_subgoal_selector", None)
+                    _buf = getattr(_sel, "buffer", None) if _sel is not None else None
+                    if _hook.should_stop(episode_num, _buf,
+                                         seed_episode_counts=seed_episode_counts):
+                        print(MAGENTA + BOLD +
+                              f"  [method3:phase1] loop terminated early at ep={episode_num} "
+                              f"(reason={_hook.stop_reason})  ".center(70) + RESET)
+                        break
 
             time.sleep(2)
 
@@ -4913,11 +4989,21 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"\n{YELLOW}  [Resume] Warning: seed_{first_incomplete+1} positions unavailable, "
                       f"skipping physical restore. Workspace must already be in correct state.{RESET}")
 
-            # 에피소드 루프
-            for episode_idx in range(num_episodes):
-                batch_index = min(episode_idx // episodes_per_seed, self.num_random_seeds - 1)
-                slot = episode_idx % episodes_per_seed
-                episode_num = episode_idx + 1
+            # 스케줄 결정 — resume 도 동일 schedule_mode 따름.
+            from method3_integration.scheduling import schedule_iter
+            _hook_cfg = getattr(getattr(self, "_phase1_readiness_hook", None),
+                                "cfg", None)
+            schedule_mode = getattr(_hook_cfg, "schedule_mode", "seed_major")
+            is_round_robin = (schedule_mode == "round_robin")
+            seed_episode_counts = [
+                sum(1 for s in batch_slots[b] if s)
+                for b in range(self.num_random_seeds)
+            ]
+            print(f"  Schedule: {schedule_mode}  pre-resume seed_counts={seed_episode_counts}")
+
+            # 에피소드 루프 — schedule_iter 가 (exec, batch, slot, ep_num, round_last) 산출.
+            for execution_idx, batch_index, slot, episode_num, is_round_last in schedule_iter(
+                    num_episodes, episodes_per_seed, self.num_random_seeds, schedule_mode):
 
                 # 이미 성공한 slot → 스킵
                 if batch_slots[batch_index][slot]:
@@ -4974,22 +5060,26 @@ class ForwardAndResetPipeline(BasePipeline):
                     if judge_pred == 'TRUE':
                         batch_slots[batch_index][slot] = True
                     self._update_results(all_results, result, episode_num, skip_reset)
+                    seed_episode_counts[batch_index] += 1
 
                 except Exception as e:
                     print(f"\n{RED}[{episode_num:02d}/{num_episodes:02d}] Error: {e}{RESET}")
                     import traceback; traceback.print_exc()
                     all_results['episodes'].append({'episode': episode_num, 'result': None, 'success': False, 'error': str(e)})
 
-                # Method3 Stage 1 — Phase1 readiness check (same hook as run_multiple_episodes).
+                # Hook check — round_robin: end-of-round 만. seed_major: 매 episode.
                 _hook = getattr(self, "_phase1_readiness_hook", None)
                 if _hook is not None and _hook.enabled:
-                    _sel = getattr(self, "_subgoal_selector", None)
-                    _buf = getattr(_sel, "buffer", None) if _sel is not None else None
-                    if _hook.should_stop(episode_num, _buf):
-                        print(MAGENTA + BOLD +
-                              f"  [method3:phase1] resume loop terminated early at ep={episode_num} "
-                              f"(reason={_hook.stop_reason})  ".center(70) + RESET)
-                        break
+                    _do_check = is_round_last if is_round_robin else True
+                    if _do_check:
+                        _sel = getattr(self, "_subgoal_selector", None)
+                        _buf = getattr(_sel, "buffer", None) if _sel is not None else None
+                        if _hook.should_stop(episode_num, _buf,
+                                             seed_episode_counts=seed_episode_counts):
+                            print(MAGENTA + BOLD +
+                                  f"  [method3:phase1] resume loop terminated early at ep={episode_num} "
+                                  f"(reason={_hook.stop_reason})  ".center(70) + RESET)
+                            break
                 time.sleep(2)
 
         self._finalize_session(all_results, session_dir, num_episodes, instruction, objects, skip_reset)

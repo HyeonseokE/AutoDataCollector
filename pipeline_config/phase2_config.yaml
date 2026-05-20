@@ -117,7 +117,7 @@ reembedding:
   # 충족하면서 10x 가속. null 이면 spec 정석 전체 re-embed.
   subgoal_filter_radius_m: 0.03    # 3 cm — *공격적 filter* (~3000 frames keep). client/server 토론 후 사용자 결정.
   subgoal_filter_min_keep: 30      # filter 후 frame 수가 이보다 적으면 R 자동 확장
-  decode_workers: 16               # video decode 병렬 thread 수. H100 server (64+ cores) 권장 16. RTX 3050 권장 4.
+  decode_workers: 4                # video decode 병렬 thread 수. RTX 3050 (= client) 권장 4.
 
 # =============================================================================
 # Phase2 Server (H100 gRPC) — 옛 phase2_server_infer_settings.yaml 통합 (2026-05-21)
@@ -131,6 +131,13 @@ transport:
   address: "127.0.0.1:50061"
   timeout_s: 60.0
   debug_verbose: true                  # true → [skill_planner_transport] 로그 출력
+
+# --- server-side P_phase1 build ownership ---
+# false = server 자체 build 안 함 (client 가 build + scp upload). true = server
+# 가 자체 build (yaml.phase1_dataset_path 받음). 2026-05-21: client 의 RTX 3050
+# 이 server 의 H100 보다 *오히려 빠른* 측정 (video decode CPU bound 라 GPU 차이
+# 의미 없음) → client 가 build + scp 가 더 실용적.
+server_build_phase1: false
 
 # --- server-side frozen VLA encoder runtime config ---
 # checkpoint 는 위의 ``phase1_trained_vla_path`` 가 SoT — 여기 다시 적지 않음.

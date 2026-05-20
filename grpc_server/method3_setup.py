@@ -177,7 +177,10 @@ def setup_method3_phase2_server(
     # (= server 의 db 는 empty 시작 → useful-OOD 의 기준 분포 P_phase1 부재).
     # 이제 *server 가 직접 P_phase1 build* — cache 비어있고 yaml 에 dataset path
     # 있으면 자체 re-embed. server cache npz 영구 저장 (= 다음 부팅 즉시 load).
-    if db.total_size() == 0:
+    # yaml.server_build_phase1: false 면 server 가 자체 build 안 함 (= client 가
+    # build + scp). default true (= 옛 동작).
+    _server_build_enabled = bool(ph2_raw.get("server_build_phase1", True))
+    if db.total_size() == 0 and _server_build_enabled:
         phase1_ds_path = ph2_raw.get("phase1_dataset_path")
         if phase1_ds_path:
             try:
@@ -212,6 +215,9 @@ def setup_method3_phase2_server(
                       f"db remains empty — acquisition 진행 시 IngestEpisode 로만 누적")
         else:
             print(f"[method3_setup] phase1_dataset_path 미설정 — db empty 시작")
+    elif db.total_size() == 0 and not _server_build_enabled:
+        print(f"[method3_setup] server_build_phase1=false — client 가 build 후 scp 예정. "
+              f"db empty 시작 (= cache 도착하면 다음 부팅에 load).")
 
     selector = Phase2MISelector(vector_db=db, config=phase2_mi)
 

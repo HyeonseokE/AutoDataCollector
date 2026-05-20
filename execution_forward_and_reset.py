@@ -806,6 +806,28 @@ class ForwardAndResetPipeline(BasePipeline):
             import traceback; traceback.print_exc()
             self._phase2_vector_db = None
 
+        # P_phase1 ready 검증 — local mode. None 또는 empty 면 *silent 진행 금지*.
+        # spec §14 의 useful-OOD selection 은 P_phase1 baseline 필수.
+        if self._phase2_vector_db is None or self._phase2_vector_db.total_size() == 0:
+            _RED = "\033[91m"; _BOLD = "\033[1m"; _RST = "\033[0m"
+            _state = "None (build/load FAILED)" if self._phase2_vector_db is None \
+                     else f"empty ({self._phase2_vector_db.total_size()} entries)"
+            msg = (
+                f"\n{_RED}{_BOLD}[Method3 phase2] P_phase1 vector DB is {_state}{_RST}\n"
+                f"{_RED}    Phase2 useful-OOD selection 은 P_phase1 baseline 없이 의미가 없습니다.{_RST}\n"
+                f"{_RED}    → 다음을 확인:{_RST}\n"
+                f"{_RED}      1) phase2_config.yaml.phase1_dataset_path 가 유효한 LeRobot dataset 인지   {_RST}\n"
+                f"{_RED}      2) phase2_config.yaml.phase1_trained_vla_path 가 유효한 VLA checkpoint 인지{_RST}\n"
+                f"{_RED}      3) session_dir 의 cache 가 부패했는지:                                     {_RST}\n"
+                f"{_RED}         rm -f {session_dir}/skill_wise_vector_db.npz   # 후 재시도         {_RST}\n"
+                f"{_RED}{_BOLD}    → session 종료 (P_phase1 없이 acquisition 진행 금지).{_RST}\n"
+            )
+            print(msg)
+            raise RuntimeError(
+                f"P_phase1 vector DB unavailable ({_state}) — "
+                f"check phase1_dataset_path / phase1_trained_vla_path / cache"
+            )
+
         # Phase2MISelector + (옵셔널) U_VLA scorer wiring — useful_ood_updated §11-13.
         # candidate generator 가 후보 batch 를 만들면 `_phase2_select(...)` 가
         # M_MI + Useful-OOD rule 로 ξ* 를 고른다.
@@ -1422,6 +1444,34 @@ class ForwardAndResetPipeline(BasePipeline):
             f"device={info.get('device')} buffer={info.get('buffer_total')} "
             f"selector={info.get('selector_summary')}"
         )
+
+        # P_phase1 (= server-side skill-wise vector DB) ready 검증.
+        # server 가 자체 build 했어야 useful-OOD selection 의 kNN reference 가
+        # P_phase1 ∪ D_phase2 (spec §14). buffer_total=0 이면 build 실패 또는
+        # 미수행 — *silent fallback 금지*, 빨간색 + RuntimeError 로 세션 종료.
+        server_buf_total = int(info.get("buffer_total", 0))
+        if server_buf_total == 0:
+            try:
+                client.close()
+            except Exception:
+                pass
+            msg = (
+                f"\n{_RED}{_BOLD}[skill_planner_transport] server P_phase1 vector DB is EMPTY (buffer_total=0){_RST}\n"
+                f"{_RED}    Phase2 useful-OOD selection 은 P_phase1 baseline 없이 의미가 없습니다.{_RST}\n"
+                f"{_RED}    → 다음을 확인:{_RST}\n"
+                f"{_RED}      1) yaml 의 phase1_dataset_path 가 *유효한 LeRobot dataset* 인지        {_RST}\n"
+                f"{_RED}      2) server log 의 [method3_setup] server-side P_phase1 build 메시지     {_RST}\n"
+                f"{_RED}         ssh {{remote}} 'tail -200 /tmp/phase2_server.log | grep method3_setup'  {_RST}\n"
+                f"{_RED}      3) server cache 삭제 후 재부팅 (= fresh build):                         {_RST}\n"
+                f"{_RED}         ssh {{remote}} 'rm -f .../grpc_server/buffer/server_skill_wise_vector_db.npz'{_RST}\n"
+                f"{_RED}         bash grpc_server/launch_remote_server.sh stop && bash grpc_server/launch_remote_server.sh{_RST}\n"
+                f"{_RED}{_BOLD}    → session 종료 (P_phase1 없이 acquisition 진행 금지).{_RST}\n"
+            )
+            print(msg)
+            raise RuntimeError(
+                f"server P_phase1 vector DB is empty (buffer_total=0) at {addr} — "
+                f"check yaml.phase1_dataset_path and server build logs"
+            )
 
         adapter = GrpcPlannerClient(client=client, context_provider=self)
         n_cand = int(((full_cfg.get("perturbation") or {}).get("skill") or {}).get(

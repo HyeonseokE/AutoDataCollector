@@ -270,8 +270,21 @@ class _TorchVLAExtractor(VLAKeyExtractor):
         out: dict[str, Any] = {}
         for k in all_keys:
             vals = [p.get(k) for p in pres]
-            if all(torch.is_tensor(v) for v in vals if v is not None):
-                tensors = [v for v in vals if v is not None]
+            # 모든 sample 에서 None 이면 (= preprocessor 가 이 key 를 안 채우는 경우)
+            # tensors=[] 로 torch.cat 이 ValueError 를 던지므로 *skip* + 1회 warn.
+            non_none = [v for v in vals if v is not None]
+            if not non_none:
+                _warned = getattr(self, "_warned_none_keys", None)
+                if _warned is None:
+                    _warned = set()
+                    self._warned_none_keys = _warned
+                if k not in _warned:
+                    print(f"[VLA encoder] WARN: batch key '{k}' is None in all "
+                          f"{len(vals)} samples — skipping")
+                    _warned.add(k)
+                continue
+            if all(torch.is_tensor(v) for v in non_none):
+                tensors = non_none
                 # variable seq_len 처리 (예: 다른 instruction → 다른 token length)
                 if all(t.dim() >= 2 for t in tensors):
                     lens = [t.shape[1] for t in tensors]

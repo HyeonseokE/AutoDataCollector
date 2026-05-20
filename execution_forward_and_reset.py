@@ -400,10 +400,31 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception as e:
             print(f"[Transit IK] failed to apply transit_pitch_max_deg: {e}")
 
-    def _setup_perturbation_on_skills(self) -> None:
-        """Read perturbation.subgoal from recording_config.yaml and wire to skills.
+    def _load_phase1_config_file(self) -> dict | None:
+        """Load Phase1 settings from ``pipeline_config/phase1_config.yaml``.
 
-        Silent no-op when recording_config is absent or perturbation is disabled.
+        Method3 Phase1 의 전용 config 파일. 존재하면 그 dict 를 반환하여
+        recording_config 의 ``perturbation.subgoal`` 보다 우선 적용한다.
+        없으면 None → recording_config 로 폴백.
+        """
+        path = Path(__file__).resolve().parent / "pipeline_config" / "phase1_config.yaml"
+        if not path.exists():
+            return None
+        try:
+            from method3.config import load_phase1_config
+            cfg = load_phase1_config(path)
+            print(f"[Perturbation] Phase1 config ← {path}")
+            return cfg
+        except Exception as e:
+            print(f"[Perturbation] Failed to read phase1_config.yaml: {e}")
+            return None
+
+    def _setup_perturbation_on_skills(self) -> None:
+        """Wire the Phase1 subgoal selector from phase1_config.yaml to skills.
+
+        Phase1 설정은 ``pipeline_config/phase1_config.yaml`` 에서 읽는다 (없으면
+        recording_config 의 ``perturbation.subgoal`` 로 폴백). recording_config
+        가 없거나 perturbation 이 비활성이면 silent no-op.
         """
         self._subgoal_phase = {"forward": False, "reset": False}
         if not self.recording_config:
@@ -419,12 +440,23 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Perturbation] Failed to read recording_config: {e}")
             return
         pert_raw = (full_cfg.get("perturbation") or {}).get("subgoal") or {}
+        # Phase1 전용 config 파일이 있으면 우선 적용 (recording_config 보다 우선).
+        _phase1_file = self._load_phase1_config_file()
+        if _phase1_file is not None:
+            pert_raw = _phase1_file
         any_en, fwd, reset = self._read_phase_flags(pert_raw)
         if not any_en:
             return
         self._subgoal_phase = {"forward": fwd, "reset": reset}
+
+        # mode: "gaussian" (legacy 3D blob) | "buffer_aware" (Phase1 scoring).
+        mode = str(pert_raw.get("mode", "gaussian")).strip().lower()
+        if mode in ("buffer_aware", "buffer-aware", "phase1"):
+            self._setup_buffer_aware_subgoal(pert_raw, fwd, reset)
+            return
+
         try:
-            from perturbation.subgoal_level import (
+            from method3.phase1_state_seeding import (
                 SubgoalPerturbation, SubgoalPerturbationConfig,
             )
             pert = SubgoalPerturbation(SubgoalPerturbationConfig(
@@ -444,6 +476,166 @@ class ForwardAndResetPipeline(BasePipeline):
                 self._skills.set_perturbation_rng(pending)
         except Exception as e:
             print(f"[Perturbation] Failed to construct perturbation: {e}")
+
+    def _setup_buffer_aware_subgoal(self, pert_raw: dict, fwd: bool, reset: bool) -> None:
+        """Wire the buffer-aware Phase1 subgoal selector (문서 phase1_subgoal_scoring_core).
+
+        Replaces the legacy SubgoalPerturbation single random offset with
+        K-candidate buffer-aware scoring. The per-skill state buffer is
+        persisted to a single ``.npz`` file (``buffer_file``); the actual file
+        path is bound later in ``_finalize_subgoal_buffer(session_dir)`` because
+        the session directory does not exist yet at skills-creation time.
+        """
+        try:
+            from method3.phase1_state_seeding import (
+                Phase1SubgoalConfig, Phase1SubgoalSelector, ReachabilityConfig,
+                SubgoalBuffer,
+            )
+            # subgoal 위치 제약 (문서 §1 reachable/safe) — 각 항목 생략/null 이면
+            # 해당 검사 비활성. reach annulus 는 move_to_position 이 kinematics
+            # 술어를 넘겨 항상 적용된다.
+            reach_raw = pert_raw.get("reachability") or {}
+
+            def _opt_float(v):
+                return None if v is None else float(v)
+
+            def _opt_bounds(v):
+                return tuple(float(x) for x in v) if v else None
+
+            reachability = ReachabilityConfig(
+                z_min=_opt_float(reach_raw.get("z_min")),
+                z_max=_opt_float(reach_raw.get("z_max")),
+                x_bounds=_opt_bounds(reach_raw.get("x_bounds")),
+                y_bounds=_opt_bounds(reach_raw.get("y_bounds")),
+            )
+            # §4.2 hemisphere dist 의 방향 기준점 (로봇 좌표 원점). 기본 (0,0,0).
+            _ro = pert_raw.get("robot_origin") or [0.0, 0.0, 0.0]
+            robot_origin = tuple(float(x) for x in _ro)
+            # per_skill: skill_id 별 부분 override. 지원 키 sigma/clip_factor/
+            # n_candidates. 비어 있거나 항목 누락이면 전역 값 그대로.
+            _per_skill_raw = pert_raw.get("per_skill") or {}
+            _int_keys = {"n_candidates"}
+            per_skill_overrides: dict = {}
+            for _sk, _ov in _per_skill_raw.items():
+                if not _ov:
+                    continue
+                per_skill_overrides[str(_sk)] = {
+                    str(_k): (int(_v) if _k in _int_keys else float(_v))
+                    for _k, _v in _ov.items()
+                }
+            cfg = Phase1SubgoalConfig(
+                sigma=float(pert_raw.get("sigma", 0.05)),
+                clip_factor=float(pert_raw.get("clip_factor", 2.0)),
+                n_candidates=int(pert_raw.get("n_candidates", 32)),
+                k_nn=int(pert_raw.get("k_nn", 5)),
+                end_fraction=float(pert_raw.get("end_fraction", 0.2)),
+                preview_points=int(pert_raw.get("preview_points", 20)),
+                eps=float(pert_raw.get("eps", 1e-6)),
+                s_min=float(pert_raw.get("s_min", 0.01)),
+                min_buffer_size=int(pert_raw.get("min_buffer_size", 8)),
+                candidate_dist=str(pert_raw.get("candidate_dist", "uniform_ball")),
+                robot_origin=robot_origin,
+                max_resample=int(pert_raw.get("max_resample", 200)),
+                reachability=reachability,
+                per_skill_overrides=per_skill_overrides,
+                debug_verbose=bool(pert_raw.get("debug_verbose", False)),
+            )
+            # buffer_file: 단일 .npz 파일명/경로. 상대경로면 실행 세션
+            # 디렉터리 기준으로 _finalize_subgoal_buffer 에서 해석된다.
+            # None → 메모리 전용 (이 run 동안만 grow).
+            self._subgoal_buffer_file = pert_raw.get("buffer_file")
+            buffer = SubgoalBuffer()  # file 은 finalize 에서 바인딩
+            selector = Phase1SubgoalSelector(buffer, cfg)
+            self._skills.set_subgoal_selector(selector)
+            # Kept on self so finalize/teardown can reach the buffer.
+            self._subgoal_selector = selector
+            _dist_desc = cfg.candidate_dist
+            if cfg.candidate_dist == "hemisphere":
+                _dist_desc += f"(origin={cfg.robot_origin})"
+            print(
+                f"[Perturbation] Buffer-aware Phase1 subgoal scoring ENABLED "
+                f"(K={cfg.n_candidates}, dist={_dist_desc}, k_nn={cfg.k_nn}, "
+                f"min_buffer={cfg.min_buffer_size}, "
+                f"buffer_file={self._subgoal_buffer_file or 'memory-only'}, "
+                f"debug_verbose={cfg.debug_verbose}, "
+                f"phase=forward:{fwd} reset:{reset})"
+            )
+            pending = getattr(self, "_pending_perturbation_seed", None)
+            if pending is not None:
+                self._skills.set_perturbation_rng(pending)
+        except Exception as e:
+            print(f"[Perturbation] Failed to construct buffer-aware selector: {e}")
+
+    def _finalize_subgoal_buffer(self, session_dir: str | None) -> None:
+        """Bind the buffer-aware subgoal buffer file to the run's session dir.
+
+        Called once the session directory exists (alongside
+        ``_setup_preselective_filter_on_skills``). A relative ``buffer_file``
+        resolves to ``<session_dir>/<buffer_file>`` so the buffer lives inside
+        the run's session folder; an absolute path is used as-is. Then the
+        file is loaded (preload — picks up an existing buffer on session
+        resume). No-op for gaussian mode or when no ``buffer_file`` was given.
+        """
+        selector = getattr(self, "_subgoal_selector", None)
+        raw = getattr(self, "_subgoal_buffer_file", None)
+        if selector is None or not raw:
+            return
+        try:
+            path = Path(raw)
+            if not path.is_absolute():
+                base = Path(session_dir) if session_dir else Path(".")
+                path = base / path
+            selector.buffer.set_file(path)
+            selector.buffer.load()
+            print(
+                f"[Perturbation] subgoal buffer file → {selector.buffer.file_path()} "
+                f"(preloaded {selector.buffer.total_size()} entries over "
+                f"{len(selector.buffer.skill_ids())} skills)"
+            )
+            # resume reconcile — 삭제된 에피소드의 stale entry 를 정리한다.
+            # cleanup_dataset_for_resume 가 계산한 생존(judge=TRUE·폴더 존재)
+            # 에피소드 집합으로 buffer 를 맞춰 데이터셋과 1:1 정합을 유지한다.
+            # fresh run 은 _resume_kept_true_episodes 가 없음 → 스킵.
+            _kept = getattr(self, "_resume_kept_true_episodes", None)
+            if _kept is not None:
+                from method3.episode_lifecycle import EpisodeReconciler, episode_id
+                _keep_ids = {episode_id(n) for n in _kept}
+                _result = EpisodeReconciler([selector.buffer]).retain_episodes(_keep_ids)
+                _dropped = sum(_result.values())
+                print(
+                    f"[Perturbation] resume reconcile — kept {len(_keep_ids)} "
+                    f"TRUE episodes, dropped {_dropped} stale buffer entries "
+                    f"(buffer now {selector.buffer.total_size()})"
+                )
+        except Exception as e:
+            print(f"[Perturbation] subgoal buffer finalize skipped: {e}")
+
+    def _teardown_subgoal_selector(self) -> None:
+        """Persist the buffer-aware subgoal buffer to its ``.npz`` file.
+
+        No-op for the legacy gaussian mode or a memory-only buffer (no
+        ``buffer_file`` given / file never bound by _finalize_subgoal_buffer).
+        """
+        selector = getattr(self, "_subgoal_selector", None)
+        if selector is None:
+            return
+        try:
+            selector.buffer.save()
+            _fp = selector.buffer.file_path()
+            if _fp is not None:
+                print(
+                    f"[Perturbation] subgoal buffer saved → {_fp} "
+                    f"({selector.buffer.total_size()} entries over "
+                    f"{len(selector.buffer.skill_ids())} skills)"
+                )
+        except Exception as e:
+            print(f"[Perturbation] subgoal buffer persist skipped: {e}")
+        self._subgoal_selector = None
+        if hasattr(self, "_skills") and self._skills is not None:
+            try:
+                self._skills.set_subgoal_selector(None)
+            except Exception:
+                pass
 
     def _setup_skill_perturbation_on_skills(self) -> None:
         """Read perturbation.skill from recording_config and wire a curobo backend.
@@ -965,7 +1157,18 @@ class ForwardAndResetPipeline(BasePipeline):
         # Seed the RNG when EITHER subgoal-level or skill-level perturbation
         # is attached — both branches in skills_lerobot use _perturbation_rng.
         if hasattr(self, "_skills") and self._skills is not None:
-            has_subgoal = getattr(self._skills, "_perturbation", None) is not None
+            # buffer_aware 모드는 _subgoal_selector 를, legacy gaussian 은
+            # _perturbation 을 attach 한다 (둘은 서로 배타적). 둘 중 하나라도
+            # 붙어 있으면 RNG 시딩이 필요한데, 기존 코드가 _subgoal_selector
+            # 를 빼먹어서 resume 시 buffer_aware Phase1 이 비활성화됐었다 —
+            # _restore_to_seed 가 _create_skills 를 episode loop 전에 트리거
+            # 하면 setup 의 pending-seed apply 가 pending 미설정 상태로 통과,
+            # 이후 매 episode 의 _seed_episode_perturbation 도 selector 만
+            # 붙은 상태를 인식 못 해 RNG 가 영원히 None 으로 남았다.
+            has_subgoal = (
+                getattr(self._skills, "_perturbation", None) is not None
+                or getattr(self._skills, "_subgoal_selector", None) is not None
+            )
             has_skill = getattr(self._skills, "_skill_planner_client", None) is not None
             if has_subgoal or has_skill:
                 self._skills.set_perturbation_rng(ep_seed)
@@ -1110,21 +1313,31 @@ class ForwardAndResetPipeline(BasePipeline):
             self._install_recording_signal_handler()
 
         except ImportError as e:
-            print(f"[Recording] Warning: Failed to import record_dataset: {e}")
-            print(f"[Recording] Dataset recording will be disabled")
-            self.record_dataset = False
-            self.dataset_recorder = None
-            # camera_manager는 유지 — 카메라 연결은 성공했을 수 있음
+            # `--record` was explicitly requested but the recording stack
+            # cannot even be imported. Fail fast — silently disabling recording
+            # here means the whole multi-episode session runs collecting NO
+            # data, and the loss is only discovered afterwards.
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(
+                f"[Recording] FATAL: dataset recording was requested (--record) "
+                f"but record_dataset could not be imported: {e}\n"
+                f"Fix the import error, or drop --record to run without recording."
+            ) from e
         except AssertionError:
             # Dataset already exists - 파이프라인 완전 종료
             raise
         except Exception as e:
-            print(f"[Recording] Warning: Failed to initialize recorder: {e}")
+            # Same rationale as above: a recorder/camera init failure must abort
+            # the run, not silently turn `record_dataset` off. A data-collection
+            # pipeline that runs without recording is worse than one that stops.
             import traceback
             traceback.print_exc()
-            self.record_dataset = False
-            self.dataset_recorder = None
-            self.camera_manager = None
+            raise RuntimeError(
+                f"[Recording] FATAL: dataset recording was requested (--record) "
+                f"but recorder initialization failed: {e}\n"
+                f"Fix the recorder/camera error, or drop --record to run without recording."
+            ) from e
 
     def _start_reset_episode_recording(self, target_positions: Dict) -> None:
         """Reset 에피소드 레코딩 시작 (별도 dataset, recorder 교체)"""
@@ -1188,6 +1401,7 @@ class ForwardAndResetPipeline(BasePipeline):
         try:
             self._teardown_skill_perturbation()
             self._teardown_preselective_filter()
+            self._teardown_subgoal_selector()
         except Exception as e:
             print(f"[Recording] Warning: skill perturbation teardown failed: {e}")
 
@@ -1461,6 +1675,13 @@ class ForwardAndResetPipeline(BasePipeline):
         if not hasattr(self, '_task_runner') or self._task_runner is None:
             from pipeline.task_runner import SingleArmTaskRunner
             skills = self._create_skills()
+            # The Phase1 subgoal selector is created lazily inside
+            # `_create_skills`, so `self._subgoal_selector` only exists now.
+            # `_finalize_subgoal_buffer` already ran once (in
+            # run_multiple_episodes, before this lazy init) and no-op'd — the
+            # .npz file was never bound, making every flush_episode save() a
+            # silent no-op. Re-bind it here so the buffer actually persists.
+            self._finalize_subgoal_buffer(getattr(self, "_session_dir", None))
             self._task_runner = SingleArmTaskRunner(
                 skills=skills,
                 recorder=self.dataset_recorder if self.record_dataset else None,
@@ -2277,13 +2498,40 @@ class ForwardAndResetPipeline(BasePipeline):
                     print(f"  {YELLOW}Skipped (missing images){RESET}")
 
                 # 레코딩 모드: Judge 결과에 따라 에피소드 저장/폐기
-                # - TRUE   : 명확히 성공 → 저장
-                # - UNCERTAIN: 판단 불가 (VLM 503/타임아웃 등 API 실패 포함) → 저장 (수동 검토)
-                # - FALSE  : 명확히 실패 → 폐기
-                # API 실패로 인한 데이터 손실 방지를 위해 UNCERTAIN은 보존.
-                if self.record_dataset:
-                    should_discard = judge_prediction == "FALSE"
+                # - TRUE      : 명확히 성공 → 저장
+                # - UNCERTAIN : 판단 불가 (VLM 503/타임아웃 등 API 실패 포함) → 폐기
+                # - FALSE     : 명확히 실패 → 폐기
+                # TRUE 로 명확히 검증된 에피소드만 데이터셋에 남긴다. (UNCERTAIN
+                # 은 더 이상 보존하지 않음 — subgoal buffer 와 동일한 TRUE-only 기준.)
+                should_discard = judge_prediction != "TRUE"
 
+                # Buffer-aware subgoal: grow + persist the per-skill buffer.
+                # Episodes judged FALSE/UNCERTAIN discard their staged subgoals,
+                # so the buffer mirrors TRUE episodes only and survives an
+                # interrupted multi-episode run.
+                # NOTE: Phase1 state seeding is INDEPENDENT of LeRobot dataset
+                # recording — this flush must run every episode even when
+                # `record_dataset` is disabled. Otherwise `_pending` accumulates
+                # across episodes (pending=1,2,3,4 → 5,6,7,8 …), the buffer
+                # stays N=0, and buffer-aware selection never activates.
+                _subgoal_sel = getattr(self, "_subgoal_selector", None)
+                if _subgoal_sel is not None:
+                    try:
+                        if not should_discard and judge_prediction == "TRUE":
+                            # flush 시 episode_id 를 stamp 한다 — 에피소드를 삭제·
+                            # 재취득(resume)할 때 buffer 를 episode 단위로 정리·
+                            # reconcile 할 수 있도록 (episode lifecycle).
+                            from method3.episode_lifecycle import episode_id as _mk_ep_id
+                            _ep_n = getattr(self, "current_episode", None)
+                            _ep_id = _mk_ep_id(_ep_n) if _ep_n else ""
+                            _subgoal_sel.flush_episode(episode_id=_ep_id)
+                        else:
+                            _subgoal_sel.discard_episode()
+                    except Exception as _e:
+                        print(f"[Perturbation] subgoal buffer flush skipped: {_e}")
+
+                episode_df = None
+                if self.record_dataset:
                     # _end_episode_recording이 save_episode 전에 buffer snapshot을 떠서 반환
                     episode_df = self._end_episode_recording(discard=should_discard)
 
@@ -2340,6 +2588,9 @@ class ForwardAndResetPipeline(BasePipeline):
                             result_image=result_image,
                             detection_image=self.detection_image,
                         )
+                        # 에피소드별 forward judge 시각화를 세션 공통
+                        # judge_results/ 폴더에 즉시 누적 복사 (reset 이전).
+                        self._collect_judge_result(forward_dir)
                 # 코드 캐시 갱신: 실행 성공 + Judge!=FALSE이면 캐싱
                 # 한 번이라도 TRUE가 나온 코드는 유지 (Judge=FALSE로 무효화하지 않음)
                 judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
@@ -2933,6 +3184,44 @@ class ForwardAndResetPipeline(BasePipeline):
 
         cv2.imwrite(save_path, image)
         print(f"  Turn Test visualization saved: {save_path}")
+
+    def _collect_judge_result(self, forward_dir: str) -> None:
+        """에피소드별 forward judge 시각화(``judge_result.jpg``)를 세션 공통
+        ``<session_dir>/judge_results/`` 폴더에 ``judge_result_ep{NN}.jpg`` 로
+        누적 복사한다.
+
+        judge 결과 이미지가 forward 폴더에 저장되는 **즉시**(= reset 단계
+        이전) 복사하므로, run 이 중간에 끊기거나 reset 에서 실패해도 그
+        시점까지의 에피소드 결과가 한 폴더에 그대로 쌓여 보존된다. 나중에
+        ``judge_results/`` 폴더만 열면 전 에피소드 judge 결과를 볼 수 있다.
+
+        파이프라인을 절대 중단시키지 않도록 모든 예외를 삼킨다. 원본
+        ``judge_result.jpg`` 가 없으면(예: record_dataset 미사용으로 judge
+        시각화 미저장) 조용히 건너뛴다.
+        """
+        try:
+            import shutil
+            src = Path(forward_dir) / "judge_result.jpg"
+            if not src.exists():
+                return
+            session_dir = getattr(self, "_session_dir", None)
+            session_dir = (
+                Path(session_dir) if session_dir
+                else Path(forward_dir).parent.parent
+            )
+            ep = getattr(self, "current_episode", None)
+            if ep is not None:
+                ep_tag = f"ep{int(ep):02d}"
+            else:
+                # 폴백: episode_NN 디렉터리명에서 추출
+                ep_tag = Path(forward_dir).parent.name.replace("episode_", "ep")
+            out_dir = session_dir / "judge_results"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            dst = out_dir / f"judge_result_{ep_tag}.jpg"
+            shutil.copy2(src, dst)
+            print(f"  [judge_results] collected → judge_results/{dst.name}")
+        except Exception as _e:
+            print(f"  [judge_results] collect skipped: {_e}")
 
     def _update_results(self, all_results: Dict, result: Dict, episode_num: int, skip_reset: bool) -> None:
         """에피소드 결과를 all_results에 추가"""
@@ -3775,6 +4064,11 @@ class ForwardAndResetPipeline(BasePipeline):
         # Method 3: wire the IG·AC selector now that the session folder exists,
         # so the FAISS buffer lands inside <session_dir>/preselective_buffer.
         self._setup_preselective_filter_on_skills(session_dir)
+        # Buffer-aware subgoal: remember the session dir so `_get_task_runner`
+        # can bind the .npz buffer once the selector is lazily created. The
+        # call here still no-ops (selector not built yet) — kept harmless.
+        self._session_dir = session_dir
+        self._finalize_subgoal_buffer(session_dir)
         seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
 
         # 헤더 출력
@@ -3908,6 +4202,11 @@ class ForwardAndResetPipeline(BasePipeline):
         )
         # Method 3: wire the IG·AC selector against the resumed session folder.
         self._setup_preselective_filter_on_skills(session_dir)
+        # Buffer-aware subgoal: remember the session dir so `_get_task_runner`
+        # can bind the .npz buffer once the selector is lazily created (picks
+        # up the buffer persisted by the earlier run on resume).
+        self._session_dir = session_dir
+        self._finalize_subgoal_buffer(session_dir)
         batch_slots, seed_positions, batch_attempted = self._load_resume_state(session_dir)
 
         # 헤더 출력
@@ -3936,6 +4235,30 @@ class ForwardAndResetPipeline(BasePipeline):
                     print(f"\n[Cleanup] Result: {cleanup_stats['dataset_episodes_before']} → {cleanup_stats['dataset_episodes_after']} episodes")
                     if cleanup_stats['deleted_indices']:
                         print(f"[Cleanup] Deleted dataset indices: {cleanup_stats['deleted_indices']}")
+                    # episode lifecycle — 생존 에피소드 집합을 보관해 두면
+                    # _finalize_subgoal_buffer 가 subgoal buffer 를 그 집합으로
+                    # reconcile 한다 (삭제된 에피소드의 stale entry 제거).
+                    self._resume_kept_true_episodes = cleanup_stats.get("kept_true_episodes")
+
+                    # forward·reset dataset 인덱스 정합 유지: reset repo 도
+                    # 같은 로직으로 trim 한다. forward 만 청소하면 reset 이
+                    # stale 누적해 forward[N] ↔ reset[N] 페어 매칭이 깨진다.
+                    try:
+                        reset_stats = cleanup_dataset_for_resume(
+                            session_dir=session_dir,
+                            repo_id=self.dataset_repo_id + "_reset",
+                        )
+                        print(
+                            f"[Cleanup-Reset] Result: "
+                            f"{reset_stats['dataset_episodes_before']} → "
+                            f"{reset_stats['dataset_episodes_after']} episodes")
+                        if reset_stats['deleted_indices']:
+                            print(f"[Cleanup-Reset] Deleted dataset indices: "
+                                  f"{reset_stats['deleted_indices']}")
+                    except Exception as e:
+                        print(f"\n{YELLOW}[Cleanup-Reset] Warning: "
+                              f"Reset dataset cleanup failed: {e}{RESET}")
+                        import traceback; traceback.print_exc()
                 except Exception as e:
                     print(f"\n{YELLOW}[Cleanup] Warning: Dataset cleanup failed: {e}{RESET}")
                     import traceback; traceback.print_exc()
@@ -4301,7 +4624,7 @@ def main():
         "--detect-model",
         type=str,
         default=None,
-        help="VLM model for detect_objects skill (default: uses gemini-3-flash-preview)"
+        help="VLM model for detect_objects skill (default: uses gemini-3.1-flash-lite)"
     )
 
     parser.add_argument(

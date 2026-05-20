@@ -74,10 +74,14 @@ class BasePipeline:
         try:
             import pandas as pd
             ds = self.dataset_recorder._dataset
-            writer = getattr(ds, "writer", None)
-            if writer is None or writer.episode_buffer is None:
+            # LeRobot v0.5.1: the in-progress episode buffer lives directly on
+            # the dataset (`ds.episode_buffer`). Older builds exposed it via
+            # `ds.writer.episode_buffer`, but `ds.writer` is now a ParquetWriter
+            # with no such attribute — accessing it raised AttributeError and
+            # silently dropped every episode's skill visualization.
+            buf = getattr(ds, "episode_buffer", None)
+            if buf is None:
                 return None
-            buf = writer.episode_buffer
             n = buf.get("size", 0)
             if n <= 0:
                 return None

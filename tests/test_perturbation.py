@@ -4,7 +4,7 @@ Run from AutoDataCollector root:
     python tests/test_perturbation.py
 
 Coverage:
-    1. perturbation/subgoal_level — sampler properties (shape, clip, stats, seed)
+    1. method3/phase1_state_seeding — sampler properties (shape, clip, stats, seed)
     2. recording_config_ws1.yaml — `perturbation.subgoal` parses correctly
     3. LeRobotSkills — set_perturbation / set_perturbation_rng hooks behave
     4. ForwardAndResetPipeline._setup_perturbation_on_skills — wires correctly
@@ -29,7 +29,7 @@ sys.path.insert(0, str(ADC_ROOT))
 import numpy as np
 import yaml
 
-from perturbation.subgoal_level import (
+from method3.phase1_state_seeding import (
     SubgoalPerturbation,
     SubgoalPerturbationConfig,
     TRANSIT_SKILL_TYPES,
@@ -285,11 +285,35 @@ def test_seed_skipped_when_perturbation_not_attached():
     p = _make_pipeline_no_init()
     fake_skills = MagicMock()
     fake_skills._perturbation = None  # no perturbation attached
+    fake_skills._subgoal_selector = None
+    fake_skills._skill_planner_client = None
     p._skills = fake_skills
 
     p._seed_episode_perturbation(batch_index=1, slot_in_batch=1)
 
     assert not fake_skills.set_perturbation_rng.called
+
+
+def test_seed_applied_for_buffer_aware_selector():
+    """buffer_aware 모드: _subgoal_selector 가 attach 되면 RNG 시딩돼야 한다.
+
+    버그 회귀 방지 — 이전 코드는 _perturbation (legacy gaussian) 만 체크해서
+    buffer_aware 모드(_subgoal_selector 사용)에서 RNG 가 시딩 안 됐고, resume
+    시 _restore_to_seed→_create_skills 가 episode loop 전에 트리거되면서
+    Phase1 perturbation 이 영원히 비활성 상태가 됐다.
+    """
+    p = _make_pipeline_no_init()
+    fake_skills = MagicMock()
+    fake_skills._perturbation = None              # buffer_aware: 비어 있음
+    fake_skills._subgoal_selector = MagicMock()   # buffer_aware: 여기에 selector
+    fake_skills._skill_planner_client = None
+    p._skills = fake_skills
+
+    p._seed_episode_perturbation(batch_index=2, slot_in_batch=3)
+
+    expected = 2 * 10000 + 3   # 20003
+    fake_skills.set_perturbation_rng.assert_called_once_with(expected)
+    assert p._pending_perturbation_seed == expected
 
 
 # --------------------------------------------------------------------------

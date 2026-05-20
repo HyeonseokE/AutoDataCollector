@@ -1,18 +1,7 @@
 """Trajectory perturbation modules for AutoDataCollector.
 
-Two-layer hierarchy:
-    subgoal_level/  — 3D Gaussian offset on transit subgoal targets
-    skill_level/    — planner ensemble (placeholder; future)
+    skill_level/  — planner ensemble (curobo via-point planner)
+
+NOTE: subgoal-level perturbation (legacy 3D blob + Method3 Phase1 buffer-aware
+subgoal scoring) moved to ``method3/phase1_state_seeding/`` — see that package.
 """
-
-from perturbation.subgoal_level import (
-    SubgoalPerturbation,
-    SubgoalPerturbationConfig,
-    TRANSIT_SKILL_TYPES,
-)
-
-__all__ = [
-    "SubgoalPerturbation",
-    "SubgoalPerturbationConfig",
-    "TRANSIT_SKILL_TYPES",
-]

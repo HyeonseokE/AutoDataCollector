@@ -67,6 +67,9 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         Use this for approach movements (moving above an object before pick/place),
         retreat movements (lifting after pick/place), and transit movements between objects.
 
+        APPROACH HEIGHT: for approach / transit / retreat moves above an object,
+        use z = 0.15 (15cm hover height) unless the task geometry requires otherwise.
+
         The world coordinate frame origin is at the rear-center of the workspace table
         on the table surface:
             Positive x: towards front of the table
@@ -350,7 +353,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             purple_pos = positions["purple block"]["position"]
             target_pos = positions["yellow block"]["position"]
             # 5. Approach with integrated gripper open, then pick
-            skills.move_to_position([purple_pos[0], purple_pos[1], 0.20],
+            skills.move_to_position([purple_pos[0], purple_pos[1], 0.15],
                                     target_name="purple block",
                                     gripper_action="open", gripper_start_fraction=0.3)
             skills.execute_pick_object(purple_pos, object_name="purple block")

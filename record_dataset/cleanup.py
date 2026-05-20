@@ -51,9 +51,50 @@ def cleanup_dataset_for_resume(
         "dataset_episodes_before": 0,
         "dataset_episodes_after": 0,
         "deleted_indices": [],
+        # episode lifecycle — 생존(폴더 존재 + judge=TRUE) 에피소드 번호 목록.
+        # None = 미계산(early-return). resume 시 subgoal buffer reconcile 에 쓴다.
+        "kept_true_episodes": None,
     }
 
-    # 1. 데이터셋 존재 확인 및 열기
+    # 1. 파이프라인 에피소드 스캔 (dataset 검사보다 먼저 — buffer reconcile 은
+    # dataset 상태와 무관하게 kept_true_episodes 정보를 요구하므로 broken/missing
+    # dataset 으로 early-exit 하기 전에 반드시 채워둔다).
+    #   "kept_true"  = TRUE + 폴더 존재 → dataset에 기록됨, 유지
+    #   "false"      = FALSE + 폴더 존재 → dataset에 미기록, 재취득
+    #   "missing"    = 폴더 삭제됨 → dataset에 기록되었을 수도 있음, 재취득
+    episode_dirs = sorted(session_path.glob("episode_*"))
+    max_episode = 0
+    for ep_dir in episode_dirs:
+        try:
+            ep_num = int(ep_dir.name.split("_")[1])
+            max_episode = max(max_episode, ep_num)
+        except (ValueError, IndexError):
+            continue
+    ep_states = []  # [(ep_num, state)]
+    for ep_num in range(1, max_episode + 1):
+        batch_info_path = session_path / f"episode_{ep_num:02d}" / "batch_info.json"
+        if not batch_info_path.exists():
+            ep_states.append((ep_num, "missing"))
+            stats["pipeline_episodes_to_rerun"] += 1
+        else:
+            with open(batch_info_path) as f:
+                bi = json.load(f)
+            judge = bi.get("judge", "")
+            if judge == "TRUE":
+                ep_states.append((ep_num, "kept_true"))
+                stats["pipeline_episodes_success"] += 1
+            else:
+                ep_states.append((ep_num, "false"))
+                stats["pipeline_episodes_to_rerun"] += 1
+    stats["pipeline_episodes_total"] = len(ep_states)
+    # episode lifecycle — 생존 에피소드(폴더 존재 + judge=TRUE). resume 시
+    # subgoal buffer reconcile 에 사용 (삭제된 에피소드의 stale entry 제거).
+    # 모든 early-return 경로 직전에 채워져 있어야 buffer 가 dataset 상태와
+    # 정합 유지. 사용자가 episode 폴더를 다 삭제하면 [] 가 돼서 reconcile 이
+    # 옛 tagged entries 를 전부 정리한다.
+    stats["kept_true_episodes"] = [n for n, st in ep_states if st == "kept_true"]
+
+    # 2. 데이터셋 존재 확인 및 열기
     if not dataset_path.exists():
         print("[Cleanup] No dataset found, skipping")
         return stats
@@ -86,43 +127,9 @@ def cleanup_dataset_for_resume(
         print("[Cleanup] Dataset is empty, skipping")
         return stats
 
-    # 2. 파이프라인 에피소드 스캔
-    episode_dirs = sorted(session_path.glob("episode_*"))
     if not episode_dirs:
-        print("[Cleanup] No episodes found in session, skipping")
+        print("[Cleanup] No episodes found in session, skipping dataset trim")
         return stats
-
-    max_episode = 0
-    for ep_dir in episode_dirs:
-        try:
-            ep_num = int(ep_dir.name.split("_")[1])
-            max_episode = max(max_episode, ep_num)
-        except (ValueError, IndexError):
-            continue
-
-    # 각 에피소드 상태 파악:
-    #   "kept_true"  = TRUE + 폴더 존재 → dataset에 기록됨, 유지
-    #   "false"      = FALSE + 폴더 존재 → dataset에 미기록, 재취득
-    #   "missing"    = 폴더 삭제됨 → dataset에 기록되었을 수도 있음, 재취득
-    ep_states = []  # [(ep_num, state)]
-    for ep_num in range(1, max_episode + 1):
-        batch_info_path = session_path / f"episode_{ep_num:02d}" / "batch_info.json"
-
-        if not batch_info_path.exists():
-            ep_states.append((ep_num, "missing"))
-            stats["pipeline_episodes_to_rerun"] += 1
-        else:
-            with open(batch_info_path) as f:
-                bi = json.load(f)
-            judge = bi.get("judge", "")
-            if judge == "TRUE":
-                ep_states.append((ep_num, "kept_true"))
-                stats["pipeline_episodes_success"] += 1
-            else:
-                ep_states.append((ep_num, "false"))
-                stats["pipeline_episodes_to_rerun"] += 1
-
-    stats["pipeline_episodes_total"] = len(ep_states)
 
     # 3. dataset index 매핑
     #    dataset에는 TRUE 에피소드만 순서대로 저장됨.

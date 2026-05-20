@@ -21,6 +21,7 @@ Usage:
 """
 
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -35,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from lerobot_cap.hardware import FeetechController
 from lerobot_cap.hardware.calibration import MotorCalibration
 from lerobot_cap.kinematics import KinematicsEngine, load_calibration_limits, load_gripper_radian_params
-from lerobot_cap.planning import TrajectoryPlanner
+from lerobot_cap.planning import TrajectoryPlanner, quadratic_bezier_trajectory
 from lerobot_cap.compensation import AdaptiveCompensator, GravitySagCompensator
 from lerobot_cap.workspace import BaseWorkspace
 
@@ -87,6 +88,11 @@ def _compute_ee_xyzrpy(kinematics, joints_rad: np.ndarray) -> np.ndarray:
     return np.array([pos[0], pos[1], pos[2], roll, pitch, yaw], dtype=np.float32)
 
 
+# clearance-lead ascent — 물체를 carry / placed object 위로 띄울 때의 여유 (m).
+# holding-phase carry 와 post-place retreat clearance 양쪽이 공유한다.
+HOLDING_CLEARANCE_MARGIN = 0.02
+
+
 class LeRobotSkills:
     """
     Primitive skills for SO-101 LeRobot.
@@ -129,7 +135,7 @@ class LeRobotSkills:
         pick_offset: float = 0.025,  # Pick/place offset from object top (meters, 2.5cm)
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
-        detect_model: str = "gemini-3-flash-preview",  # VLM model for detect_objects
+        detect_model: str = "gemini-3.1-flash-lite",  # VLM model for detect_objects
         recording_fps: int = 30,  # Single control+recording loop rate (Hz)
     ):
         self.robot_config_path = Path(robot_config)
@@ -197,9 +203,20 @@ class LeRobotSkills:
         # Subgoal-level perturbation (set externally via set_perturbation /
         # set_perturbation_rng). When both are set and the current move is a
         # pure transit (skill_type="move"), an offset is sampled and added to
-        # the target xyz inside move_to_position. See perturbation/subgoal_level.
+        # the target xyz inside move_to_position. See method3/phase1_state_seeding.
         self._perturbation = None      # SubgoalPerturbation or None
         self._perturbation_rng = None  # np.random.Generator or None
+
+        # Buffer-aware Phase1 subgoal scoring (set via set_subgoal_selector).
+        # When attached it REPLACES the legacy single-offset _perturbation:
+        # move_to_position generates K candidate subgoals, scores each by
+        # last-20% preview-state novelty against the per-skill state buffer,
+        # and picks argmax. See method3/phase1_state_seeding/subgoal_selector.py
+        # and the 문서 final_method3_spec §4-5.
+        self._subgoal_selector = None        # Phase1SubgoalSelector or None
+        # (skill_id, chosen_goal) staged at selection time, committed to the
+        # selector's buffer after the move executes (online buffer growth).
+        self._pending_subgoal_commit = None
 
         # Skill-level perturbation: curobo motion planner (in-process, GPU).
         # When attached + RNG set + is_transit, move_to_position swaps the
@@ -242,8 +259,23 @@ class LeRobotSkills:
         self._perturbation = perturbation
 
     def set_perturbation_rng(self, seed: int) -> None:
-        """(Re)seed the per-episode RNG for perturbation sampling."""
+        """(Re)seed the per-episode RNG for perturbation sampling.
+
+        The same RNG drives both the legacy SubgoalPerturbation and the
+        buffer-aware Phase1SubgoalSelector (candidate sampling + cold-start
+        pick), so a seed fully determines the episode's subgoal choices.
+        """
         self._perturbation_rng = np.random.default_rng(int(seed))
+
+    def set_subgoal_selector(self, selector) -> None:
+        """Attach a buffer-aware Phase1SubgoalSelector. Pass None to detach.
+
+        When attached, move_to_position(is_transit=True) uses the selector's
+        buffer-aware argmax instead of the legacy SubgoalPerturbation single
+        random offset. The per-episode RNG must still be set via
+        set_perturbation_rng. See method3/phase1_state_seeding/subgoal_selector.py.
+        """
+        self._subgoal_selector = selector
 
     def set_transit_pitch_max_deg(self, pitch_max_deg: Optional[float]) -> None:
         """Bias transit IK toward gripper pitch ≤ pitch_max_deg (e.g., -30 = at least
@@ -314,7 +346,9 @@ class LeRobotSkills:
             saved: dict = {}
             if subgoal:
                 saved["_perturbation"] = self._perturbation
+                saved["_subgoal_selector"] = self._subgoal_selector
                 self._perturbation = None
+                self._subgoal_selector = None
             if skill_planner:
                 saved["_skill_planner_client"] = self._skill_planner_client
                 self._skill_planner_client = None
@@ -498,6 +532,15 @@ class LeRobotSkills:
         # Initialize compensator
         # pick_z_offset 기본값 (보정 파일에서 덮어쓸 수 있음, signed 미터 단위)
         self.pick_z_offset: float = 0.0
+        # [REVERT-MARK: pick_xy_offset 2026-05-20] Radial overshoot at pick.
+        # Trajectory tracking 분석에서 fingertip 이 항상 base 쪽으로 ~5-10mm
+        # 짧게 멈춤이 확인되어 (elbow/wrist_flex deadband + Hold phase plateau),
+        # execute_pick_object 의 pick xy 를 radial 방향으로 이 값만큼 밀어준다.
+        # 컨트롤러가 자연스럽게 멈추는 지점이 물체 중앙에 맞도록 하는 patch.
+        # 되돌리려면: 이 필드 초기화, 아래 로딩 try/except, execute_pick_object
+        # 의 radial overshoot 블록, compensation 파일의 "pick_xy_offset" 키
+        # 4곳을 제거하면 됨.
+        self.pick_xy_offset: float = 0.0
         if self.use_compensation:
             compensation_file = self.config.get("compensation_file")
             if compensation_file and Path(compensation_file).exists():
@@ -519,8 +562,13 @@ class LeRobotSkills:
                     if abs(self.pick_z_offset) > 1e-9:
                         self._log(f"  Pick z offset: {self.pick_z_offset*1000:+.1f}mm "
                                   f"(applied at execute_pick_object descent)")
+                    # [REVERT-MARK: pick_xy_offset 2026-05-20]
+                    self.pick_xy_offset = float(_comp.get("pick_xy_offset", 0.0))
+                    if abs(self.pick_xy_offset) > 1e-9:
+                        self._log(f"  Pick xy radial offset: {self.pick_xy_offset*1000:+.1f}mm "
+                                  f"(applied at execute_pick_object xy)")
                 except Exception as _e:
-                    self._log(f"  Warning: failed to read pick_z_offset: {_e}")
+                    self._log(f"  Warning: failed to read pick offsets: {_e}")
 
         # Load Pix2Robot calibrator
         # 우선: 새 Charuco 캘리브 (factory K + depth + Affine 12 DoF, 시차 보정)
@@ -1584,6 +1632,22 @@ class LeRobotSkills:
 
         Returns:
             True if movement successful
+
+        Subgoal perturbation (Phase1, optional):
+            When a buffer-aware subgoal selector is attached
+            (``set_subgoal_selector`` + ``set_perturbation_rng``), the EE xyz
+            target is perturbed in a small ball around the home pose's FK
+            position with ``skill_id="move_initial"``. The home pitch (FK of
+            recorded home joints) and wrist_roll are held fixed via IK so the
+            camera-down orientation is preserved. The chosen joint solution
+            replaces the recorded home joint vector for this single execution;
+            the recorded ``self.initial_state`` is never mutated. If IK at the
+            chosen xyz fails for all pitch offsets in the feasibility band, the
+            move silently falls back to the nominal recorded home.
+
+            Sigma/clip_factor for ``move_initial`` are typically set narrower
+            than the global config via ``per_skill_overrides`` (e.g., ±~4cm)
+            to avoid camera FOV occlusion in the following detect_objects step.
         """
         if self.initial_state is None:
             print("Error: Initial state not loaded")
@@ -1591,7 +1655,9 @@ class LeRobotSkills:
 
         duration = duration or self.movement_duration
 
-        # Set skill recording info
+        # Set skill recording info — uses the recorded home joints regardless of
+        # perturbation; recording shows the canonical intent, the perturbed end
+        # pose is reflected in the executed trajectory.
         goal_joint_rad = self._normalized_to_radians(self.initial_state)
         self._set_skill_recording(
             label=skill_description or "move to initial state",
@@ -1602,23 +1668,242 @@ class LeRobotSkills:
         )
 
         self._log(f"\nMoving to Initial State...")
-        current_arm_norm, _, _ = self._get_current_state()
+        current_arm_norm, current_joints_rad, current_ee = self._get_current_state()
+
+        # Default: unperturbed home joints. Phase1 may replace ``end_normalized``
+        # below with the IK solution at a perturbed xyz subgoal.
+        end_normalized = self.initial_state.copy()
+        self._pending_subgoal_commit = None
+
+        # Phase1 buffer-aware subgoal selection in EE xyz space. Home xyz =
+        # FK(recorded home joints); home pitch held via IK to preserve the
+        # camera-down orientation across episodes.
+        if (self._subgoal_selector is not None
+                and self._perturbation_rng is not None
+                and self.kinematics is not None):
+            try:
+                home_xyz = np.asarray(
+                    self.kinematics.get_ee_position(goal_joint_rad), dtype=float
+                )
+                home_pitch = float(self.kinematics.get_gripper_pitch(goal_joint_rad))
+                _feas = (lambda xyz: self._home_pitch_feasible(
+                            xyz, current_joints_rad, home_pitch))
+                _sel = self._subgoal_selector.select_subgoal(
+                    current_ee=current_ee,
+                    nominal_goal=home_xyz,
+                    skill_id="move_initial",
+                    rng=self._perturbation_rng,
+                    reachable_fn=self.kinematics.is_position_reachable,
+                    feasibility_fn=_feas,
+                )
+                chosen_xyz = np.asarray(_sel.chosen_goal, dtype=float)
+                if _sel.chosen_index != 0:
+                    # IK at home pitch + fixed wrist_roll to preserve home
+                    # orientation. Sag pre-comp mirrors move_to_position.
+                    ik_xyz = chosen_xyz.copy()
+                    if self.gravity_sag is not None:
+                        ik_xyz[2] += self.gravity_sag.compute_offset(chosen_xyz)
+                    custom_limits = None
+                    if (self.planner is not None
+                            and self.planner.calibration_limits is not None):
+                        custom_limits = (
+                            self.planner.calibration_limits.lower_limits_radians,
+                            self.planner.calibration_limits.upper_limits_radians,
+                        )
+                    joints, ok, _info = self.kinematics.inverse_kinematics_multi(
+                        ik_xyz,
+                        current_joints=current_joints_rad,
+                        custom_limits=custom_limits,
+                        num_random_samples=10,
+                        fixed_joints=[4],
+                        target_pitch=home_pitch,
+                    )
+                    if ok:
+                        end_normalized = self._radians_to_normalized(joints[:5])
+                        self._pending_subgoal_commit = (
+                            "move_initial",
+                            np.asarray(current_ee, dtype=float),
+                            chosen_xyz.copy(),
+                        )
+                        _mode = "cold-start RNG" if _sel.cold_start else "buffer-aware argmax"
+                        self._log(
+                            f"  [Subgoal-Phase1] skill=move_initial → "
+                            f"cand#{_sel.chosen_index} ({_mode}); "
+                            f"xyz=[{chosen_xyz[0]:.3f}, "
+                            f"{chosen_xyz[1]:.3f}, {chosen_xyz[2]:.3f}]"
+                        )
+                    else:
+                        # IK at home pitch failed even though feasibility said
+                        # OK for ±tol — picks a different pitch internally.
+                        # Fall back to nominal home (already in end_normalized).
+                        self._log(
+                            f"  [Subgoal-Phase1] move_initial cand#{_sel.chosen_index} "
+                            f"IK at home pitch failed → nominal home fallback"
+                        )
+            except Exception as _e:
+                # Never let perturbation break home-go. Fall back to nominal.
+                self._log(f"  [Subgoal-Phase1] move_initial selection skipped: {_e}")
+                self._pending_subgoal_commit = None
 
         try:
-            arm_dist = np.max(np.abs(current_arm_norm - self.initial_state))
+            arm_dist = np.max(np.abs(current_arm_norm - end_normalized))
             gripper_dist = abs(self.current_gripper_pos - self.initial_state_gripper)
+            moved = True
             if arm_dist < 5.0 and gripper_dist < 5.0:
                 self._log(f"  Already at initial state (arm: {arm_dist:.1f}, gripper: {gripper_dist:.1f})")
             else:
-                self._execute_move_to_known_pose(
-                    current_arm_norm, self.initial_state,
+                moved = self._execute_move_to_known_pose(
+                    current_arm_norm, end_normalized,
                     duration, "Moving to Initial State",
                     start_gripper=self.current_gripper_pos,
                     end_gripper=self.initial_state_gripper,
                 )
+            # Buffer-aware subgoal: stage the executed home move's terminal
+            # state. Commits to the per-skill buffer only if the episode is
+            # judged TRUE (selector.flush_episode), mirroring move_to_position.
+            if (moved and self._subgoal_selector is not None
+                    and self._pending_subgoal_commit is not None):
+                try:
+                    self._subgoal_selector.stage_executed(
+                        *self._pending_subgoal_commit
+                    )
+                except Exception as _e:
+                    self._log(f"  [Subgoal-Phase1] subgoal staging skipped: {_e}")
             return True
         finally:
             self._clear_skill_recording()
+            self._pending_subgoal_commit = None
+
+    def _holding_pitch_feasible(
+        self,
+        base_xyz: np.ndarray,
+        current_joints: np.ndarray,
+    ) -> bool:
+        """Holding-phase IK feasibility check for a transit goal.
+
+        Used as the buffer-aware subgoal selector's feasibility filter so it
+        never picks a candidate that ``move_to_position`` would later abort on
+        (``[Pipeline Abort] IK failed within ±20° pitch range``).
+
+        When an object is grasped, ``move_to_position`` holds the saved grasp
+        pitch and only relaxes it within ±``PITCH_TOLERANCE_DEG`` (see the IK
+        retry below). A candidate is feasible iff at least one pitch inside
+        that same band yields a converged IK solution. The check mirrors
+        ``move_to_position``: gravity-sag z pre-compensation and fixed
+        wrist_roll are applied so "filter passes" ⇔ "the move will plan".
+
+        Returns ``True`` when no holding-phase constraint applies (no grasp
+        pitch saved → pitch is unconstrained).
+        """
+        saved_pitch = getattr(self, "_saved_pitch", None)
+        if saved_pitch is None:
+            return True  # not holding an object → pitch unconstrained
+
+        base_xyz = np.asarray(base_xyz, dtype=float)
+
+        # Mirror move_to_position: gravity-sag pre-compensation raises the IK
+        # target z, which makes a steep held pitch strictly harder — so the
+        # feasibility check must run against the sag-adjusted z.
+        ik_xyz = base_xyz.copy()
+        if self.gravity_sag is not None:
+            ik_xyz[2] += self.gravity_sag.compute_offset(base_xyz)
+
+        # Mirror move_to_position: wrist_roll (joint index 4) is held fixed.
+        custom_limits = None
+        if self.planner is not None and self.planner.calibration_limits is not None:
+            custom_limits = (
+                self.planner.calibration_limits.lower_limits_radians,
+                self.planner.calibration_limits.upper_limits_radians,
+            )
+
+        # Coarse 5°-spaced sweep over the same ±20° band move_to_position's
+        # retry accepts. Offset 0 first so feasible candidates short-circuit
+        # on the first solve; infeasible ones pay the full sweep.
+        PITCH_TOLERANCE_DEG = 20.0
+        offsets_deg = [0.0]
+        step = 5.0
+        d = step
+        while d <= PITCH_TOLERANCE_DEG + 1e-9:
+            offsets_deg.extend((-d, d))
+            d += step
+
+        for offset_deg in offsets_deg:
+            test_pitch = saved_pitch + np.radians(offset_deg)
+            _joints, success, _info = self.kinematics.inverse_kinematics_multi(
+                ik_xyz,
+                current_joints=current_joints,
+                custom_limits=custom_limits,
+                num_random_samples=10,
+                fixed_joints=[4],
+                target_pitch=test_pitch,
+            )
+            if success and _info.get("num_valid", 0) > 0:
+                return True
+        return False
+
+    def _home_pitch_feasible(
+        self,
+        base_xyz: np.ndarray,
+        current_joints: np.ndarray,
+        home_pitch_rad: float,
+        tol_deg: float = 10.0,
+    ) -> bool:
+        """IK feasibility check for a perturbed home-pose subgoal.
+
+        Used as ``move_to_initial_state`` 's buffer-aware selector
+        ``feasibility_fn`` so it never picks a perturbed xyz the home IK can't
+        reach while preserving the home orientation (camera-down pitch + fixed
+        wrist_roll). Mirrors ``_holding_pitch_feasible`` but anchors on
+        ``home_pitch_rad`` (FK of the recorded home joints) instead of a saved
+        grasp pitch, and uses a tighter ±``tol_deg`` band because home has one
+        canonical orientation we want to keep stable across episodes.
+
+        Args:
+            base_xyz: candidate EE xyz in base_link frame (perturbed home).
+            current_joints: current arm joints in radians (IK seed).
+            home_pitch_rad: nominal home pitch (FK of recorded home joints).
+            tol_deg: pitch tolerance band (default ±10°).
+
+        Returns ``True`` iff any pitch inside ``home_pitch_rad ± tol_deg``
+        yields a converged IK solution at the sag-compensated target.
+        """
+        base_xyz = np.asarray(base_xyz, dtype=float)
+
+        # Mirror move_to_position / _execute_trajectory: gravity-sag pre-
+        # compensation raises the IK target z, which makes a steep pitch harder.
+        ik_xyz = base_xyz.copy()
+        if self.gravity_sag is not None:
+            ik_xyz[2] += self.gravity_sag.compute_offset(base_xyz)
+
+        custom_limits = None
+        if self.planner is not None and self.planner.calibration_limits is not None:
+            custom_limits = (
+                self.planner.calibration_limits.lower_limits_radians,
+                self.planner.calibration_limits.upper_limits_radians,
+            )
+
+        # 5°-spaced sweep over ±tol_deg. Offset 0 first so home-pitch candidates
+        # short-circuit on the first solve; off-pitch ones pay the full sweep.
+        offsets_deg = [0.0]
+        step = 5.0
+        d = step
+        while d <= tol_deg + 1e-9:
+            offsets_deg.extend((-d, d))
+            d += step
+
+        for offset_deg in offsets_deg:
+            test_pitch = home_pitch_rad + np.radians(offset_deg)
+            _joints, success, info = self.kinematics.inverse_kinematics_multi(
+                ik_xyz,
+                current_joints=current_joints,
+                custom_limits=custom_limits,
+                num_random_samples=10,
+                fixed_joints=[4],
+                target_pitch=test_pitch,
+            )
+            if success and info.get("num_valid", 0) > 0:
+                return True
+        return False
 
     def move_to_position(
         self,
@@ -1636,6 +1921,7 @@ class LeRobotSkills:
         gripper_open_ratio: float = 1.0,
         is_transit: bool = True,
         disable_sag: bool = False,
+        xy_lead_descent: bool = False,
     ) -> bool:
         """
         Move end-effector to target position with orientation constraints.
@@ -1664,6 +1950,12 @@ class LeRobotSkills:
             gripper_end_fraction:   Fraction of arm duration at which gripper interpolation ends (0.0–1.0).
                                     Example: start=0.2, end=1.0 → gripper transitions during last 80% of motion.
             gripper_open_ratio: Target open ratio when gripper_action="open" (0.0–1.0, clamped by GRIPPER_MAX_RATIO).
+            xy_lead_descent: For interaction descents (pick/place). Rebuilds the
+                planned path as a single quadratic Bezier through current → via
+                → goal, with `via` directly above the target near hover height.
+                The continuous curve front-loads the xy correction so xy is
+                closed before z reaches contact, without staging the motion.
+                No-op unless this move actually descends.
 
         Returns:
             True if movement successful
@@ -1678,6 +1970,7 @@ class LeRobotSkills:
 
         # Transform to robot_base_link frame
         target_position = self._transform_pos_world2robot(position)
+        _nominal_base = target_position.copy()   # perturbation 전 목표 (로그 비교용)
 
         # Subgoal-level perturbation. Two conditions:
         #   (1) is_transit=True             — caller declares transit intent.
@@ -1695,7 +1988,86 @@ class LeRobotSkills:
         # the move would fail silently (return False before any motion / before
         # gripper_action), causing downstream skills (pick/place) to act on a
         # stale gripper state.
+        # _skill_id groups transit moves into per-skill buffers B_t^(m); it is
+        # the gripper_action-derived skill_type ("move" / "move_and_close" /
+        # "move_and_open"), computed here so the buffer-aware selector can use
+        # it before skill_type_val is assigned further down.
+        _skill_id = {"close": "move_and_close",
+                     "open": "move_and_open"}.get(gripper_action, "move")
+        self._pending_subgoal_commit = None
+        # clearance-lead ascent state (holding-phase perturbation 안전장치) —
+        # holding move 가 subgoal-perturbation 되면 set 되고, IK 계획 직후의
+        # clearance-lead Bezier 재구성 블록이 소비한다.
+        _subgoal_perturbed = False
+        _holding_clearance_z = None
+
         if (is_transit
+                and self._subgoal_selector is not None
+                and self._perturbation_rng is not None):
+            # Buffer-aware Phase1 subgoal scoring — replaces the legacy single
+            # random offset. The selector samples K candidates, filters by
+            # reachability, and picks the subgoal whose terminal state is most
+            # novel vs the per-skill buffer B_t^(m).
+            # feasibility_fn: holding-phase IK gate. When an object is grasped,
+            # reject candidates unreachable at the saved grasp pitch (±20°) so
+            # the selector never picks a subgoal move_to_position would abort
+            # on. No-op (returns True) when no object is held.
+            _feasibility_fn = (
+                lambda xyz: self._holding_pitch_feasible(xyz, current_joints)
+            )
+            # clearance-lead ascent — perturbed subgoal 이 안전고도(clearance_z)
+            # 아래로 못 내려가게 막는다. 두 경우:
+            #   (1) holding: 물체를 쥔 채 carry — 물체가 pick/place 표면을 스침.
+            #   (2) post-place retreat: 방금 놓은 물체를 빈 그리퍼가 치고 지나감.
+            # clearance_z 를 reachable_fn 에 합성해 candidate 생성 단계부터
+            # 반영하고, 아래 clearance-lead Bezier 블록이 똑바로 띄운다.
+            _reach_fn = active_planner.kinematics.is_position_reachable
+            if getattr(self, "_saved_pitch", None) is not None:
+                # (1) holding-phase — object-aware (grasp z + 물체 높이 + margin)
+                _pz = getattr(self, "_pick_z", None)
+                _oh = getattr(self, "_pick_object_height", None)
+                if _pz is not None and _oh is not None:
+                    _holding_clearance_z = (
+                        float(_pz) + float(_oh) + HOLDING_CLEARANCE_MARGIN
+                    )
+                else:
+                    # object metadata 없음 → 이 move 의 nominal carry z 로 폴백
+                    _holding_clearance_z = float(target_position[2])
+            elif getattr(self, "_post_place_clearance_z", None) is not None:
+                # (2) post-place retreat — place 가 계산해둔 clearance 를 소비
+                # (one-shot: place 직후 첫 transit=retreat 에서만 적용).
+                _holding_clearance_z = float(self._post_place_clearance_z)
+                self._post_place_clearance_z = None
+            if _holding_clearance_z is not None:
+                _reach_fn = (
+                    lambda xyz, _b=active_planner.kinematics.is_position_reachable,
+                    _cz=_holding_clearance_z:
+                    bool(_b(xyz)) and float(xyz[2]) >= _cz
+                )
+            _sel = self._subgoal_selector.select_subgoal(
+                current_ee=current_ee,
+                nominal_goal=target_position,
+                skill_id=_skill_id,
+                rng=self._perturbation_rng,
+                reachable_fn=_reach_fn,
+                feasibility_fn=_feasibility_fn,
+            )
+            target_position = np.asarray(_sel.chosen_goal, dtype=float)
+            _subgoal_perturbed = True
+            _mode = "cold-start RNG" if _sel.cold_start else "buffer-aware argmax"
+            self._log(
+                f"  [Subgoal-Phase1] skill={_skill_id} → cand#{_sel.chosen_index} "
+                f"({_mode}); target=[{target_position[0]:.3f}, "
+                f"{target_position[1]:.3f}, {target_position[2]:.3f}]"
+            )
+            # Stage (skill_id, start_ee, chosen_goal) — committed to the
+            # subgoal buffer only on a TRUE episode (selector.flush_episode).
+            self._pending_subgoal_commit = (
+                _skill_id,
+                np.asarray(current_ee, dtype=float),
+                target_position.copy(),
+            )
+        elif (is_transit
                 and self._perturbation is not None
                 and self._perturbation_rng is not None):
             _offset = self._perturbation.sample(rng=self._perturbation_rng)
@@ -1715,7 +2087,13 @@ class LeRobotSkills:
                     )
 
         self._log(f"\nMoving to position: [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}] ({self.frame})")
-        if self.frame != "base_link":
+        if not np.allclose(target_position, _nominal_base):
+            # subgoal perturbation 적용됨 — 실제 이동 목표를 명시 (로그 혼동 방지).
+            self._log(
+                f"  -> perturbed subgoal (base_link): [{target_position[0]:.3f}, "
+                f"{target_position[1]:.3f}, {target_position[2]:.3f}]"
+            )
+        elif self.frame != "base_link":
             self._log(f"  -> base_link: [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
 
         # Gravity sag pre-compensation: raise IK target z to offset expected droop.
@@ -2005,6 +2383,131 @@ class LeRobotSkills:
             else:
                 self._log("  [Skill Perturbation] empty batch — using cartesian fallback")
 
+        # ── xy-lead corrective descent ───────────────────────────────────
+        # For interaction descents (pick/place; is_transit=False) the upstream
+        # transit is subgoal-perturbed and can leave the gripper up to ±100mm
+        # off the target xy. A plain joint-space interpolation descends
+        # diagonally, so the object contacts the surface before the lagging
+        # controller has closed the xy error — landing it off-centre.
+        #
+        # Rebuild the descent as a single quadratic Bezier in joint space
+        # through current → via → goal, where `via` is the IK of the target
+        # xy held near hover height. The continuous curve front-loads the xy
+        # correction (xy converges well before z reaches contact) while never
+        # stopping — unlike a staged recenter-then-descend.
+        #
+        # No-op when this move is not a descent. via-IK failure or any error
+        # falls back silently to the plain planned trajectory.
+        if (xy_lead_descent
+                and trajectory.ik_converged
+                and current_ee[2] > ik_target_position[2] + 0.01):
+            try:
+                _cl = getattr(active_planner, "calibration_limits", None)
+                _custom_limits = (
+                    (_cl.lower_limits_radians, _cl.upper_limits_radians)
+                    if _cl is not None else None
+                )
+                # via: target xy, held near hover — descend only VIA_DESCENT_FRAC
+                # of the way down so xy is corrected almost entirely up high.
+                VIA_DESCENT_FRAC = 0.15
+                via_z = current_ee[2] + VIA_DESCENT_FRAC * (
+                    ik_target_position[2] - current_ee[2]
+                )
+                via_position = np.array(
+                    [ik_target_position[0], ik_target_position[1], via_z]
+                )
+                via_joints, via_ok, _via_info = (
+                    active_planner.kinematics.inverse_kinematics_multi(
+                        via_position,
+                        current_joints=current_joints,
+                        custom_limits=_custom_limits,
+                        num_random_samples=10,
+                        fixed_joints=fixed_joints_list,
+                        target_pitch=ik_target_pitch,
+                    )
+                )
+                if via_ok:
+                    n_pts = len(trajectory.joint_positions)
+                    bez = quadratic_bezier_trajectory(
+                        np.asarray(current_joints, dtype=float),
+                        np.asarray(via_joints, dtype=float),
+                        np.asarray(goal_joint_rad, dtype=float),
+                        num_points=n_pts,
+                    )
+                    trajectory.joint_positions = bez
+                    trajectory.ee_positions = np.array([
+                        active_planner.kinematics.get_ee_position(q)
+                        for q in bez
+                    ])
+                    self._log(
+                        f"  [xy-lead descent] via z={via_z:.3f}m — xy "
+                        f"corrected ahead of contact (continuous Bezier)"
+                    )
+                else:
+                    self._log("  [xy-lead descent] via IK failed — plain descent")
+            except Exception as _e:
+                self._log(f"  [xy-lead descent] skipped ({_e})")
+
+        # ── clearance-lead ascent (holding-phase, xy-lead descent 의 거울) ───
+        # 물체를 쥔 채 subgoal-perturbation 된 transit 을 plain interpolation
+        # 으로 가면, 들고 있는 물체가 아직 낮은데 perturbed subgoal 쪽으로
+        # 옆으로 휩쓸려 pick/place 표면을 스친다.
+        #
+        # current → via → goal 의 quadratic Bezier 로 재구성한다. `via` 는
+        # 현재 xy 를 clearance_z 에 고정한 지점 — 물체가 먼저 똑바로
+        # clearance_z 까지 올라간 뒤 perturbed subgoal 로 휘어진다. perturbed
+        # subgoal 은 reachable_fn 의 z-floor 로 이미 z>=clearance_z 이므로
+        # via 이후 구간도 carry 고도 위에 머문다.
+        #
+        # 이미 clearance_z 이상에서 시작하는 move (대부분의 transit) 는 no-op.
+        # via-IK 실패나 예외는 plain trajectory 로 silent fallback.
+        if (_subgoal_perturbed
+                and _holding_clearance_z is not None
+                and trajectory.ik_converged
+                and current_ee[2] < _holding_clearance_z - 0.005):
+            try:
+                _cl = getattr(active_planner, "calibration_limits", None)
+                _custom_limits = (
+                    (_cl.lower_limits_radians, _cl.upper_limits_radians)
+                    if _cl is not None else None
+                )
+                # via: 현재 xy 유지 + clearance_z — 옆으로 안 새고 똑바로 상승.
+                via_position = np.array(
+                    [current_ee[0], current_ee[1], _holding_clearance_z]
+                )
+                via_joints, via_ok, _via_info = (
+                    active_planner.kinematics.inverse_kinematics_multi(
+                        via_position,
+                        current_joints=current_joints,
+                        custom_limits=_custom_limits,
+                        num_random_samples=10,
+                        fixed_joints=fixed_joints_list,
+                        target_pitch=ik_target_pitch,
+                    )
+                )
+                if via_ok:
+                    n_pts = len(trajectory.joint_positions)
+                    bez = quadratic_bezier_trajectory(
+                        np.asarray(current_joints, dtype=float),
+                        np.asarray(via_joints, dtype=float),
+                        np.asarray(goal_joint_rad, dtype=float),
+                        num_points=n_pts,
+                    )
+                    trajectory.joint_positions = bez
+                    trajectory.ee_positions = np.array([
+                        active_planner.kinematics.get_ee_position(q)
+                        for q in bez
+                    ])
+                    self._log(
+                        f"  [clearance-lead ascent] via z={_holding_clearance_z:.3f}m "
+                        f"— 물체를 carry 고도까지 먼저 올린 뒤 lateral perturbation "
+                        f"(continuous Bezier)"
+                    )
+                else:
+                    self._log("  [clearance-lead ascent] via IK failed — plain move")
+            except Exception as _e:
+                self._log(f"  [clearance-lead ascent] skipped ({_e})")
+
         self._set_skill_recording(
             label=label,
             skill_type=skill_type_val,
@@ -2022,18 +2525,31 @@ class LeRobotSkills:
 
         # Execute trajectory with active kinematics for correct error measurement
         try:
-            return self._execute_trajectory(
+            _moved = self._execute_trajectory(
                 trajectory=trajectory,
                 target_position=target_position,
-                description=f"Moving to [{position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f}]",
+                description=f"Moving to [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]",
                 kinematics=active_planner.kinematics,
                 gripper_start_value=gripper_start_value,
                 gripper_end_value=gripper_end_value,
                 gripper_start_fraction=gripper_start_fraction,
                 gripper_end_fraction=gripper_end_fraction,
             )
+            # Buffer-aware subgoal: stage the executed move's terminal state.
+            # It is committed to the per-skill buffer only if the episode is
+            # judged TRUE (selector.flush_episode), mirroring the vector DB.
+            if (_moved and self._subgoal_selector is not None
+                    and self._pending_subgoal_commit is not None):
+                try:
+                    self._subgoal_selector.stage_executed(
+                        *self._pending_subgoal_commit
+                    )
+                except Exception as _e:
+                    self._log(f"  [Subgoal-Phase1] subgoal staging skipped: {_e}")
+            return _moved
         finally:
             self._clear_skill_recording()
+            self._pending_subgoal_commit = None
 
     # Image resolution for normalized coordinate conversion (0–1000 → pixel)
     IMAGE_WIDTH = 640
@@ -2396,7 +2912,18 @@ class LeRobotSkills:
         # pick_z = (object_top - pick_offset) + pick_z_offset (per-robot residual sag absorber, usually negative)
         pick_z_raw = object_height - self.pick_offset + self.pick_z_offset
         pick_z = max(pick_z_raw, MIN_PICK_Z)
-        pick_position = [object_position[0], object_position[1], pick_z]
+        # [REVERT-MARK: pick_xy_offset 2026-05-20] Radial overshoot in xy.
+        # Push the pick xy outward by pick_xy_offset metres along the radial
+        # direction (base→object) to compensate the controller's systematic
+        # ~5-10mm radial undershoot at Hold-phase plateau. No-op when offset=0.
+        _pick_x, _pick_y = float(object_position[0]), float(object_position[1])
+        if abs(self.pick_xy_offset) > 1e-9:
+            _reach = math.hypot(_pick_x, _pick_y)
+            if _reach > 1e-3:
+                _scale = 1.0 + self.pick_xy_offset / _reach
+                _pick_x *= _scale
+                _pick_y *= _scale
+        pick_position = [_pick_x, _pick_y, pick_z]
 
         self._log(f"\n[Execute Pick Object]")
         self._log(f"  Object height: {object_height*100:.1f}cm")
@@ -2413,11 +2940,20 @@ class LeRobotSkills:
         pick_label = f"pick {object_name}" if object_name else None
         # pick_z를 명목값으로 먼저 저장 (place에서 참조, pick 실패 시에도 crash 방지)
         self._pick_z = pick_z
+        # holding-phase clearance_z (clearance-lead ascent) 계산용 — 집는 물체
+        # 의 top z. move_to_position 이 grasp z + 이 값 + margin 으로 carry
+        # 안전고도를 잡는다.
+        self._pick_object_height = object_height
+        # 새 pick 사이클 — 이전 place 의 stale retreat clearance 제거.
+        self._post_place_clearance_z = None
 
         # Descent to object contact — interaction subgoal, MUST NOT be perturbed.
+        # xy_lead_descent: continuous Bezier that closes the xy offset left by
+        # the perturbed transit before z reaches the object (vertical contact).
         if not self.move_to_position(pick_position, target_name=pick_label,
                                      skill_description=skill_description,
-                                     is_transit=False):
+                                     is_transit=False,
+                                     xy_lead_descent=True):
             print("Error: Failed to reach pick position")
             return False
 
@@ -2505,11 +3041,15 @@ class LeRobotSkills:
         place_label = f"place on {target_name}" if target_name else None
 
         # Descent to place contact — interaction subgoal, MUST NOT be perturbed.
+        # xy_lead_descent: continuous Bezier that closes the xy offset left by
+        # the perturbed transit before z reaches the dish (vertical contact),
+        # so the block lands on the dish centre instead of the edge.
         if not self.move_to_position(final_position,
                                      target_pitch=saved_pitch,
                                      target_name=place_label,
                                      skill_description=skill_description,
-                                     is_transit=False):
+                                     is_transit=False,
+                                     xy_lead_descent=True):
             print("Error: Failed to reach place position")
             return False
 
@@ -2517,8 +3057,22 @@ class LeRobotSkills:
         release_desc = f"release object on {target_name}" if target_name else None
         self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
 
+        # Post-place retreat clearance — 방금 놓은 물체를 빈 그리퍼가 치고
+        # 지나가지 않도록, 다음 transit(retreat)이 lateral perturbation 전에
+        # 먼저 이 높이까지 똑바로 올라가야 한다. holding clearance 와 같은 꼴:
+        # release EE z + 물체 높이 + margin. one-shot — move_to_position 의
+        # 첫 perturbed transit 이 소비한다.
+        _placed_obj_h = getattr(self, "_pick_object_height", None)
+        if _placed_obj_h is not None:
+            self._post_place_clearance_z = (
+                float(place_z) + float(_placed_obj_h) + HOLDING_CLEARANCE_MARGIN
+            )
+        else:
+            self._post_place_clearance_z = None
+
         # Clear saved state
         self._pick_z = None
+        self._pick_object_height = None
         self._saved_pitch = None
 
         self._log("[Execute Place Object] Complete")

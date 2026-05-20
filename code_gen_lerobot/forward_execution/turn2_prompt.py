@@ -24,6 +24,26 @@ def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False, c
     Returns:
         prompt string corpus for turn 2
     """
+    # Anti-context-bleed guard. Turn 2 runs inside the same multi-turn chat as
+    # Turn 0/1, so the full-scene image and the Turn-1 bounding boxes are still
+    # in context. Without this block the model sometimes answers a crop point by
+    # reusing its own Turn-1 bbox centre in full-image coordinates instead of
+    # measuring the attached crop — landing the point in the wrong frame.
+    frame_warning = """
+### ⚠️ Coordinate Frame — READ CAREFULLY
+Every coordinate you output describes a location **inside the attached cropped image(s) ONLY**.
+- For each crop, `[0, 0]` is its **top-left corner** and `[1000, 1000]` is its **bottom-right corner**.
+- Treat each crop as a standalone image. **Do NOT reuse, derive, rescale, or recall** any
+  coordinate or bounding box from the full-scene image or from earlier turns — that is a
+  DIFFERENT coordinate space and is INVALID here. The centre of a Turn-1 bounding box is
+  NOT a valid answer.
+- Measure each point by **looking at the crop itself**: judge where it falls as a fraction
+  of that crop's width and height, then convert to 0–1000. A point at the visual centre of
+  a crop is `[500, 500]`, no matter where the object sits in the full scene.
+- In `reasoning`, FIRST state the point as a fraction of the crop
+  (e.g. "≈52% from top, ≈50% from left of this crop"), THEN make `point_2d` match it.
+"""
+
     if has_side_view:
         prompt = f"""
 Now I am showing you **two cropped close-up images** of the object "{object_label}":
@@ -32,7 +52,7 @@ Now I am showing you **two cropped close-up images** of the object "{object_labe
 Based on your analysis and manipulation strategy above, identify the precise points on this object.
 
 Based on your analysis above, identify critical points on this object in **both** views.
-
+{frame_warning}
 **Point types**:
 1. **grasp** — optimal gripper grasp location for successful task execution.
 2. **interaction** — non-grasping functional sub-part location critical for task execution (e.g., pin, hole, slot, rim, edge).
@@ -70,7 +90,7 @@ Now I am showing you a **cropped close-up image** of the object "{object_label}"
 Based on your analysis and manipulation strategy above, identify the precise points on this object.
 
 Based on your analysis above, identify critical points on this object.
-
+{frame_warning}
 **Point types**:
 1. **grasp** — optimal gripper grasp location for successful task execution.
 2. **interaction** — non-grasping functional sub-part location critical for task execution (e.g., pin, hole, slot, rim, edge).

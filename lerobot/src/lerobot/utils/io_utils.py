@@ -16,6 +16,7 @@
 import json
 import warnings
 from pathlib import Path
+from typing import TypeVar
 
 import imageio
 
@@ -31,7 +32,11 @@ def write_video(video_path, stacked_frames, fps):
         imageio.mimsave(video_path, stacked_frames, fps=fps)
 
 
-def deserialize_json_into_object[T: JsonLike](fpath: Path, obj: T) -> T:
+# NOTE: backported from PEP 695 `def f[T: JsonLike](...)` for Python 3.10 (vendored bundle).
+T = TypeVar("T")
+
+
+def deserialize_json_into_object(fpath: Path, obj: T) -> T:
     """
     Loads the JSON data from `fpath` and recursively fills `obj` with the
     corresponding values (strictly matching structure and types).

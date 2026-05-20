@@ -95,6 +95,15 @@ def _send_with_retry(chat, contents, config, max_retries=MAX_RETRIES):
                 err_type = "Rate limit (429)"
             elif "503" in err_str or "UNAVAILABLE" in err_str:
                 err_type = "503 Unavailable"
+            elif "500" in err_str or "INTERNAL" in err_str:
+                # Gemini 서버측 transient internal error — codegen 도중 종종 발생.
+                # 재시도 안 하면 episode 가 통째로 죽고 다음 episode 도 같은
+                # 에러로 cascade 한다 (실제로 ep08~10 연속 실패한 사례 존재).
+                err_type = "500 Internal"
+            elif "502" in err_str or "BAD_GATEWAY" in err_str:
+                err_type = "502 BadGateway"
+            elif "504" in err_str or "DEADLINE_EXCEEDED" in err_str:
+                err_type = "504 Timeout"
             elif "404" in err_str:
                 err_type = "404 NotFound"
             else:
@@ -265,18 +274,21 @@ def gemini_response(
             except (ClientError, ServerError) as e:
                 err_str = str(e)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    wait_time = 2 ** attempt * 5
-                    print(f"[GEMINI] Rate limit (429). Retrying in {wait_time}s... (attempt {attempt+1}/{MAX_RETRIES_LOCAL})")
-                    time.sleep(wait_time)
-                    if attempt == MAX_RETRIES_LOCAL - 1:
-                        raise
+                    err_type = "Rate limit (429)"
                 elif "503" in err_str or "UNAVAILABLE" in err_str:
-                    wait_time = 2 ** attempt * 5
-                    print(f"[GEMINI] 503 Unavailable. Retrying in {wait_time}s... (attempt {attempt+1}/{MAX_RETRIES_LOCAL})")
-                    time.sleep(wait_time)
-                    if attempt == MAX_RETRIES_LOCAL - 1:
-                        raise
+                    err_type = "503 Unavailable"
+                elif "500" in err_str or "INTERNAL" in err_str:
+                    err_type = "500 Internal"           # transient server error
+                elif "502" in err_str or "BAD_GATEWAY" in err_str:
+                    err_type = "502 BadGateway"
+                elif "504" in err_str or "DEADLINE_EXCEEDED" in err_str:
+                    err_type = "504 Timeout"
                 else:
+                    raise
+                wait_time = 2 ** attempt * 5
+                print(f"[GEMINI] {err_type}. Retrying in {wait_time}s... (attempt {attempt+1}/{MAX_RETRIES_LOCAL})")
+                time.sleep(wait_time)
+                if attempt == MAX_RETRIES_LOCAL - 1:
                     raise
 
     elapsed = time.time() - start_time

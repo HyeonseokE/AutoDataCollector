@@ -99,6 +99,53 @@ def smooth_linear_interpolation(
     return np.outer(1 - t_smooth, start) + np.outer(t_smooth, end)
 
 
+def quadratic_bezier_trajectory(
+    start: np.ndarray,
+    via: np.ndarray,
+    end: np.ndarray,
+    num_points: int = 50,
+    smooth_type: str = "smoothstep",
+) -> np.ndarray:
+    """Quadratic Bezier path from ``start`` to ``end``, bulged toward ``via``.
+
+    The curve interpolates ``start`` at u=0 and ``end`` at u=1; ``via`` is a
+    control point the path is pulled toward but does NOT pass through. The
+    parameter u is eased by smoothstep so the motion accelerates and
+    decelerates smoothly with zero velocity only at the two endpoints — there
+    is no mid-path stop.
+
+    Used for the xy-lead corrective descent: with ``via`` placed directly
+    above the target (correct xy, near hover height), the single continuous
+    curve front-loads the xy correction so xy is essentially closed before z
+    reaches contact, without staging the motion into separate moves.
+
+    Args:
+        start: Start configuration (e.g. current joint angles).
+        via: Control point pulled toward (e.g. IK of target-xy at hover z).
+        end: End configuration (e.g. goal joint angles).
+        num_points: Number of samples along the curve.
+        smooth_type: "smoothstep" or "smootherstep" easing of the parameter.
+
+    Returns:
+        ``(num_points, dof)`` array of configurations along the Bezier.
+    """
+    t_linear = np.linspace(0, 1, num_points)
+    if smooth_type == "smootherstep":
+        u = np.array([smootherstep(t) for t in t_linear])
+    else:
+        u = np.array([smoothstep(t) for t in t_linear])
+
+    one_minus = 1.0 - u
+    w_start = one_minus ** 2
+    w_via = 2.0 * one_minus * u
+    w_end = u ** 2
+    return (
+        np.outer(w_start, start)
+        + np.outer(w_via, via)
+        + np.outer(w_end, end)
+    )
+
+
 def slerp_interpolation(
     start_rotation: np.ndarray,
     end_rotation: np.ndarray,

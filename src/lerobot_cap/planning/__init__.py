@@ -10,6 +10,7 @@ from lerobot_cap.planning.interpolation import (
     linear_interpolation,
     cubic_interpolation,
     slerp_interpolation,
+    quadratic_bezier_trajectory,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "linear_interpolation",
     "cubic_interpolation",
     "slerp_interpolation",
+    "quadratic_bezier_trajectory",
 ]

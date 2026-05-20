@@ -1,19 +1,19 @@
-"""Subgoal-level stochastic perturbation for trajectory diversity.
+"""Legacy subgoal-level perturbation — 3D Gaussian blob (ablation baseline).
 
-Perturbs the target xyz of pure-transit moves by sampling from a truncated
-isotropic 3D Gaussian. Interaction skills (grasp/place/gripper/rotate) and
-combined moves (move_and_close/open) are protected by skill_type whitelist.
+Method3 Phase1 의 **이전 방식**: pure-transit move 의 target xyz 를 truncated
+isotropic 3D Gaussian 에서 단일 offset 샘플로 흔든다. buffer-aware subgoal
+선택(``subgoal_selector.Phase1SubgoalSelector``)의 비교 baseline 으로 남겨둔다.
 
-Decision is made at *runtime* by the calling skill (typically inside
-``LeRobotSkills.move_to_position``) based on its own ``skill_type`` value:
+Interaction skill(grasp/place/gripper/rotate)과 combined move 는 호출부의
+``is_transit`` 파라미터로 보호된다 — skill_type 화이트리스트는 문서용 참고값.
 
     if skill_type in TRANSIT_SKILL_TYPES:
         offset = perturbation.sample(rng=ep_rng)
         if offset is not None:
             target_position += offset
 
-This module owns the perturbation policy (whitelist + sampler). Skill modules
-do not import each other's perturbation logic.
+``_sample_truncated_gaussian_3d`` 는 ``subgoal_candidates`` 의 gaussian 분포
+샘플러로도 재사용된다.
 """
 
 from __future__ import annotations

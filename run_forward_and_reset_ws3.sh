@@ -25,46 +25,13 @@ cd "$SCRIPT_DIR"
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
 ROBOT_IDS=(4)
 
-## Task_instruction 
-# INSTRUCTION="stack red block at center, then place yellow block on top of red block"
-
 ### ==================== [single arm task] ==================
 ## pick and place
 INSTRUCTION="pick up the red block and place it on the blue dish"
 RESET_INSTRUCTION=""
 
-## stack2
-# INSTRUCTION="stack the blocks in the order of red and yellow"
-# RESET_INSTRUCTION=""
-
-## stack3
-# INSTRUCTION="Stack the red, yellow, and purple blocks on the blue dish in that order."
-# RESET_INSTRUCTION=""
-
-## 
-# INSTRUCTION="Place the spoon between bread and cereal."
-# RESET_INSTRUCTION=""
-
-# INSTRUCTION="Close the pot by placing the lid on top."
-# RESET_INSTRUCTION=""
-
-### ==================== [dual arm task] ==================
-## towel folding
-# INSTRUCTION="fold the towel in half from top to bottom."
-# RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
-
-## move
-# INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
-# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left area"
-
-## hand over the sponge
-# INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
-# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
-
-## Reset_instruction(Empty is default: "move objects to certain position")
-
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=50  # 30→100 확장 (2026-05-20 마이그레이션). 기존 30 episode 는 seed 당 10 slot 의 0..2 위치로 재배치됨 — scripts/migrate_session_episodes_per_seed.py 참고
+NUM_EPISODES=100  # 30→100 확장 (2026-05-20 마이그레이션). 기존 30 episode 는 seed 당 10 slot 의 0..2 위치로 재배치됨 — scripts/migrate_session_episodes_per_seed.py 참고
 NUM_RANDOM_SEEDS=10  # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
@@ -88,19 +55,14 @@ EXECUTE_RESET=true # Reset 실행 여부
 RECORD_DATASET=true
 
 # ============================================================
-# Method3 phase 토글 (final_method3_spec §2)
+# Method3 phase 토글 (final_method3_spec)
 #   phase1 — Phase1 buffer-aware subgoal seeding (기본).
 #   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
-#            로드, 없으면 pipeline_config/phase2_config.yaml 의
-#            ``phase1_trained_vla_path`` + ``phase1_dataset_path`` 로 §6
-#            re-embedding 자동 구축. HF repo_id ("user/name") 도 그대로 인식 —
-#            로컬 캐시 miss 면 lerobot 가 다운로드.
 # ============================================================
-PHASE="phase1"
+PHASE="phase2"
 
-# Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_50"
+RESUME_SESSION="./results/pnp_ours_100"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

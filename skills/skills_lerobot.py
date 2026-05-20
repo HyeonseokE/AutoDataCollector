@@ -3067,6 +3067,13 @@ class LeRobotSkills:
             gripper_action="open",
             gripper_open_ratio=gripper_open_ratio,
         )
+        # --- Disabled (stationary release fallback, pre-33135af) ---------
+        # # Stationary release at place point. Re-enable when deformable
+        # # release is not needed (e.g., rigid blocks) and you want the
+        # # post-place lift to NOT be counted as a perturbed transit.
+        # release_desc = f"release object on {target_name}" if target_name else None
+        # self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
+        # ------------------------------------------------------------------
 
         # Post-place retreat clearance — 방금 놓은 물체를 빈 그리퍼가 치고
         # 지나가지 않도록, 다음 transit(retreat)이 lateral perturbation 전에

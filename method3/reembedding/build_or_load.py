@@ -110,6 +110,21 @@ def build_or_load_phase1_vector_db(
                     "observation_loader is required (raw_dataset has no "
                     "`load_observation` method to fall back on)")
 
+        # reembedding_config 가 caller 에서 명시 안 됐으면 phase2_config.yaml 의
+        # reembedding 섹션을 *자동* 로드 (subgoal_filter_radius_m 같은 옵션이
+        # 어떤 caller 든 자동 적용되도록).
+        if reembedding_config is None:
+            try:
+                from method3.config import load_phase2_config
+                from pathlib import Path as _P
+                _yaml = _P(__file__).resolve().parents[2] / "pipeline_config" / "phase2_config.yaml"
+                if _yaml.exists():
+                    _acq = load_phase2_config(_yaml, phase1_raw_dir="", phase2_raw_dir="")
+                    reembedding_config = _acq.reembedding
+                    print(f"[reembed] reembedding_config ← {_yaml} "
+                          f"(subgoal_filter_radius_m={reembedding_config.subgoal_filter_radius_m})")
+            except Exception as _e:
+                print(f"[reembed] yaml fallback failed ({_e}); using defaults")
         print(f"[reembed] building skill-wise vector DB (initial = P_phase1) ... "
               f"(raw_dataset={len(raw_dataset)} entries → {vdb_path})")
         db = build_phase1_vector_db(

@@ -222,20 +222,69 @@ TUNNEL_LOG="$LOG_DIR/tunnel.log"
 TUNNEL_PID_FILE="$LOG_DIR/tunnel.pid"
 SERVER_TAIL_LOG="$LOG_DIR/server_tail.log"
 
+# ControlMaster socket 의 stale 상태 정리.
+# 옛 master process 가 kill 된 후에도 ControlPath socket 파일이 *그대로 남아*,
+# 새 ssh 가 ControlMaster=auto 로 *stale master* 에 연결 시도 → silent fail
+# (tunnel.log 비어있음). 옛 master 가 *현재 살아있다면* 그 socket 은 유효하므로
+# 함부로 지우지 않는다 — 살아있는 connection 으로 ssh -O check 검사.
+sweep_stale_control_sockets() {
+  local cm_dir="$LOG_DIR/cm"
+  [ -d "$cm_dir" ] || return 0
+  local removed=0
+  shopt -s nullglob
+  for sock in "$cm_dir"/*; do
+    # 살아있는 master 인지 확인 (-O check). check 성공이면 valid → 건너뜀.
+    if env -u LD_LIBRARY_PATH -u LD_PRELOAD "$_SYS_SSH" \
+        -o "ControlPath=$sock" -O check placeholder 2>/dev/null; then
+      continue
+    fi
+    rm -f "$sock"
+    removed=$((removed + 1))
+  done
+  shopt -u nullglob
+  [ "$removed" -gt 0 ] && info "swept $removed stale ControlMaster socket(s) under $cm_dir"
+  return 0
+}
+
+# 50061 점유 process 의 *모든* pid 정리. tunnel.pid 파일에 *기록된 pid* 뿐 아니라
+# 다른 source (옛 background launcher, 사용자가 손수 띄운 tunnel 등) 의 잔재까지
+# bind 충돌의 모든 후보를 sweep.
+sweep_port_holders() {
+  local port="${1:-$LOCAL_PORT}"
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+  local pids
+  pids=$(lsof -ti ":$port" 2>/dev/null)
+  if [ -n "$pids" ]; then
+    info "killing port :$port holder(s): $pids"
+    # SIGTERM 먼저, 1초 후 SIGKILL
+    kill $pids 2>/dev/null || true
+    sleep 1
+    local survivors
+    survivors=$(lsof -ti ":$port" 2>/dev/null)
+    [ -n "$survivors" ] && kill -9 $survivors 2>/dev/null || true
+  fi
+}
+
 # ============================================================
 # Subcommand: stop
 # ============================================================
 if [ "${1:-}" = "stop" ]; then
   bold "Stopping local tunnel + remote server"
+  # 1) tunnel.pid 의 pid (있으면)
   if [ -f "$TUNNEL_PID_FILE" ]; then
     pid="$(cat "$TUNNEL_PID_FILE" 2>/dev/null || true)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" && info "tunnel killed (pid=$pid)"
+      kill "$pid" 2>/dev/null && info "tunnel killed (pid=$pid)"
     fi
     rm -f "$TUNNEL_PID_FILE"
-  else
-    info "no local tunnel pid file"
   fi
+  # 2) 같은 port 의 다른 잔재 (옛 background launcher 등)
+  sweep_port_holders "$LOCAL_PORT"
+  # 3) ControlMaster sockets — 살아있는 master 만 남기고 stale 제거
+  sweep_stale_control_sockets
+  # 4) 원격
   if [ -n "$REMOTE_HOST" ]; then
     info "killing remote tmux session: $TMUX_SESSION"
     ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
@@ -248,6 +297,10 @@ if [ "${1:-}" = "stop" ]; then
   fi
   exit 0
 fi
+
+# Start 분기 진입 직전에도 stale control socket sweep — 옛 background 가 띄운
+# master 의 잔재로 새 ssh -L 이 silent fail 하는 race 를 방지.
+sweep_stale_control_sockets
 
 # ============================================================
 # Sanity
@@ -365,8 +418,13 @@ fi
 # nohup 은 외부 command 이므로 bash function `ssh` 를 보지 못함 — 명시적으로
 # system binary + LD_LIBRARY_PATH 우회를 사용해야 conda env 의 OpenSSL ABI
 # mismatch 를 피한다 (위 ssh() wrapper 와 동일한 회피).
+# Tunnel ssh 는 *standalone* — ControlMaster multiplex 에서 제외. multiplex 로
+# 묶이면 stale/duplicate master 가 -L 추가 요청을 silent reject 하는 race 발생.
+# step 2 의 짧은 ssh 들은 그대로 ControlMaster 사용해서 sshd rate-limit 회피.
 nohup env -u LD_LIBRARY_PATH -u LD_PRELOAD "$_SYS_SSH" -N -T \
     "${SSH_OPTS[@]}" \
+    -o ControlMaster=no \
+    -o ControlPath=none \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ExitOnForwardFailure=yes \

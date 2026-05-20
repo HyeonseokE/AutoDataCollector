@@ -320,13 +320,17 @@ export RECORDING_CONFIG="$SERVER_RECORDING_CONFIG"
 export URDF="$SERVER_URDF"
 
 if command -v tmux >/dev/null 2>&1; then
-  # \$PATH 는 *원격 shell 이* expand → 탐지된 PATH 가 literal 로 tmux 명령에
-  # 박힘. 그 결과 tmux child shell 의 첫 줄이 PATH 를 명시 export 한 효과.
+  # tmux server 의 기존 환경(이전 옛 ENV_NAME 등)이 child 에 상속될 수 있어
+  # 우리가 export 한 변수만으로는 *tmux child shell* 에 전달이 보장되지 않음.
+  # 따라서 PATH/ENV_NAME/GPU_ID/HOST/PORT/RECORDING_CONFIG/URDF *모두* 를
+  # tmux 명령 인자에 literal 로 박아 child shell 의 첫 줄에서 명시 export.
   tmux new-session -d -s '$TMUX_SESSION' \
-      "PATH='\$PATH' bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log"
-  echo "  remote: tmux session started"
+      "PATH='\$PATH' ENV_NAME='\$ENV_NAME' GPU_ID='\$GPU_ID' HOST='\$HOST' PORT='\$PORT' RECORDING_CONFIG='\$RECORDING_CONFIG' URDF='\$URDF' bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log"
+  echo "  remote: tmux session started (ENV_NAME=\$ENV_NAME, GPU_ID=\$GPU_ID)"
 else
-  nohup env PATH="\$PATH" bash grpc_server/run_server.sh > /tmp/phase2_server.log 2>&1 &
+  nohup env PATH="\$PATH" ENV_NAME="\$ENV_NAME" GPU_ID="\$GPU_ID" \
+      HOST="\$HOST" PORT="\$PORT" RECORDING_CONFIG="\$RECORDING_CONFIG" URDF="\$URDF" \
+      bash grpc_server/run_server.sh > /tmp/phase2_server.log 2>&1 &
   echo "  remote: tmux not available — using nohup (pid=\$!)"
 fi
 REMOTE_CMD

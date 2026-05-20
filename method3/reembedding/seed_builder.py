@@ -56,7 +56,9 @@ class ReembeddingConfig:
 
 
 def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfig) -> list[int]:
-    """parquet bulk read 로 ee_xyz / target_xyz L2 < R 인 frame 만 keep (no video decode).
+    """parquet bulk read 로 ee_xyz 가 *모든 subgoal target 의 union ± R* 안에
+    있는 frame 만 keep (no video decode). spec 정신 — *transit candidate 의 kNN
+    neighbor* 도 cover (= 어느 subgoal 근처라도 keep).
 
     Returns sub-list of ``indices``. cheap-state access 실패 / 키 누락 시 indices 그대로.
     너무 적게 남으면 (subgoal_filter_min_keep) radius × 1.5 로 최대 3회 retry.
@@ -67,23 +69,25 @@ def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfi
         print("[reembed] subgoal-filter unavailable (no hf_dataset) — full re-embed")
         return indices
     hf = ds.hf_dataset
-    # proprio (ee_pos) — adapter 의 _proprio_key 우선, fallback 으로 표준 key
     ee_key = getattr(raw_dataset, "_proprio_key", None) or "observation.ee_pos.robot_xyzrpy"
     sg_key = "subtask.target_position"
     if ee_key not in hf.features or sg_key not in hf.features:
         print(f"[reembed] subgoal-filter unavailable (missing {ee_key} or {sg_key}) — full re-embed")
         return indices
-    # bulk column read — *video decode 없음*. hf_dataset[col] 은 lazy column access.
+    # bulk column read — lazy column access (no video decode)
     ee_all = np.asarray(hf[ee_key], dtype=np.float64)[:, :3]   # (N_full, 3)
     sg_all = np.asarray(hf[sg_key], dtype=np.float64)[:, :3]    # (N_full, 3)
-    # indices → global_idx (raw_dataset._index[i][0] 가 frame-level global)
+    # 모든 subgoal target 위치의 *unique 집합* — bulk pooled (spec 정신).
+    sg_unique = np.unique(sg_all, axis=0)                       # (N_sg, 3)
+    # 각 indices 의 ee 가 *어느 한 subgoal* 의 R 안에 있나 — broadcasting
     gidx = np.asarray([raw_dataset._index[i][0] for i in indices], dtype=int)
-    ee = ee_all[gidx]
-    sg = sg_all[gidx]
-    dist = np.linalg.norm(ee - sg, axis=-1)
+    ee = ee_all[gidx]                                            # (N_sel, 3)
+    # pairwise distance ee[N_sel,1,:] - sg_unique[1,N_sg,:] → norm axis=-1 → (N_sel, N_sg)
+    dmat = np.linalg.norm(ee[:, None, :] - sg_unique[None, :, :], axis=-1)
+    min_dist = dmat.min(axis=1)                                  # (N_sel,) — 가장 가까운 subgoal
     radius = float(cfg.subgoal_filter_radius_m)
     min_keep = int(cfg.subgoal_filter_min_keep)
-    mask = dist < radius
+    mask = min_dist < radius
     for _ in range(3):
         if int(mask.sum()) >= min_keep:
             break
@@ -91,10 +95,11 @@ def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfi
         print(f"[reembed] subgoal-filter R={radius:.3f}m kept {int(mask.sum())} (< {min_keep}); "
               f"expanding to {new_r:.3f}m")
         radius = new_r
-        mask = dist < radius
+        mask = min_dist < radius
     kept = [i for i, k in zip(indices, mask.tolist()) if k]
-    print(f"[reembed] subgoal-filter: {len(indices)} → {len(kept)} frames "
-          f"(R={radius:.3f}m, dist∈[{dist.min():.3f}, {dist.max():.3f}], median={np.median(dist):.3f})")
+    print(f"[reembed] subgoal-filter (bulk-pooled): {len(indices)} → {len(kept)} frames "
+          f"(R={radius:.3f}m, |sg_unique|={len(sg_unique)}, "
+          f"min_dist∈[{min_dist.min():.3f}, {min_dist.max():.3f}], median={np.median(min_dist):.3f})")
     return kept
 
 

@@ -94,12 +94,15 @@ def load_phase2_config(
     )
 
     re = raw.get("reembedding") or {}
+    _sg_r = re.get("subgoal_filter_radius_m")
     reembedding = ReembeddingConfig(
         dct_coeffs=dct,
         skip_invalid=bool(re.get("skip_invalid", False)),
         show_progress=bool(re.get("show_progress", True)),
         frame_stride=int(re.get("frame_stride", 1)),
         batch_size=int(re.get("batch_size", 32)),
+        subgoal_filter_radius_m=(None if _sg_r is None else float(_sg_r)),
+        subgoal_filter_min_keep=int(re.get("subgoal_filter_min_keep", 30)),
     )
 
     return Method3AcquisitionConfig(

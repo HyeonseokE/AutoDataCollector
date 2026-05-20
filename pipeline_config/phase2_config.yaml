@@ -111,6 +111,12 @@ reembedding:
   batch_size: 32               # GPU batched VLA forward 의 배치 크기.
                                # encoder 가 encode_batch 지원 시 N개 한 forward 로
                                # 처리해 GPU 활용도 N배. 1 = single-loop legacy.
+  # subgoal-aware filter (옵션 2) — ee_pos 와 subtask.target_position L2 distance
+  # < R 인 frame 만 re-embed. cheap parquet read 로 *video decode 없이* pre-pass.
+  # kNN 결과 보존 (candidate neighbor 는 어차피 subgoal 근처) — spec §6 의 *목적*
+  # 충족하면서 10x 가속. null 이면 spec 정석 전체 re-embed.
+  subgoal_filter_radius_m: 0.10    # 10 cm — robotic manipulation 표준 tolerance
+  subgoal_filter_min_keep: 30      # filter 후 frame 수가 이보다 적으면 R 자동 확장
 
 # =============================================================================
 # Phase2 Server (H100 gRPC) — 옛 phase2_server_infer_settings.yaml 통합 (2026-05-21)

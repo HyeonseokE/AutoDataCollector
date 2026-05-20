@@ -44,6 +44,58 @@ class ReembeddingConfig:
                                  # ``encode_batch`` 를 지원하면 N개 한 번에
                                  # forward → GPU 활용도 N배. 1 = single-loop
                                  # legacy 경로.
+    subgoal_filter_radius_m: float | None = None
+                                 # subgoal-aware filter (옵션 2). ee_pos 와
+                                 # subtask.target_position 의 L2 distance 가
+                                 # 이 반경 안의 frame 만 re-embed. None 이면
+                                 # 비활성 (=spec 정석 전체 re-embed).
+                                 # 권장 0.10 (= 10 cm), task tolerance.
+    subgoal_filter_min_keep: int = 30
+                                 # filter 후 frame 수가 이보다 적으면 radius
+                                 # 자동 확장 (× 1.5 까지 최대 3회 retry).
+
+
+def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfig) -> list[int]:
+    """parquet bulk read 로 ee_xyz / target_xyz L2 < R 인 frame 만 keep (no video decode).
+
+    Returns sub-list of ``indices``. cheap-state access 실패 / 키 누락 시 indices 그대로.
+    너무 적게 남으면 (subgoal_filter_min_keep) radius × 1.5 로 최대 3회 retry.
+    """
+    import numpy as np
+    ds = getattr(raw_dataset, "_dataset", None)
+    if ds is None or not hasattr(ds, "hf_dataset"):
+        print("[reembed] subgoal-filter unavailable (no hf_dataset) — full re-embed")
+        return indices
+    hf = ds.hf_dataset
+    # proprio (ee_pos) — adapter 의 _proprio_key 우선, fallback 으로 표준 key
+    ee_key = getattr(raw_dataset, "_proprio_key", None) or "observation.ee_pos.robot_xyzrpy"
+    sg_key = "subtask.target_position"
+    if ee_key not in hf.features or sg_key not in hf.features:
+        print(f"[reembed] subgoal-filter unavailable (missing {ee_key} or {sg_key}) — full re-embed")
+        return indices
+    # bulk column read — *video decode 없음*. hf_dataset[col] 은 lazy column access.
+    ee_all = np.asarray(hf[ee_key], dtype=np.float64)[:, :3]   # (N_full, 3)
+    sg_all = np.asarray(hf[sg_key], dtype=np.float64)[:, :3]    # (N_full, 3)
+    # indices → global_idx (raw_dataset._index[i][0] 가 frame-level global)
+    gidx = np.asarray([raw_dataset._index[i][0] for i in indices], dtype=int)
+    ee = ee_all[gidx]
+    sg = sg_all[gidx]
+    dist = np.linalg.norm(ee - sg, axis=-1)
+    radius = float(cfg.subgoal_filter_radius_m)
+    min_keep = int(cfg.subgoal_filter_min_keep)
+    mask = dist < radius
+    for _ in range(3):
+        if int(mask.sum()) >= min_keep:
+            break
+        new_r = radius * 1.5
+        print(f"[reembed] subgoal-filter R={radius:.3f}m kept {int(mask.sum())} (< {min_keep}); "
+              f"expanding to {new_r:.3f}m")
+        radius = new_r
+        mask = dist < radius
+    kept = [i for i, k in zip(indices, mask.tolist()) if k]
+    print(f"[reembed] subgoal-filter: {len(indices)} → {len(kept)} frames "
+          f"(R={radius:.3f}m, dist∈[{dist.min():.3f}, {dist.max():.3f}], median={np.median(dist):.3f})")
+    return kept
 
 
 def _fallback_progress(iterable, total: int, label: str):
@@ -107,10 +159,16 @@ def build_phase1_vector_db(
     stride = max(1, int(cfg.frame_stride))
     N_full = len(raw_dataset)
     indices = list(range(0, N_full, stride))
-    N = len(indices)
     if stride > 1:
-        print(f"[reembed] frame_stride={stride} → 처리할 entry {N_full} → {N} "
-              f"({100.0 * N / max(1, N_full):.1f}%)")
+        print(f"[reembed] frame_stride={stride} → 처리할 entry {N_full} → {len(indices)} "
+              f"({100.0 * len(indices) / max(1, N_full):.1f}%)")
+    # subgoal-aware filter (옵션 2) — yaml.reembedding.subgoal_filter_radius_m 으로
+    # 활성화. parquet 의 cheap state (ee_pos / target_position) 로 L2 < R 인 frame
+    # 만 re-embed. *video decode 없이* bulk pre-pass — kNN 결과는 보존 (candidate
+    # 의 neighbor 가 어차피 subgoal 근처에 있음). spec §6 의 *목적* 충족하면서 10x.
+    if cfg.subgoal_filter_radius_m is not None:
+        indices = _apply_subgoal_filter(raw_dataset, indices, cfg)
+    N = len(indices)
 
     batch_size = max(1, int(cfg.batch_size))
     use_batch = batch_size > 1 and hasattr(encoder, "encode_batch")

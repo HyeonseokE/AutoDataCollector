@@ -32,13 +32,21 @@ def load_g_seed(session_dir: str | Path, filename: str = "subgoal_buffer.npz") -
 
     파일이 없거나 비어 있으면 빈 buffer 를 반환 (caller 가 ``len(buffer)==0``
     으로 분기). exception 은 던지지 않는다 — phase2 setup 이 보호적이어야 함.
+
+    Note: SubgoalBuffer.load 는 *instance method* (self._file 에서 읽음). 옛
+    코드는 classmethod 처럼 ``SubgoalBuffer.load(str(path))`` 로 호출해 unbound
+    호출 → str 이 self 자리 → AttributeError → silent empty buffer 라는 bug 가
+    있었다. 올바른 사용법: ``SubgoalBuffer(buffer_file=path); buf.load()``.
     """
     path = Path(session_dir) / filename
     if not path.exists():
         return SubgoalBuffer()
     try:
-        return SubgoalBuffer.load(str(path))
-    except Exception:
+        buf = SubgoalBuffer(buffer_file=str(path))
+        buf.load()
+        return buf
+    except Exception as e:
+        print(f"[load_g_seed] error loading {path}: {e}")
         return SubgoalBuffer()
 
 

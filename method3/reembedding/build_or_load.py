@@ -125,11 +125,27 @@ def build_or_load_phase1_vector_db(
                           f"(subgoal_filter_radius_m={reembedding_config.subgoal_filter_radius_m})")
             except Exception as _e:
                 print(f"[reembed] yaml fallback failed ({_e}); using defaults")
+        # G_seed buffer 로드 — Phase1 누적 subgoal anchor (subgoal_filter 의 진짜
+        # 기준). session_dir / subgoal_buffer.npz 가 있고 entries 가 있으면 사용,
+        # 없으면 build_phase1_vector_db 가 dataset column fallback.
+        g_seed_buf = None
+        try:
+            from method3.phase2_mi_selection.seed_anchor import load_g_seed
+            g_seed_buf = load_g_seed(session_dir)
+            if g_seed_buf.total_size() > 0:
+                print(f"[reembed] G_seed buffer loaded: {g_seed_buf.total_size()} entries "
+                      f"across {len(g_seed_buf.skill_ids())} skills "
+                      f"(skills={g_seed_buf.skill_ids()})")
+            else:
+                print(f"[reembed] G_seed buffer empty — filter falls back to dataset column")
+        except Exception as e:
+            print(f"[reembed] G_seed load failed ({e}) — filter falls back to dataset column")
         print(f"[reembed] building skill-wise vector DB (initial = P_phase1) ... "
               f"(raw_dataset={len(raw_dataset)} entries → {vdb_path})")
         db = build_phase1_vector_db(
             raw_dataset, encoder, observation_loader,
             reembedding_config or ReembeddingConfig(),
+            g_seed_buffer=g_seed_buf,
         )
     finally:
         # 임시로 만든 encoder 만 close (외부에서 주입한 encoder 는 caller 가 관리)

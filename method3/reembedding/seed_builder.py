@@ -55,13 +55,17 @@ class ReembeddingConfig:
                                  # 자동 확장 (× 1.5 까지 최대 3회 retry).
 
 
-def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfig) -> list[int]:
-    """parquet bulk read 로 ee_xyz 가 *모든 subgoal target 의 union ± R* 안에
-    있는 frame 만 keep (no video decode). spec 정신 — *transit candidate 의 kNN
-    neighbor* 도 cover (= 어느 subgoal 근처라도 keep).
+def _apply_subgoal_filter(
+    raw_dataset, indices: list[int], cfg: ReembeddingConfig,
+    g_seed_buffer=None,
+) -> list[int]:
+    """ee_xyz 가 *모든 subgoal anchor 의 union ± R* 안에 있는 frame 만 keep.
+    no video decode (parquet bulk + buffer cheap read).
 
-    Returns sub-list of ``indices``. cheap-state access 실패 / 키 누락 시 indices 그대로.
-    너무 적게 남으면 (subgoal_filter_min_keep) radius × 1.5 로 최대 3회 retry.
+    Subgoal pool 우선순위:
+      1) ``g_seed_buffer`` (Phase1 누적 G_seed) — spec 의 진짜 Phase2 anchor
+      2) dataset column ``skill.goal_position.robot_xyzrpy`` — fallback
+      3) dataset column ``subtask.target_position`` — last fallback
     """
     import numpy as np
     ds = getattr(raw_dataset, "_dataset", None)
@@ -70,21 +74,31 @@ def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfi
         return indices
     hf = ds.hf_dataset
     ee_key = getattr(raw_dataset, "_proprio_key", None) or "observation.ee_pos.robot_xyzrpy"
-    # subgoal: 우선 *frame-by-frame 변동* 컬럼 (skill.goal_position.robot_xyzrpy
-    # 가 진짜 dynamic goal — subtask.target_position 은 placeholder 인 경우 많음).
-    sg_candidates = (
-        "skill.goal_position.robot_xyzrpy",   # 우선순위 1 — frame-by-frame
-        "subtask.target_position",            # fallback (placeholder 일 수 있음)
-    )
-    sg_key = next((k for k in sg_candidates if k in hf.features), None)
-    if ee_key not in hf.features or sg_key is None:
-        print(f"[reembed] subgoal-filter unavailable (missing {ee_key} or all of {sg_candidates}) — full re-embed")
+    if ee_key not in hf.features:
+        print(f"[reembed] subgoal-filter unavailable (missing {ee_key}) — full re-embed")
         return indices
-    # bulk column read — lazy column access (no video decode)
     ee_all = np.asarray(hf[ee_key], dtype=np.float64)[:, :3]   # (N_full, 3)
-    sg_all = np.asarray(hf[sg_key], dtype=np.float64)[:, :3]    # (N_full, 3)
-    # 모든 subgoal target 위치의 *unique 집합* — bulk pooled (spec 정신).
-    sg_unique = np.unique(sg_all, axis=0)                       # (N_sg, 3)
+
+    # ── subgoal pool 결정 ────────────────────────────────────────────────
+    sg_unique = None
+    sg_source = None
+    if g_seed_buffer is not None and g_seed_buffer.total_size() > 0:
+        pool = [g_seed_buffer.seed_subgoals(s) for s in g_seed_buffer.skill_ids()]
+        pool = [p for p in pool if p.size > 0]
+        if pool:
+            sg_unique = np.unique(np.concatenate(pool, axis=0), axis=0)
+            sg_source = f"G_seed (skills={g_seed_buffer.skill_ids()})"
+    if sg_unique is None:
+        # fallback to dataset column
+        for cand in ("skill.goal_position.robot_xyzrpy", "subtask.target_position"):
+            if cand in hf.features:
+                col = np.asarray(hf[cand], dtype=np.float64)[:, :3]
+                sg_unique = np.unique(col, axis=0)
+                sg_source = f"column={cand}"
+                break
+        if sg_unique is None:
+            print("[reembed] subgoal-filter unavailable (no G_seed + no fallback column) — full re-embed")
+            return indices
     # 각 indices 의 ee 가 *어느 한 subgoal* 의 R 안에 있나 — broadcasting
     gidx = np.asarray([raw_dataset._index[i][0] for i in indices], dtype=int)
     ee = ee_all[gidx]                                            # (N_sel, 3)
@@ -104,7 +118,7 @@ def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfi
         mask = min_dist < radius
     kept = [i for i, k in zip(indices, mask.tolist()) if k]
     print(f"[reembed] subgoal-filter (bulk-pooled): {len(indices)} → {len(kept)} frames "
-          f"(R={radius:.3f}m, sg_key={sg_key}, |sg_unique|={len(sg_unique)}, "
+          f"(R={radius:.3f}m, source={sg_source}, |sg_unique|={len(sg_unique)}, "
           f"min_dist∈[{min_dist.min():.3f}, {min_dist.max():.3f}], median={np.median(min_dist):.3f})")
     return kept
 
@@ -151,6 +165,7 @@ def build_phase1_vector_db(
     encoder: VLAStateEncoder,
     observation_loader: Callable[[dict], np.ndarray],
     config: ReembeddingConfig | None = None,
+    g_seed_buffer=None,
 ) -> SkillVectorDB:
     """Phase1 raw dataset 을 re-embedding 하여 ``P_phase1`` vector DB 를 만든다 (§6).
 
@@ -174,11 +189,10 @@ def build_phase1_vector_db(
         print(f"[reembed] frame_stride={stride} → 처리할 entry {N_full} → {len(indices)} "
               f"({100.0 * len(indices) / max(1, N_full):.1f}%)")
     # subgoal-aware filter (옵션 2) — yaml.reembedding.subgoal_filter_radius_m 으로
-    # 활성화. parquet 의 cheap state (ee_pos / target_position) 로 L2 < R 인 frame
-    # 만 re-embed. *video decode 없이* bulk pre-pass — kNN 결과는 보존 (candidate
-    # 의 neighbor 가 어차피 subgoal 근처에 있음). spec §6 의 *목적* 충족하면서 10x.
+    # 활성화. parquet bulk pre-pass + G_seed buffer (있으면 우선) 로 ee 가 어느
+    # subgoal anchor R 안에 있는 frame 만 keep. *video decode 없이* 가속.
     if cfg.subgoal_filter_radius_m is not None:
-        indices = _apply_subgoal_filter(raw_dataset, indices, cfg)
+        indices = _apply_subgoal_filter(raw_dataset, indices, cfg, g_seed_buffer=g_seed_buffer)
     N = len(indices)
 
     batch_size = max(1, int(cfg.batch_size))

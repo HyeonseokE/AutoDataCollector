@@ -490,34 +490,86 @@ else
 fi
 
 # ============================================================
-# Step 4 — Ready RPC polling
+# Step 4 — Ready RPC polling (30초 간격, 각 시도 결과 log 에 누적)
 # ============================================================
-bold "step 4/4  poll Ready RPC (timeout ${SETTLE_S}s)"
+bold "step 4/4  poll Ready RPC (timeout ${SETTLE_S}s, 30s interval)"
 
+# 시작 전 local python env 진단 — grpcio 버전 mismatch / import fail 즉시 잡기
+{
+  echo "============================================================"
+  echo "Step 4 start at $(date)"
+  echo "============================================================"
+  echo "[env-diagnostic]"
+  echo "  python:     $(command -v python)"
+  echo "  python ver: $(python --version 2>&1)"
+  echo -n "  grpcio:     "; python -c "import grpc; print(grpc.__version__)" 2>&1 | head -1
+  echo -n "  pb2 import: "; python -c "from grpc_server.client import PreselectiveClient; print('OK')" 2>&1 | head -3
+  echo "============================================================"
+} > "$SERVER_TAIL_LOG" 2>&1
+# 사용자에게 진단 보여줌 (stdout 도)
+grpcio_ver=$(python -c "import grpc; print(grpc.__version__)" 2>/dev/null || echo "missing")
+info "local: python=$(command -v python | head -1)  grpcio=$grpcio_ver"
+if [ "$grpcio_ver" = "missing" ]; then
+  err "local python 에 grpcio 미설치 — Ready polling 영원히 fail. 다음 중 하나:"
+  err "  • conda activate lerobot_cap   (이미 grpcio 설치된 env)"
+  err "  • pip install -U grpcio grpcio-tools"
+  exit 4
+fi
+# pb2 stub 의 grpcio 최소 버전 검사 (1.80.0 ↑) — 1.78 같이 낮으면 즉시 안내
+if ! python -c "from grpc_server.client import PreselectiveClient" 2>/dev/null; then
+  err "grpc_server.client import fail — 가장 흔한 원인: grpcio 버전 < 1.80 (stubs 가 요구)"
+  err "  자세한 진단:"
+  python -c "from grpc_server.client import PreselectiveClient" 2>&1 | sed 's/^/    /'
+  err "  해결:"
+  err "    conda activate lerobot_cap   또는"
+  err "    pip install -U grpcio>=1.80.0 grpcio-tools"
+  exit 4
+fi
+
+POLL_INTERVAL=${POLL_INTERVAL:-30}
 start_ts=$(date +%s)
 ok=0
+attempt=0
 while [ $(( $(date +%s) - start_ts )) -lt "$SETTLE_S" ]; do
-  if python -m grpc_server.tools.check_ready --address "127.0.0.1:$LOCAL_PORT" \
-        > "$SERVER_TAIL_LOG" 2>&1; then
+  attempt=$((attempt + 1))
+  elapsed=$(( $(date +%s) - start_ts ))
+  # 각 시도의 stdout/stderr 를 *append* — 사용자가 server-tail-log 에서 모든
+  # 시도의 에러 메시지 추적 가능.
+  {
+    echo
+    echo "---------- attempt $attempt @ elapsed ${elapsed}s ----------"
+    if python -m grpc_server.tools.check_ready --address "127.0.0.1:$LOCAL_PORT" 2>&1; then
+      echo "STATUS: OK"
+    else
+      ec=$?
+      echo "STATUS: FAIL (exit $ec)"
+    fi
+  } >> "$SERVER_TAIL_LOG" 2>&1
+  # OK sentinel 검사
+  if tail -10 "$SERVER_TAIL_LOG" | grep -q "^STATUS: OK$"; then
     ok=1
     break
   fi
-  printf "."
-  sleep 2
+  info "attempt $attempt (${elapsed}s) — Ready 응답 없음. ${POLL_INTERVAL}s 후 재시도. log=$SERVER_TAIL_LOG"
+  sleep "$POLL_INTERVAL"
 done
-echo
 
 if [ "$ok" = "1" ]; then
-  bold "READY"
-  cat "$SERVER_TAIL_LOG"
+  bold "READY (after $attempt attempt(s))"
+  # 마지막 OK attempt 의 JSON 응답만 사용자에게
+  awk '/^---------- attempt/{block=""} {block=block"\n"$0} END{print block}' "$SERVER_TAIL_LOG"
   echo
   info "Client 측은 그대로 ws3.sh 실행 — yaml 의 127.0.0.1:$LOCAL_PORT 이 tunnel 됨"
   info "서버 정지: bash $0 stop"
-  info "remote 서버 로그 tail: ssh ${SSH_OPTS[*]:-} $REMOTE_HOST 'tail -f /tmp/phase2_server.log'"
+  info "전체 polling log: $SERVER_TAIL_LOG"
 else
-  warn "Ready 응답 없음 — 서버가 아직 모델 로딩 중일 수 있음."
-  warn "remote 로그 확인:  ssh ${SSH_OPTS[*]:-} $REMOTE_HOST 'tail -50 /tmp/phase2_server.log'"
-  warn "tunnel 로그:       tail -20 $TUNNEL_LOG"
-  warn "tunnel 은 계속 살아있음. 모델 로딩 끝나면 client 자동 연결됨."
+  warn "Ready 응답 없음 — ${attempt} attempt 동안 timeout (${SETTLE_S}s). 진단:"
+  warn "  전체 polling log:  $SERVER_TAIL_LOG   ← 모든 attempt 의 에러 메시지"
+  warn "  remote 서버 log:   ssh ${SSH_OPTS[*]:-} $REMOTE_HOST 'tail -50 /tmp/phase2_server.log'"
+  warn "  tunnel log:        tail -20 $TUNNEL_LOG"
+  warn "  tunnel 은 계속 살아있음. 모델 로딩 끝나면 client 자동 연결됨."
+  echo
+  echo "--- $SERVER_TAIL_LOG 의 마지막 attempt ---"
+  awk '/^---------- attempt/{block=""} {block=block"\n"$0} END{print block}' "$SERVER_TAIL_LOG" | tail -20
   exit 3
 fi

@@ -87,17 +87,47 @@ def setup_method3_phase2_server(
         Method3ServerStack 또는 None (preselective_filter / encoder 가 yaml 에서
         비활성화돼 있으면).
     """
-    # encoder yaml block — recording_config 의 preselective_filter.policy 에 있음
-    # (옛 IG·AC 와 같은 위치 공유 — 호환 보존).
-    psf_raw = recording_cfg.get("preselective_filter") or {}
-    if not psf_raw:
-        # 새 yaml convention 시도: phase2_yaml 안의 skill_planner_transport / policy
-        ph2_raw = _load_phase2_yaml(recording_cfg, Path(phase2_yaml) if phase2_yaml else None)
-        psf_raw = (
-            ph2_raw.get("skill_planner_transport")
-            or ph2_raw.get("preselective_filter")
-            or {}
-        )
+    # 우선순위:
+    #   1) phase2_server_infer_settings.yaml (server 운영 설정 — endpoint/policy/buffer)
+    #   2) phase2_config.yaml.skill_planner_transport (mode 만 가짐)
+    #   3) phase2_config.yaml.preselective_filter      (legacy alias)
+    #   4) recording_config.preselective_filter         (legacy fallback)
+    psf_raw: dict = {}
+    ph2_yaml_path = Path(phase2_yaml) if phase2_yaml else None
+    ph2_raw = _load_phase2_yaml(recording_cfg, ph2_yaml_path)
+    psf_raw = dict(
+        ph2_raw.get("skill_planner_transport")
+        or ph2_raw.get("preselective_filter")
+        or recording_cfg.get("preselective_filter")
+        or {}
+    )
+    # 서버 운영 설정 머지 — phase2_server_infer_settings.yaml
+    server_yaml_path = (
+        (ph2_yaml_path.parent / "phase2_server_infer_settings.yaml")
+        if ph2_yaml_path else None
+    )
+    if server_yaml_path and server_yaml_path.exists():
+        try:
+            with open(server_yaml_path, "r", encoding="utf-8") as f:
+                srv_cfg = yaml.safe_load(f) or {}
+            t = srv_cfg.get("transport") or {}
+            psf_raw.setdefault("transport_address", t.get("address"))
+            psf_raw.setdefault("transport_timeout_s", t.get("timeout_s"))
+            psf_raw.setdefault("debug_verbose", t.get("debug_verbose", False))
+            if "policy" not in psf_raw and "policy" in srv_cfg:
+                psf_raw["policy"] = srv_cfg["policy"]
+            if "selector" not in psf_raw and "selector" in srv_cfg:
+                psf_raw["selector"] = srv_cfg["selector"]
+            # buffer override
+            buf = srv_cfg.get("buffer") or {}
+            if db_save_dir is None and buf.get("save_dir"):
+                db_save_dir = buf["save_dir"]
+            if buf.get("filename"):
+                db_filename = buf["filename"]
+            print(f"[method3_setup] server-yaml ← {server_yaml_path}")
+        except Exception as e:
+            print(f"[method3_setup] server yaml read failed ({e})")
+
     if not psf_raw:
         return None
 
@@ -108,7 +138,7 @@ def setup_method3_phase2_server(
         return None
 
     # 1) VLA encoder (frozen) — shared dep, encode + (옵션) denoise loss
-    from preselective_filter.vectorDB.vla_embedding import make_vla_key_extractor
+    from method3.vectorDB.vla_embedding import make_vla_key_extractor
     encoder = make_vla_key_extractor(
         checkpoint=str(ckpt),
         device=str(policy_cfg.get("device", "cuda")),

@@ -144,7 +144,7 @@ class PreselectiveClient:
 
         ``max_frames`` caps how many frames are streamed (quick checks).
         """
-        from preselective_filter.integration import (
+        from method3.phase2_server_inference.demo_ingest import (
             all_episode_indices,
             open_chunked_dataset,
         )

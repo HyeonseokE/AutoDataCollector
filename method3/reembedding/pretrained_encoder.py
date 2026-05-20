@@ -50,7 +50,7 @@ class PretrainedVLAStateEncoder:
             family: smolvla / pi0 / pi05 / groot 강제 지정 (None → 경로로 추론).
             debug_verbose: VLAKeyExtractor 디버그 로그.
         """
-        from preselective_filter.vectorDB.vla_embedding import make_vla_key_extractor
+        from method3.vectorDB.vla_embedding import make_vla_key_extractor
 
         self._extractor = make_vla_key_extractor(
             checkpoint=str(checkpoint_path),

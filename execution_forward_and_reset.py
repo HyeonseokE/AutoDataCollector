@@ -340,7 +340,7 @@ class ForwardAndResetPipeline(BasePipeline):
         # owns the planner in that case).
         self._setup_skill_perturbation_on_skills()
         # Method 3 (pre-selective acquisition) is wired later, at run time —
-        # see _setup_preselective_filter_on_skills(session_dir). It is deferred
+        # see _setup_skill_planner_transport(session_dir). It is deferred
         # so the FAISS buffer can live inside the run's session folder.
 
         return self._skills
@@ -388,7 +388,7 @@ class ForwardAndResetPipeline(BasePipeline):
             return nullcontext()
         sg = getattr(self, "_subgoal_phase", {"forward": False, "reset": False})
         sk = getattr(self, "_skill_planner_phase", {"forward": False, "reset": False})
-        pf = getattr(self, "_preselective_phase", {"forward": False, "reset": False})
+        pf = getattr(self, "_skill_planner_phase_flags", {"forward": False, "reset": False})
         return skills.systems_disabled(
             subgoal=not sg.get(phase, False),
             skill_planner=not sk.get(phase, False),
@@ -601,7 +601,7 @@ class ForwardAndResetPipeline(BasePipeline):
         """Bind the buffer-aware subgoal buffer file to the run's session dir.
 
         Called once the session directory exists (alongside
-        ``_setup_preselective_filter_on_skills``). A relative ``buffer_file``
+        ``_setup_skill_planner_transport``). A relative ``buffer_file``
         resolves to ``<session_dir>/<buffer_file>`` so the buffer lives inside
         the run's session folder; an absolute path is used as-is. Then the
         file is loaded (preload — picks up an existing buffer on session
@@ -785,7 +785,7 @@ class ForwardAndResetPipeline(BasePipeline):
                     "selection 은 argmax M_MI 로 fallback (backward-compat)"
                 )
                 return None
-            from preselective_filter.vectorDB.vla_embedding import (
+            from method3.vectorDB.vla_embedding import (
                 make_vla_key_extractor,
             )
             from method3.phase2_mi_selection import (
@@ -994,7 +994,11 @@ class ForwardAndResetPipeline(BasePipeline):
                 with open(ph2_path, "r") as f:
                     ph2_cfg = _yaml.safe_load(f) or {}
                 skill_raw = ph2_cfg.get("skill_perturbation") or {}
-                psf_raw = ph2_cfg.get("preselective_filter") or {}
+                psf_raw = (
+                    ph2_cfg.get("skill_planner_transport")
+                    or ph2_cfg.get("preselective_filter")
+                    or {}
+                )
                 if skill_raw:
                     print(f"[Skill Perturbation] phase2_config.yaml ← {ph2_path}")
             except Exception as e:
@@ -1023,14 +1027,16 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         self._skill_planner_phase = {"forward": fwd, "reset": reset}
 
-        # When preselective_filter is set to gRPC transport, the remote server
-        # owns curobo + selection. Skip local backend creation entirely — the
-        # GrpcPlannerClient adapter installed by _setup_preselective_filter_on_skills
-        # will satisfy skills_lerobot's plan_batch contract on this side.
-        if str(psf_raw.get("transport", "local")).lower() == "grpc":
+        # When skill_planner_transport mode is grpc, the remote H100 server owns
+        # curobo + selection. Skip local backend creation — GrpcPlannerClient
+        # adapter installed by _setup_skill_planner_transport satisfies
+        # skills_lerobot's plan_batch contract on this side.
+        # New key: mode. Legacy: transport.
+        _mode = str(psf_raw.get("mode") or psf_raw.get("transport") or "local").lower()
+        if _mode == "grpc":
             print(
-                "[Skill Perturbation] transport=grpc — local skill planner skipped; "
-                "GrpcPlannerClient will be installed by preselective setup."
+                "[Skill Perturbation] mode=grpc — local skill planner skipped; "
+                "GrpcPlannerClient is installed by skill_planner_transport."
             )
             return
 
@@ -1155,42 +1161,74 @@ class ForwardAndResetPipeline(BasePipeline):
                 pass
 
     # ------------------------------------------------------------------
-    # Method 3 — pre-selective acquisition (preselective_filter)
+    # Method3 phase2 — skill planner transport (gRPC to H100 server)
     # ------------------------------------------------------------------
-    def _setup_preselective_filter_on_skills(self, session_dir: str | None = None) -> None:
-        """Read preselective_filter from recording_config and wire a hook.
+    def _setup_skill_planner_transport(self, session_dir: str | None = None) -> None:
+        """Wire the skill planner — local CuroboBackend or remote H100 gRPC.
 
-        Called at run time (after the session folder exists) so the FAISS
-        buffer can be created inside it: when the yaml has no explicit
-        ``buffer.root``, the buffer lives at ``<session_dir>/preselective_buffer``.
+        Read order:
+          1. ``pipeline_config/phase2_config.yaml.skill_planner_transport`` (신규)
+          2. ``pipeline_config/phase2_config.yaml.preselective_filter`` (legacy alias)
+          3. ``recording_config_ws*.yaml.preselective_filter`` (legacy fallback)
 
-        Silent no-op when recording_config is absent or
-        preselective_filter.enabled is false. When enabled, builds a
-        FAISS-retrieval Selector + frozen VLA encoder via
-        preselective_filter.integration.setup_preselective_filter and attaches a
-        candidate selector hook to skills via ``set_skill_candidate_selector``.
+        활성화 조건: yaml 의 ``mode`` 가 ``grpc`` 또는 ``local`` 일 때. ``disabled``
+        / 미설정 / ``enabled_forward=false`` 면 silent no-op → robot 은 cartesian-
+        line trajectory 그대로 (method3 phase2 useful-OOD selection 비활성).
+
+        gRPC mode: H100 server (preselective_rpc.server) 가 method3 Phase2MISelector
+        를 운영. 이 client 측은 GrpcPlannerClient 를 ``skills.set_skill_planner_client``
+        에 install 만 한다. server 가 candidate 1개만 return 하므로 별도 selector
+        hook 은 필요 없음 (``skills.set_skill_candidate_selector(None)``).
         """
-        self._preselective_selector = None
-        self._preselective_encoder = None
-        self._preselective_phase = {"forward": False, "reset": False}
-        self._preselective_debug = False  # overridden from psf_raw.debug_verbose
-        self._preselective_chunk_size = 50  # overridden from psf_raw.selector
-        self._preselective_ingest_thread = None  # background demo-ingest thread
+        self._skill_planner_selector = None
+        self._skill_planner_encoder = None
+        self._skill_planner_phase_flags = {"forward": False, "reset": False}
+        self._skill_planner_debug = False
+        self._skill_planner_chunk_size = 50
+        self._skill_planner_ingest_thread = None
 
-        # 우선순위: phase2_config.yaml.preselective_filter → recording_config.preselective_filter
+        # mode 결정 — phase2_config.yaml.skill_planner_transport.mode 만 읽는다.
+        # endpoint / policy / buffer 등 server 운영 설정은 server yaml 에서 머지.
         psf_raw: dict = {}
-        ph2_path = Path(__file__).resolve().parent / "pipeline_config" / "phase2_config.yaml"
-        if ph2_path.exists():
+        full_cfg: dict = {}      # legacy fallback container — 미사용 path 라도 정의 보장
+        cfg_src: str = ""
+        pkg_root = Path(__file__).resolve().parent / "pipeline_config"
+        ph2_path = pkg_root / "phase2_config.yaml"
+        server_yaml_path = pkg_root / "phase2_server_infer_settings.yaml"
+        try:
+            import yaml as _yaml
+        except ImportError:
+            _yaml = None
+        if _yaml and ph2_path.exists():
             try:
-                import yaml as _yaml
                 with open(ph2_path, "r") as f:
                     ph2_cfg = _yaml.safe_load(f) or {}
-                psf_raw = ph2_cfg.get("preselective_filter") or {}
+                psf_raw = ph2_cfg.get("skill_planner_transport") or ph2_cfg.get("preselective_filter") or {}
                 if psf_raw:
-                    print(f"[preselective_filter] phase2_config.yaml ← {ph2_path}")
+                    key = "skill_planner_transport" if ph2_cfg.get("skill_planner_transport") else "preselective_filter (legacy)"
+                    cfg_src = f"phase2_config.yaml [{key}]"
+                    print(f"[skill_planner_transport] mode-yaml ← {ph2_path} [{key}]")
             except Exception as e:
-                print(f"[preselective_filter] phase2_config.yaml read failed ({e}); "
+                print(f"[skill_planner_transport] phase2_config.yaml read failed ({e}); "
                       f"falling back to recording_config")
+        # server 운영 설정 머지 — endpoint / policy / buffer / debug
+        if _yaml and server_yaml_path.exists():
+            try:
+                with open(server_yaml_path, "r") as f:
+                    srv_cfg = _yaml.safe_load(f) or {}
+                # 평탄화: transport.address → transport_address, transport.timeout_s → transport_timeout_s
+                t = srv_cfg.get("transport") or {}
+                psf_raw.setdefault("transport_address", t.get("address"))
+                psf_raw.setdefault("transport_timeout_s", t.get("timeout_s"))
+                psf_raw.setdefault("debug_verbose", t.get("debug_verbose", False))
+                # policy / selector 도 머지
+                if "policy" not in psf_raw and "policy" in srv_cfg:
+                    psf_raw["policy"] = srv_cfg["policy"]
+                if "selector" not in psf_raw and "selector" in srv_cfg:
+                    psf_raw["selector"] = srv_cfg["selector"]
+                print(f"[skill_planner_transport] server-yaml ← {server_yaml_path}")
+            except Exception as e:
+                print(f"[skill_planner_transport] server yaml read failed ({e})")
         if not psf_raw and self.recording_config:
             cfg_path = Path(self.recording_config)
             if cfg_path.exists():
@@ -1200,23 +1238,34 @@ class ForwardAndResetPipeline(BasePipeline):
                         full_cfg = _yaml.safe_load(f) or {}
                     psf_raw = full_cfg.get("preselective_filter") or {}
                 except Exception as e:
-                    print(f"[preselective_filter] failed to read recording_config: {e}")
+                    print(f"[skill_planner_transport] failed to read recording_config: {e}")
                     return
         if not psf_raw:
             return
-        self._preselective_debug = bool(psf_raw.get("debug_verbose", False))
-        # preselective_filter is forward-only by design — reset never plans
-        # with curobo, so there is no enabled_reset knob.
-        fwd = bool(psf_raw.get("enabled_forward", psf_raw.get("enabled", False)))
-        if not fwd:
+        self._skill_planner_debug = bool(psf_raw.get("debug_verbose", False))
+        # forward-only by design — reset 은 curobo plan 안 함.
+        # 신규: mode (disabled | grpc | local). 레거시: transport + enabled_forward.
+        mode = str(psf_raw.get("mode", "")).strip().lower()
+        if not mode:
+            # legacy: transport=grpc + enabled_forward=true 이면 mode=grpc 로 해석.
+            transport = str(psf_raw.get("transport", "")).strip().lower()
+            legacy_enabled = bool(psf_raw.get("enabled_forward", psf_raw.get("enabled", False)))
+            if not legacy_enabled:
+                mode = "disabled"
+            else:
+                mode = transport or "local"
+        if mode == "disabled":
+            print("[skill_planner_transport] mode=disabled — skill planner 미설치 "
+                  "(robot 은 cartesian-line trajectory). gRPC 활성화: yaml 의 "
+                  "skill_planner_transport.mode 를 'grpc' 로.")
             return
-        self._preselective_phase = {"forward": True, "reset": False}
-        self._preselective_chunk_size = int(
+        self._skill_planner_phase_flags = {"forward": True, "reset": False}
+        self._skill_planner_chunk_size = int(
             (psf_raw.get("selector") or {}).get("chunk_size", 50)
         )
-        transport = str(psf_raw.get("transport", "local")).lower()
+        transport = mode  # downstream branch uses `transport` 변수명
         print(
-            f"[preselective_filter] phase=forward-only transport={transport}"
+            f"[skill_planner_transport] mode={mode} (source={cfg_src or 'recording_config'})"
         )
 
         # ──────────────────────────────────────────────────────────────
@@ -1231,7 +1280,7 @@ class ForwardAndResetPipeline(BasePipeline):
         # transport != "grpc" 면 silent no-op (local IG·AC 모드 의도된 제거).
         # ──────────────────────────────────────────────────────────────
         if transport == "grpc":
-            self._setup_preselective_grpc(psf_raw, full_cfg)
+            self._setup_skill_planner_grpc(psf_raw, full_cfg)
             return
         # local IG·AC selector removed — method3 phase2 가 대체. no-op.
         print(
@@ -1240,11 +1289,11 @@ class ForwardAndResetPipeline(BasePipeline):
             "gRPC mode 만 지원."
         )
 
-    def _setup_preselective_grpc(self, psf_raw: dict, full_cfg: dict) -> None:
+    def _setup_skill_planner_grpc(self, psf_raw: dict, full_cfg: dict) -> None:
         """gRPC transport branch — remote server owns curobo + Selector.
 
         Side effects:
-          - self._preselective_grpc_client : PreselectiveClient (for commit())
+          - self._skill_planner_grpc_client : PreselectiveClient (for commit())
           - self._skill_planner_client     : GrpcPlannerClient adapter
           - skills.set_skill_planner_client(adapter, n_candidates)
           - skills.set_skill_candidate_selector(None)  — server already chose
@@ -1253,23 +1302,23 @@ class ForwardAndResetPipeline(BasePipeline):
         timeout_s = float(psf_raw.get("transport_timeout_s", 60.0))
         try:
             from preselective_rpc.client import PreselectiveClient
-            from preselective_filter.integration.grpc_planner_adapter import GrpcPlannerClient
+            from method3.phase2_server_inference.grpc_planner_adapter import GrpcPlannerClient
         except Exception as e:
-            print(f"[preselective_filter] grpc imports failed: {e}; disabling")
+            print(f"[skill_planner_transport] grpc imports failed: {e}; disabling")
             return
 
         client = PreselectiveClient(server_address=addr, timeout_s=timeout_s)
         try:
             info = client.ready()
         except Exception as e:
-            print(f"[preselective_filter] grpc Ready() failed at {addr}: {e}; disabling")
+            print(f"[skill_planner_transport] grpc Ready() failed at {addr}: {e}; disabling")
             try:
                 client.close()
             except Exception:
                 pass
             return
         print(
-            f"[preselective_filter] grpc connected: {addr} | "
+            f"[skill_planner_transport] grpc connected: {addr} | "
             f"device={info.get('device')} buffer={info.get('buffer_total')} "
             f"selector={info.get('selector_summary')}"
         )
@@ -1278,7 +1327,7 @@ class ForwardAndResetPipeline(BasePipeline):
         n_cand = int(((full_cfg.get("perturbation") or {}).get("skill") or {}).get(
             "n_candidates", 4))
 
-        self._preselective_grpc_client = client
+        self._skill_planner_grpc_client = client
         self._skill_planner_client = adapter
         if hasattr(self, "_skills") and self._skills is not None:
             self._skills.set_skill_planner_client(adapter, n_candidates=n_cand)
@@ -1288,11 +1337,11 @@ class ForwardAndResetPipeline(BasePipeline):
             if pending is not None:
                 self._skills.set_perturbation_rng(pending)
             print(
-                f"[preselective_filter] grpc planner installed on skills "
+                f"[skill_planner_transport] grpc planner installed on skills "
                 f"(K={n_cand}, no local hook)"
             )
 
-    # _build_preselective_hook 제거됨 (2026-05-20 refactor):
+    # _build_skill_planner_hook 제거됨 (2026-05-20 refactor):
     # local IG·AC selector hook 은 method3 phase2 useful-OOD 가 대체.
     # gRPC transport 만 살아남았고 그 경우엔 server 가 candidate 선택을 끝내고
     # plan_batch 반환 시점에 이미 1개만 옴 → 별도 selector hook 불필요.
@@ -1327,24 +1376,24 @@ class ForwardAndResetPipeline(BasePipeline):
         t = threading.Thread(
             target=self._demo_ingest_worker, name="demo-ingest", daemon=True,
         )
-        self._preselective_ingest_thread = t
+        self._skill_planner_ingest_thread = t
         t.start()
 
     def _await_demo_ingest(self) -> None:
         """Block until the background demo ingestion finishes (if running)."""
-        t = getattr(self, "_preselective_ingest_thread", None)
+        t = getattr(self, "_skill_planner_ingest_thread", None)
         if t is None:
             return
         if t.is_alive():
             import time as _t
             t0 = _t.time()
             t.join()
-            if self._preselective_debug:
+            if self._skill_planner_debug:
                 print(
-                    f"[preselective_filter] waited "
+                    f"[skill_planner_transport] waited "
                     f"{_t.time() - t0:.1f}s for demo ingestion"
                 )
-        self._preselective_ingest_thread = None
+        self._skill_planner_ingest_thread = None
 
     def _demo_ingest_worker(self) -> None:
         """Grow the *remote* vector DB from the just-saved forward demo episode.
@@ -1359,15 +1408,15 @@ class ForwardAndResetPipeline(BasePipeline):
         ds = getattr(recorder, "_dataset", None)
         if ds is None:
             return
-        chunk = int(getattr(self, "_preselective_chunk_size", 50))
-        grpc_client = getattr(self, "_preselective_grpc_client", None)
+        chunk = int(getattr(self, "_skill_planner_chunk_size", 50))
+        grpc_client = getattr(self, "_skill_planner_grpc_client", None)
         if grpc_client is None:
             return  # local 모드는 제거됨 — gRPC 외엔 ingest 안 함
         try:
             res = grpc_client.ingest_episode(
                 dataset_root=str(ds.root), chunk_size=chunk,
             )
-            if self._preselective_debug:
+            if self._skill_planner_debug:
                 print(
                     f"[skill_planner_transport] grpc ingested {res['frames']} "
                     f"demo frames (ep {res['episode']}); "
@@ -1376,7 +1425,7 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception as e:
             print(f"[skill_planner_transport] demo ingest failed: {e}")
 
-    def _teardown_preselective_filter(self) -> None:
+    def _teardown_skill_planner_transport(self) -> None:
         """Close the gRPC channel at session end.
 
         Local IG·AC selector/encoder cleanup 은 더 이상 필요 없다 — local 모드
@@ -1385,16 +1434,16 @@ class ForwardAndResetPipeline(BasePipeline):
         # 진행 중인 비동기 demo ingest 가 끝나야 channel close 가 안전.
         self._await_demo_ingest()
         # Selector/encoder 필드는 local 모드 제거 후 항상 None — 호환 위해 reset 만.
-        self._preselective_selector = None
-        self._preselective_encoder = None
+        self._skill_planner_selector = None
+        self._skill_planner_encoder = None
         # Close gRPC channel if we were in remote mode.
-        grpc_cli = getattr(self, "_preselective_grpc_client", None)
+        grpc_cli = getattr(self, "_skill_planner_grpc_client", None)
         if grpc_cli is not None:
             try:
                 grpc_cli.close()
             except Exception:
                 pass
-            self._preselective_grpc_client = None
+            self._skill_planner_grpc_client = None
         if hasattr(self, "_skills") and self._skills is not None:
             try:
                 self._skills.set_skill_candidate_selector(None)
@@ -1658,7 +1707,7 @@ class ForwardAndResetPipeline(BasePipeline):
         # Skill-level perturbation: shut down curobo backend if it was spawned
         try:
             self._teardown_skill_perturbation()
-            self._teardown_preselective_filter()
+            self._teardown_skill_planner_transport()
             self._teardown_subgoal_selector()
         except Exception as e:
             print(f"[Recording] Warning: skill perturbation teardown failed: {e}")
@@ -2614,7 +2663,7 @@ class ForwardAndResetPipeline(BasePipeline):
 
                 # gRPC mode: drop any stale selection_ids the client may still
                 # be tracking from a previous (uncommitted) episode.
-                _grpc_cli = getattr(self, "_preselective_grpc_client", None)
+                _grpc_cli = getattr(self, "_skill_planner_grpc_client", None)
                 if _grpc_cli is not None:
                     try:
                         _grpc_cli.reset_pending()
@@ -2799,8 +2848,8 @@ class ForwardAndResetPipeline(BasePipeline):
                     # codegen; the next rollout awaits it. Local mode encodes
                     # here; gRPC mode streams the episode to the H100 server.
                     if not should_discard and judge_prediction == "TRUE" and (
-                        getattr(self, "_preselective_selector", None) is not None
-                        or getattr(self, "_preselective_grpc_client", None) is not None
+                        getattr(self, "_skill_planner_selector", None) is not None
+                        or getattr(self, "_skill_planner_grpc_client", None) is not None
                     ):
                         self._start_demo_ingest_async()
 
@@ -4406,7 +4455,7 @@ class ForwardAndResetPipeline(BasePipeline):
         )
         # Method 3: wire the IG·AC selector now that the session folder exists,
         # so the FAISS buffer lands inside <session_dir>/preselective_buffer.
-        self._setup_preselective_filter_on_skills(session_dir)
+        self._setup_skill_planner_transport(session_dir)
         # Buffer-aware subgoal: remember the session dir so `_get_task_runner`
         # can bind the .npz buffer once the selector is lazily created. The
         # call here still no-ops (selector not built yet) — kept harmless.
@@ -4545,7 +4594,7 @@ class ForwardAndResetPipeline(BasePipeline):
             num_episodes, instruction, objects, save_dir, session_dir=session_dir,
         )
         # Method 3: wire the IG·AC selector against the resumed session folder.
-        self._setup_preselective_filter_on_skills(session_dir)
+        self._setup_skill_planner_transport(session_dir)
         # Buffer-aware subgoal: remember the session dir so `_get_task_runner`
         # can bind the .npz buffer once the selector is lazily created (picks
         # up the buffer persisted by the earlier run on resume).

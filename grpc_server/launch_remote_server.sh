@@ -301,11 +301,14 @@ export PORT="$REMOTE_PORT"
 export RECORDING_CONFIG="$SERVER_RECORDING_CONFIG"
 export URDF="$SERVER_URDF"
 if command -v tmux >/dev/null 2>&1; then
+  # bash -lc 로 *login shell* 사용 — ~/.bashrc 의 conda init 등이 적용돼야
+  # setup/run_server.sh 가 conda 를 찾을 수 있다. non-login 으로 띄우면
+  # "conda not found on PATH" 로 즉시 죽음.
   tmux new-session -d -s '$TMUX_SESSION' \
-    "bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log"
+    "bash -lc 'bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log'"
   echo "  remote: tmux session started"
 else
-  nohup bash grpc_server/run_server.sh > /tmp/phase2_server.log 2>&1 &
+  nohup bash -lc 'bash grpc_server/run_server.sh' > /tmp/phase2_server.log 2>&1 &
   echo "  remote: tmux not available — using nohup (pid=\$!)"
 fi
 REMOTE_CMD

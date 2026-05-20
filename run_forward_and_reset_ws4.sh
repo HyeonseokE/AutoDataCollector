@@ -78,7 +78,7 @@ cd "$SCRIPT_DIR"
 # 예: (0)       → shared + left_arm
 #     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
-ROBOT_IDS=(6)
+ROBOT_IDS=(6 7)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
@@ -88,8 +88,8 @@ ROBOT_IDS=(6)
 # INSTRUCTION="close the pot’s lid."
 # RESET_INSTRUCTION=""
 
-INSTRUCTION="Sort each colored block onto the plate of the matching color."
-RESET_INSTRUCTION=""
+INSTRUCTION="Fold the towel in half from top to bottom."
+RESET_INSTRUCTION="Unfold the towel from bottom to top to recover its original flat state."
 
 
 ## stack red and yellow
@@ -121,7 +121,7 @@ RESET_INSTRUCTION=""
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=100
-NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_RANDOM_SEEDS=1 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, all_wo_center, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
@@ -148,7 +148,7 @@ RECORD_DATASET=true
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
+RESUME_SESSION="./results/session_20260512_181737"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

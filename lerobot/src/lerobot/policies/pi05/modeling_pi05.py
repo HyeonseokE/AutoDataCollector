@@ -436,10 +436,13 @@ class PaliGemmaWithExpertModel(
 
     def embed_image(self, image: torch.Tensor):
         # Vision tower and multi_modal_projector are kept in float32 (params_to_keep_float32).
+        # transformers >=4.50 changed PaliGemmaModel.get_image_features to return a Tensor
+        # (already projected and scaled); the original OpenPI port expected the vision_tower's
+        # BaseModelOutputWithPooling with .pooler_output, so call vision_tower directly.
         out_dtype = image.dtype
         if image.dtype != torch.float32:
             image = image.to(torch.float32)
-        image_outputs = self.paligemma.model.get_image_features(image)
+        image_outputs = self.paligemma.model.vision_tower(image)
         features = image_outputs.pooler_output * self.paligemma.config.text_config.hidden_size**0.5
         if features.dtype != out_dtype:
             features = features.to(out_dtype)

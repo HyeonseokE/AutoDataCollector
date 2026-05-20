@@ -50,18 +50,18 @@ ENCODER_THREADS="${ENCODER_THREADS:-2}"
 USE_DEGREES="${USE_DEGREES:-false}" # always false - hscho
 
 # -------- dataset --------
-REPO_ID="${REPO_ID:-CoRL2026-CSI/distributed_chocolate_pie_each_plate}"
-TASK="${TASK:-Distribute chocolate pies to each plate.}"
+REPO_ID="${REPO_ID:-CoRL2026-CSI/teleop_open_drawer}"
+TASK="${TASK:-Open the top drawer.}"
 FPS="${FPS:-30}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-60}"
-RESET_TIME_S="${RESET_TIME_S:-10}"
+RESET_TIME_S="${RESET_TIME_S:-5}"
 NUM_EPISODES="${NUM_EPISODES:-100}"
 PUSH_TO_HUB="${PUSH_TO_HUB:-false}"
 DATASET_ROOT="${DATASET_ROOT:-$REPO_DIR/outputs/datasets/$REPO_ID}"
 DISPLAY_DATA="${DISPLAY_DATA:-true}"
 
 # -------- resume --------
-RESUME="${RESUME:-false}"
+RESUME="${RESUME:-true}"
 
 # -------- follower (robot) --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"

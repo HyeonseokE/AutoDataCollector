@@ -17,12 +17,16 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
-# Python 환경 (필요 시 conda 환경 활성화)
-PYTHON="${PYTHON:-/home/lerobot3/miniconda3/envs/lerobot_cap/bin/python}"
-
-if [ ! -x "$PYTHON" ]; then
-    echo "Python 인터프리터를 찾을 수 없습니다: $PYTHON"
-    echo "PYTHON 환경변수로 다른 인터프리터를 지정하세요."
+# Python 환경: PYTHON 환경변수 우선 → lerobot3 conda → 시스템 python3 fallback
+if [ -n "$PYTHON" ] && [ -x "$PYTHON" ]; then
+    :  # 사용자 지정 경로 사용
+elif [ -x "/home/lerobot3/miniconda3/envs/lerobot_cap/bin/python" ]; then
+    PYTHON="/home/lerobot3/miniconda3/envs/lerobot_cap/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="$(command -v python3)"
+else
+    echo "Python 인터프리터를 찾을 수 없습니다."
+    echo "PYTHON 환경변수로 인터프리터 경로를 지정하세요."
     exit 1
 fi
 

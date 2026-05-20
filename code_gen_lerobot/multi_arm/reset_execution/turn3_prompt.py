@@ -374,17 +374,20 @@ When objects are stacked, you MUST unstack from **top to bottom**.
 When a towel or cloth is folded and needs to be unfolded back to its original flat state,
 use the bimanual UNFOLD pattern — the reverse of FOLD.
 
-- **Grasp points** (`current_positions`): detected on the current folded state — where to grab the folded edge.
+- **Grasp points** (`current_positions`): detected on the current folded state. **CRITICAL physics**: after a top-to-bottom fold, the originally-grabbed corners (the unfolded towel's "top" corners) are now resting at the **BOTTOM of the folded stack** — where the top layer's free edge overlaps the bottom layer's edge. **Grasp THIS bottom edge of the folded stack — NOT the crease at the top**. The crease is where the two layers connect; lifting the crease just flips the stack and does not unfold. Only the bottom-edge grasp + lift-back-to-original-top motion actually unfolds the cloth.
 - **Unfold targets** (`target_positions`): the original pre-fold positions from the forward task. The forward task's grasp points (the edge that was grabbed to fold) are exactly where the edge should return after unfolding.
-- **CRITICAL**: For a top-to-bottom fold, the forward task grabbed the **top** edge. To unfold, you grab the folded edge and move it back to where the **top** edge was — use `"top left corner"` and `"top right corner"` from `target_positions`, NOT "bottom". The unfold target is ALWAYS the edge that was originally folded (the one that moved during forward), not the edge that stayed in place.
+- **CRITICAL**: For a top-to-bottom fold, the forward task grabbed the **top** edge. To unfold, you grab the **bottom edge of the folded stack** (NOT the crease at the top of the stack) and move it back to where the **top** edge was — use `"top left corner"` and `"top right corner"` from `target_positions`, NOT "bottom" corners. The unfold target is ALWAYS the edge that was originally folded (the one that moved during forward), not the edge that stayed in place.
 
 ```python
-# UNFOLD pattern: grasp the folded edge → arc trajectory to unfold → place flat
-skills.set_subtask("unfold towel — grasp folded edge, pull back to flat")
+# UNFOLD pattern: grasp the BOTTOM edge of the folded stack (NOT the crease)
+# → arc trajectory to unfold → place flat at original top position
+skills.set_subtask("unfold towel — grasp bottom edge of folded stack, lift back to top")
 
-# Get grasp points from current_positions (detected on the folded towel)
-left_grasp = cur_left["towel"]["points"]["left fold edge grasp"]
-right_grasp = cur_right["towel"]["points"]["right fold edge grasp"]
+# Get grasp points from current_positions (detected at the BOTTOM edge of the
+# folded stack, where the top layer's free edge rests on the bottom layer).
+# Do NOT grasp the crease (top of stack) — that just flips the stack.
+left_grasp = cur_left["towel"]["points"]["left bottom-edge grasp"]
+right_grasp = cur_right["towel"]["points"]["right bottom-edge grasp"]
 
 # Unfold targets: use the TOP corners from target_positions.
 # For top-to-bottom fold: the top edge was folded down → unfold back to top.

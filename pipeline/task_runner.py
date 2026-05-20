@@ -183,13 +183,18 @@ class DualArmTaskRunner(TaskRunner):
         4. recorder.stop()
         """
         from record_dataset.multi_arm_recorder import MultiArmRecorder
+        from record_dataset.context import RecordingContext
 
         multi_arm = self.skills  # MultiArmSkills 인스턴스
+
+        # Honor a swapped reset recorder if the pipeline has injected one
+        # (e.g. UnifiedMultiArmPipeline._start_reset_episode_recording).
+        active_recorder = RecordingContext._recorder if RecordingContext._recorder else self.recorder
 
         try:
             mar = MultiArmRecorder(
                 multi_arm=multi_arm,
-                recorder=self.recorder,
+                recorder=active_recorder,
                 camera_manager=self.camera_manager,
                 target_fps=self.recording_fps,
             )

@@ -117,6 +117,8 @@ class UnifiedMultiArmPipeline(BasePipeline):
         self.camera_manager = None
         self.multi_arm: Optional[MultiArmSkills] = None
         self.dataset_recorder = None
+        self.reset_dataset_recorder = None  # multi-arm reset: separate <name>_reset dataset
+        self._saved_forward_recorder = None
 
         # Episode tracking
         self.current_episode = 1
@@ -260,14 +262,25 @@ class UnifiedMultiArmPipeline(BasePipeline):
 
             # 4. Dataset recorder with 12-axis multi-arm features
             multi_arm_features = build_multi_arm_features(cameras=enabled_cameras)
+            # reset_repo_id was already declared in the pre-existence check above (~L205)
+            reset_repo_id = self.dataset_repo_id + "_reset"
 
             self.dataset_recorder = DatasetRecorder(
                 repo_id=self.dataset_repo_id,
                 fps=self.recording_fps,
                 resume=self.resume_recording,
                 features=multi_arm_features,
+                config_yaml=self.recording_config,
+            )
+            self.reset_dataset_recorder = DatasetRecorder(
+                repo_id=reset_repo_id,
+                fps=self.recording_fps,
+                resume=self.resume_recording,
+                features=multi_arm_features,
+                config_yaml=self.recording_config,
             )
             print(f"[Recording] Recorder initialized (12-axis ALOHA format)")
+            print(f"[Recording] Reset recorder initialized: {reset_repo_id}")
 
             # 5. MultiArmRecorder will be created after skills.connect()
             # (needs multi_arm instance which is created later)
@@ -284,6 +297,59 @@ class UnifiedMultiArmPipeline(BasePipeline):
             traceback.print_exc()
             self.record_dataset = False
             self.dataset_recorder = None
+            self.reset_dataset_recorder = None
+
+
+    def _start_reset_episode_recording(self, task: str) -> None:
+        """Reset 에피소드 레코딩 시작 (forward recorder → reset recorder swap).
+
+        MultiArmRecorder는 task_runner._execute_with_recording 안에서
+        active_recorder = RecordingContext._recorder or self.recorder
+        패턴으로 RecordingContext를 참조하므로, 여기서 swap만 해 두면
+        다음 execute_code() 호출 시 reset recorder로 자동 라우팅된다.
+        """
+        if not (self.record_dataset and self.reset_dataset_recorder):
+            return
+        # Re-entry guard: if _saved_forward_recorder is still set from a previous
+        # start without matching end, do NOT overwrite (would lose forward ref).
+        if self._saved_forward_recorder is not None:
+            print("[Reset Recording] Warning: previous reset episode not ended; skipping swap")
+            return
+        try:
+            from record_dataset.context import RecordingContext
+            self.reset_dataset_recorder.start_episode(task=task)
+            self._saved_forward_recorder = RecordingContext._recorder
+            RecordingContext._recorder = self.reset_dataset_recorder
+            print(f"[Reset Recording] Episode started: {task}")
+        except Exception as e:
+            print(f"[Reset Recording] Warning: Failed to start: {e}")
+
+    def _end_reset_episode_recording(self, discard: bool = False) -> None:
+        """Reset 에피소드 레코딩 종료 (forward recorder로 복원).
+
+        Restore는 finally에서 수행 — end_episode가 실패해도 RecordingContext가
+        reset recorder를 가리킨 채 남는 것을 방지한다.
+        """
+        if not (self.record_dataset and self.reset_dataset_recorder):
+            return
+        from record_dataset.context import RecordingContext
+        try:
+            info = self.reset_dataset_recorder.end_episode(discard=discard)
+            if not discard:
+                print(f"[Reset Recording] Episode saved: {info.get('num_frames', 0)} frames")
+            else:
+                print(f"[Reset Recording] Episode discarded")
+        except Exception as e:
+            print(f"[Reset Recording] Warning: Failed to end: {e}")
+        finally:
+            # Always restore — even if saved was None (multi-arm은 RecordingContext.setup()을 호출하지
+            # 않으므로 _saved_forward_recorder가 None인 게 정상 케이스). 조건부 restore는 leak 유발.
+            RecordingContext._recorder = self._saved_forward_recorder
+            self._saved_forward_recorder = None
+            try:
+                RecordingContext.clear_subtask()
+            except Exception:
+                pass
 
 
     def _finalize_recording(self) -> None:
@@ -294,6 +360,14 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 print(f"[Recording] Dataset finalized: {self.dataset_recorder.repo_id}")
             except Exception as e:
                 print(f"[Recording] Finalize error: {e}")
+                import traceback
+                traceback.print_exc()
+        if self.reset_dataset_recorder:
+            try:
+                self.reset_dataset_recorder.finalize()
+                print(f"[Recording] Reset dataset finalized: {self.reset_dataset_recorder.repo_id}")
+            except Exception as e:
+                print(f"[Recording] Reset finalize error: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -1380,8 +1454,8 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 # Set execution dir for skill_detect_results logging
                 _builtins._current_execution_dir = reset_dir
 
-                if self.record_dataset and self.dataset_recorder:
-                    self._start_episode_recording(self.reset_instruction)
+                if self.record_dataset and self.reset_dataset_recorder:
+                    self._start_reset_episode_recording(self.reset_instruction)
 
                 # current_positions / target_positions를 globals로 주입 (싱글암 패턴과 동일)
                 # _reset_current_positions: reset turn2 검출 결과 (per-arm)
@@ -1394,8 +1468,8 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 })
                 result['reset']['execution_success'] = reset_success
 
-                if self.record_dataset and self.dataset_recorder:
-                    self._end_episode_recording()
+                if self.record_dataset and self.reset_dataset_recorder:
+                    self._end_reset_episode_recording(discard=not reset_success)
 
                 # Capture reset final image
                 time.sleep(1.0)
@@ -1683,23 +1757,37 @@ class UnifiedMultiArmPipeline(BasePipeline):
         all_done = all(all(slots) for slots in batch_slots)
         if all_done:
             print(f"\n{GREEN}  All episodes complete, nothing to resume{RESET_COLOR}")
-            return {'session_dir': session_dir, 'episodes': [], 'summary': {}}
+            total_done = sum(sum(slots) for slots in batch_slots)
+            return {
+                'session_dir': session_dir,
+                'num_episodes': total_done,
+                'episodes': [],
+                'summary': {
+                    'forward_success': total_done,
+                    'forward_judge_true': total_done,
+                    'reset_success': total_done,
+                    'reset_judge_true': total_done,
+                },
+            }
 
         # Cleanup failed episodes from dataset, then initialize recording (resume/append)
         if self.record_dataset:
             if self.dataset_repo_id:
-                try:
-                    from record_dataset.cleanup import cleanup_dataset_for_resume
-                    cleanup_stats = cleanup_dataset_for_resume(
-                        session_dir=session_dir,
-                        repo_id=self.dataset_repo_id,
-                    )
-                    print(f"\n[Cleanup] Result: {cleanup_stats['dataset_episodes_before']} → {cleanup_stats['dataset_episodes_after']} episodes")
-                    if cleanup_stats['deleted_indices']:
-                        print(f"[Cleanup] Deleted dataset indices: {cleanup_stats['deleted_indices']}")
-                except Exception as e:
-                    print(f"\n{YELLOW}[Cleanup] Warning: Dataset cleanup failed: {e}{RESET_COLOR}")
-                    import traceback; traceback.print_exc()
+                from record_dataset.cleanup import cleanup_dataset_for_resume
+                # Forward + reset 데이터셋 모두 cleanup (multi-arm은 dual-recorder 구조)
+                for label, rid in [("forward", self.dataset_repo_id),
+                                   ("reset",   self.dataset_repo_id + "_reset")]:
+                    try:
+                        cleanup_stats = cleanup_dataset_for_resume(
+                            session_dir=session_dir,
+                            repo_id=rid,
+                        )
+                        print(f"\n[Cleanup/{label}] Result: {cleanup_stats['dataset_episodes_before']} → {cleanup_stats['dataset_episodes_after']} episodes")
+                        if cleanup_stats['deleted_indices']:
+                            print(f"[Cleanup/{label}] Deleted dataset indices: {cleanup_stats['deleted_indices']}")
+                    except Exception as e:
+                        print(f"\n{YELLOW}[Cleanup/{label}] Warning: Dataset cleanup failed: {e}{RESET_COLOR}")
+                        import traceback; traceback.print_exc()
 
             if self.dataset_recorder is None:
                 self.resume_recording = True

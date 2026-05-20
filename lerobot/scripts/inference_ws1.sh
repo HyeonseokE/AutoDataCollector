@@ -24,7 +24,7 @@ cd "$REPO_DIR"
 # -------- conda env --------
 CONDA_ENV="${CONDA_ENV:-lerobot}"
 # shellcheck disable=SC1091
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
+source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
 export PYTHONNOUSERSITE=1   # ~/.local (user-site) 차단
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -48,8 +48,8 @@ SAVE_CHUNKS_MAX="${SAVE_CHUNKS_MAX:-15}"              # 저장할 chunk 수
 
 # -------- robot 설정 --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"            # so100_follower / so101_follower / koch_follower / ...
-ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM0}"              # 시리얼 포트
-ROBOT_ID="${ROBOT_ID:-so101_robot2}"                  # 캘리브레이션 파일용 ID
+ROBOT_PORT="${ROBOT_PORT:-/dev/ttyACM1}"              # 시리얼 포트
+ROBOT_ID="${ROBOT_ID:-so101_robot6}"                  # 캘리브레이션 파일용 ID
 # AutoDataCollector 자체 캘리브레이션 폴더 (lerobot 은 ${ROBOT_ID}.json 형식의 파일을 찾음;
 # robotN_calibration.json 원본은 so101_robotN.json 심볼릭 링크로 매핑되어 있음)
 ROBOT_CALIBRATION_DIR="${ROBOT_CALIBRATION_DIR:-$(cd "$REPO_DIR/.." && pwd)/robot_configs/motor_calibration/so101}"

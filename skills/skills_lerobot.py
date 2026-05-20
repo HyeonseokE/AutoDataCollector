@@ -3053,9 +3053,20 @@ class LeRobotSkills:
             print("Error: Failed to reach place position")
             return False
 
-        # Open gripper (skill recording handled inside)
+        # Lift while opening gripper — same pattern as bimanual_place_object.
+        # Releasing at contact + lifting separately can drag/disturb deformable
+        # objects; combining the two prevents that.
+        RELEASE_LIFT = 0.03  # 3cm lift while gripper opens
         release_desc = f"release object on {target_name}" if target_name else None
-        self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
+        lift_position = [final_position[0], final_position[1], final_position[2] + RELEASE_LIFT]
+        self.move_to_position(
+            lift_position,
+            target_pitch=saved_pitch,
+            target_name=place_label,
+            skill_description=release_desc,
+            gripper_action="open",
+            gripper_open_ratio=gripper_open_ratio,
+        )
 
         # Post-place retreat clearance — 방금 놓은 물체를 빈 그리퍼가 치고
         # 지나가지 않도록, 다음 transit(retreat)이 lateral perturbation 전에

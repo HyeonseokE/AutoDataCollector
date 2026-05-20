@@ -79,6 +79,16 @@ class ActionQueue:
             self.last_index += 1
             return action.clone()
 
+    def clear(self) -> None:
+        """Drop all queued actions and reset the consumption index.
+
+        Used to discard in-flight actions when execution is interrupted.
+        """
+        with self.lock:
+            self.queue = None
+            self.original_queue = None
+            self.last_index = 0
+
     def qsize(self) -> int:
         """Get the number of remaining actions in the queue.
 

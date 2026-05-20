@@ -24,7 +24,7 @@ cd "$REPO_DIR"
 # -------- conda env --------
 CONDA_ENV="${CONDA_ENV:-lerobot}"
 # shellcheck disable=SC1091
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
+source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
 export PYTHONNOUSERSITE=1   # ~/.local (user-site) 차단
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

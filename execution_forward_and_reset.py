@@ -4756,10 +4756,14 @@ def main():
             skip_forward=args.skip_forward,
         )
 
-    # 종료 코드 결정 (성공률 기반)
-    n = all_results['num_episodes']
-    s = all_results['summary']
-    success_rate = s['forward_judge_true'] / n if n > 0 else 0
+    # 종료 코드 결정 (성공률 기반). resume 이 "all done" 으로 빈 결과를
+    # 돌릴 수 있으므로 .get() 로 안전 접근.
+    n = all_results.get('num_episodes', 0)
+    s = all_results.get('summary', {}) or {}
+    if n > 0:
+        success_rate = s.get('forward_judge_true', 0) / n
+    else:
+        success_rate = 1.0  # nothing to do = success
 
     if success_rate >= 0.5:  # 50% 이상 성공
         sys.exit(0)

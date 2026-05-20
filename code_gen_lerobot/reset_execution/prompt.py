@@ -131,18 +131,28 @@ These are the object labels from the forward task detection. Each label correspo
         label_instruction = """
 **Every label must be unique.** If multiple objects of the same type exist, append a numeric suffix to distinguish them (e.g., `"egg_1"`, `"egg_2"`, `"red_plate_1"`, `"red_plate_2"`)."""
 
+    # Unfold mechanics — folded cloth has TWO edges: CREASE (where layers connect)
+    # vs FREE edge (where the top layer ends, opposite of crease). Only grasping
+    # the FREE edge unfolds; grasping the crease just flips the stack.
+    UNFOLD_GUIDE = (
+        "- For **deformable objects** (towel, cloth) that need unfolding: grasp the "
+        "**FREE edge** (where the top layer ends) — NOT the **crease** (where the two "
+        "layers connect). After a top-to-bottom fold, the FREE edge is at the BOTTOM "
+        "of the folded stack. Use grasp labels `\"left bottom-edge grasp\"` / "
+        "`\"right bottom-edge grasp\"`. Only identify grasp points on the current "
+        "(deformed) state — unfold destination is provided separately."
+    )
+
     if reset_instruction:
         forward_context = f"""
 **Reset task**: {reset_instruction}
-Manipulate the objects to accomplish this reset goal.
 - For **rigid objects** (blocks, cups, etc.): simple pick-and-place is sufficient.
-- For **deformable objects** (towel, cloth, paper) that need unfolding/reversing: only identify grasp points on the current (deformed) state. The unfold destination is already known and will be provided separately."""
+{UNFOLD_GUIDE}"""
     elif original_instruction:
         forward_context = f"""
-**Forward task context**: The forward task was "{original_instruction}".
-The objects are now in their post-task state. Your goal is to figure out how to REVERSE the effect of the forward task to restore each object to its original state.
-- For **rigid objects** (blocks, cups, etc.): simple pick-and-place is sufficient.
-- For **deformable objects** (towel, cloth, paper) that were folded/bent: you must UNFOLD/REVERSE the deformation (e.g., if the towel was folded top-to-bottom, grab the folded edge and unfold it back upward). The unfold destination is already known — only identify grasp points on the current (deformed) state."""
+**Forward task context**: The forward task was "{original_instruction}". Reverse it to restore each object's original state.
+- For **rigid objects**: simple pick-and-place.
+{UNFOLD_GUIDE}"""
     else:
         forward_context = ""
 
@@ -163,8 +173,8 @@ For each object, provide:
 3. **manipulation_strategy**: An object describing how to reset this object:
    - **needs_manipulation** (bool): Does this object need to be physically manipulated?
    - **arm_assignment** (`"left"`, `"right"`, or `"bimanual"`): Which arm(s) should handle this object?
-   - **grasp_approach** (string): HOW to manipulate — e.g., "pick from center and place at target position" for rigid objects, "grab the folded edge with both arms and unfold upward" for deformable objects that were folded.
-   - **expected_points** (list of strings): Point labels to identify in the crop step. Only include **grasp points** (where to grab the object) — e.g., `["grasp center"]` for simple pick-and-place, `["left fold edge grasp", "right fold edge grasp"]` for unfolding. Do NOT include target/destination points — the unfold destination is already known from the original pre-task positions and will be provided separately.
+   - **grasp_approach** (string): HOW to manipulate — e.g., "pick from center and place at target position" for rigid objects, "grab the BOTTOM edge of the folded stack (NOT the crease) with both arms and lift back up to the original top position" for deformable objects that were folded.
+   - **expected_points** (list of strings): Point labels to identify in the crop step. Only include **grasp points** (where to grab the object) — e.g., `["grasp center"]` for simple pick-and-place, `["left bottom-edge grasp", "right bottom-edge grasp"]` for unfolding a top-to-bottom fold (the bottom-edge of the folded stack is where the originally-grasped corners now rest). Do NOT include target/destination points — the unfold destination is already known from the original pre-task positions and will be provided separately.
 
 ### Output Format
 Return a JSON array:

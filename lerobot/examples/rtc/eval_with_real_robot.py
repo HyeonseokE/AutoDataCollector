@@ -65,14 +65,18 @@ Usage:
         --duration=120
 """
 
+import json
 import logging
 import math
+import re
 import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import Event, Lock, Thread
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -131,6 +135,167 @@ class RobotWrapper:
             return self.robot.action_features
 
 
+class InterruptController:
+    """Enter-key driven park/resume state shared by the worker threads.
+
+    Two-state toggle:
+    - 1st Enter: park — flush the action buffer, move the robot to free_state,
+      and hold there (inference paused).
+    - 2nd Enter: resume — the first chunk produced after resume is discarded so
+      execution restarts cleanly, then chunks are merged normally.
+
+    Parked time is accumulated so it can be excluded from the demo duration.
+    """
+
+    def __init__(self):
+        self.parked = Event()  # set => robot parked at free_state, threads paused
+        self._lock = Lock()
+        self._discard_count = 0
+        self._park_started: float | None = None
+        self._parked_total = 0.0
+
+    def set_parked(self) -> None:
+        with self._lock:
+            if not self.parked.is_set():
+                self._park_started = time.time()
+        self.parked.set()
+
+    def set_running(self) -> None:
+        with self._lock:
+            if self.parked.is_set() and self._park_started is not None:
+                self._parked_total += time.time() - self._park_started
+                self._park_started = None
+        self.parked.clear()
+
+    def arm_discard(self, n: int = 1) -> None:
+        """Mark the next ``n`` produced chunks to be discarded."""
+        with self._lock:
+            self._discard_count = n
+
+    def consume_discard(self) -> bool:
+        """Return True (and decrement) if the current chunk should be discarded."""
+        with self._lock:
+            if self._discard_count > 0:
+                self._discard_count -= 1
+                return True
+            return False
+
+    def parked_total(self) -> float:
+        """Total seconds spent parked, including an in-progress park."""
+        with self._lock:
+            ongoing = time.time() - self._park_started if self._park_started is not None else 0.0
+            return self._parked_total + ongoing
+
+    def wait_while_parked(self, shutdown_event: Event, poll: float = 0.05) -> None:
+        while self.parked.is_set() and not shutdown_event.is_set():
+            time.sleep(poll)
+
+
+def resolve_free_state_path(cfg: "RTCDemoConfig") -> Path:
+    """Locate the free_state JSON for the robot being controlled.
+
+    Picks the file matching ``robot.id`` (e.g. ``so101_robot6`` -> ``robot6``)
+    under ``<robot_configs>/free_state/``, where ``<robot_configs>`` is derived
+    from the calibration dir, or overridden via ``cfg.free_state_dir``.
+    """
+    robot_id = getattr(cfg.robot, "id", "") or ""
+    m = re.search(r"robot\d+", robot_id)
+    if not m:
+        raise ValueError(f"Cannot extract 'robotN' from robot.id={robot_id!r}")
+    robot_tag = m.group(0)
+
+    if cfg.free_state_dir:
+        free_state_dir = Path(cfg.free_state_dir)
+    else:
+        calib_dir = getattr(cfg.robot, "calibration_dir", None)
+        if not calib_dir:
+            raise ValueError("robot.calibration_dir is unset; pass --free_state_dir explicitly")
+        # calibration_dir is <robot_configs>/motor_calibration/<family>
+        free_state_dir = Path(calib_dir).resolve().parent.parent / "free_state"
+
+    path = free_state_dir / f"{robot_tag}_free_state.json"
+    if not path.exists():
+        raise FileNotFoundError(f"free_state file not found: {path}")
+    return path
+
+
+def move_to_free_state(
+    robot: "RobotWrapper", free_state_path: Path, fps: float, duration: float = 2.0
+) -> None:
+    """Smoothly drive the robot from its current pose to the free_state pose.
+
+    Uses cosine smoothing so the servos do not jerk. Arm joints are clamped to
+    [-100, 100] and the gripper to [0, 100] (free_state JSON values can be out
+    of range / inconsistent across robots).
+    """
+    with open(free_state_path) as f:
+        data = json.load(f)
+
+    arm_target = np.asarray(data["initial_state_normalized"], dtype=np.float32)
+    gripper_target = float(data["gripper_normalized"])
+    target = np.concatenate([np.clip(arm_target, -100.0, 100.0), [np.clip(gripper_target, 0.0, 100.0)]])
+
+    action_keys = list(robot.action_features())  # ordered: 5 arm joints + gripper
+    if len(action_keys) != len(target):
+        raise ValueError(
+            f"free_state has {len(target)} joints but robot has {len(action_keys)} action features"
+        )
+
+    obs = robot.get_observation()
+    current = np.asarray([float(obs[k]) for k in action_keys], dtype=np.float32)
+
+    steps = max(1, int(duration * fps))
+    period = 1.0 / fps
+    logger.info(f"[INTERRUPT] Moving to free_state ({free_state_path.name}) over {duration:.1f}s")
+    for i in range(1, steps + 1):
+        loop_start = time.perf_counter()
+        alpha = i / steps
+        smooth = (1.0 - math.cos(alpha * math.pi)) / 2.0
+        cmd = current + smooth * (target - current)
+        robot.send_action({k: float(cmd[j]) for j, k in enumerate(action_keys)})
+        time.sleep(max(0.0, period - (time.perf_counter() - loop_start)))
+    logger.info("[INTERRUPT] Reached free_state.")
+
+
+def keyboard_listener(
+    interrupt: InterruptController,
+    action_queue: "ActionQueue",
+    robot: "RobotWrapper",
+    free_state_path: Path | None,
+    fps: float,
+    move_duration: float,
+    shutdown_event: Event,
+):
+    """Block on stdin; each Enter toggles park (flush + free_state) / resume."""
+    logger.info("[INTERRUPT] Press Enter to park at free_state; Enter again to resume")
+    while not shutdown_event.is_set():
+        line = sys.stdin.readline()
+        if line == "":  # EOF — stdin closed
+            break
+        if shutdown_event.is_set():
+            break
+
+        if not interrupt.parked.is_set():
+            # 1st Enter: park — pause workers, flush buffer, move to free_state.
+            logger.info("[INTERRUPT] Parking: flushing action buffer + moving to free_state...")
+            interrupt.set_parked()
+            time.sleep(0.1)  # let the actor thread observe the parked flag
+            action_queue.clear()
+            if free_state_path is not None:
+                try:
+                    move_to_free_state(robot, free_state_path, fps, move_duration)
+                except Exception as e:
+                    logger.error(f"[INTERRUPT] free_state move failed ({e}); robot held in place.")
+            else:
+                logger.warning("[INTERRUPT] No free_state file resolved; robot held in place.")
+            logger.info("[INTERRUPT] Parked. Press Enter to resume (first chunk will be discarded).")
+        else:
+            # 2nd Enter: resume — discard the first new chunk, then run normally.
+            interrupt.arm_discard(1)
+            interrupt.set_running()
+            logger.info("[INTERRUPT] Resumed.")
+
+
 @dataclass
 class RTCDemoConfig(HubMixin):
     """Configuration for RTC demo with action chunking policies and real robots."""
@@ -163,6 +328,19 @@ class RTCDemoConfig(HubMixin):
 
     # Task to execute
     task: str = field(default="", metadata={"help": "Task to execute"})
+
+    # Enter-key park/resume: directory holding <robotN>_free_state.json files.
+    # If empty, derived from robot.calibration_dir (<robot_configs>/free_state).
+    free_state_dir: str = field(
+        default="",
+        metadata={"help": "Directory with <robotN>_free_state.json files (default: derived)"},
+    )
+
+    # Seconds for the smooth interpolated move to free_state on park.
+    free_state_move_duration: float = field(
+        default=2.0,
+        metadata={"help": "Duration of the smooth move to free_state on Enter-park"},
+    )
 
     # Torch compile configuration
     use_torch_compile: bool = field(
@@ -260,6 +438,7 @@ def get_actions(
     robot_observation_processor,
     action_queue: ActionQueue,
     shutdown_event: Event,
+    interrupt: InterruptController,
     cfg: RTCDemoConfig,
 ):
     """Thread function to request action chunks from the policy.
@@ -317,6 +496,11 @@ def get_actions(
             get_actions_threshold = 0
 
         while not shutdown_event.is_set():
+            # Hold here while parked — no new chunks requested until resumed.
+            interrupt.wait_while_parked(shutdown_event)
+            if shutdown_event.is_set():
+                break
+
             if action_queue.qsize() <= get_actions_threshold:
                 current_time = time.perf_counter()
                 action_index_before_inference = action_queue.get_action_index()
@@ -359,6 +543,17 @@ def get_actions(
                     inference_delay=inference_delay,
                     prev_chunk_left_over=prev_actions,
                 )
+
+                # Drop this chunk if a park happened while inference was running
+                # (the buffer was flushed — merging now would repopulate it).
+                if interrupt.parked.is_set():
+                    logger.info("[INTERRUPT] Dropping in-flight chunk (parked during inference)")
+                    continue
+
+                # On resume, discard the first chunk so execution restarts cleanly.
+                if interrupt.consume_discard():
+                    logger.info("[INTERRUPT] Discarded first chunk after resume")
+                    continue
 
                 # Store original actions (before postprocessing) for RTC
                 original_actions = actions.squeeze(0).clone()
@@ -428,6 +623,7 @@ def actor_control(
     robot_action_processor,
     action_queue: ActionQueue,
     shutdown_event: Event,
+    interrupt: InterruptController,
     cfg: RTCDemoConfig,
 ):
     """Thread function to execute actions on the robot.
@@ -445,6 +641,12 @@ def actor_control(
         action_interval = 1.0 / cfg.fps
 
         while not shutdown_event.is_set():
+            # While parked, send no policy actions — the keyboard thread owns
+            # the robot (free_state move) and it holds there until resumed.
+            if interrupt.parked.is_set():
+                time.sleep(0.05)
+                continue
+
             start_time = time.perf_counter()
 
             # Try to get an action from the queue with timeout
@@ -589,10 +791,29 @@ def demo_cli(cfg: RTCDemoConfig):
     # Create action queue for communication between threads
     action_queue = ActionQueue(cfg.rtc)
 
+    # Enter-key park/resume controller, shared across all worker threads
+    interrupt = InterruptController()
+
+    # Resolve the free_state file matching this robot (Enter-park target).
+    try:
+        free_state_path = resolve_free_state_path(cfg)
+        logger.info(f"[INTERRUPT] free_state target: {free_state_path}")
+    except Exception as e:
+        free_state_path = None
+        logger.warning(f"[INTERRUPT] free_state unavailable ({e}); Enter-park will only freeze.")
+
     # Start chunk requester thread
     get_actions_thread = Thread(
         target=get_actions,
-        args=(policy, robot_wrapper, robot_observation_processor, action_queue, shutdown_event, cfg),
+        args=(
+            policy,
+            robot_wrapper,
+            robot_observation_processor,
+            action_queue,
+            shutdown_event,
+            interrupt,
+            cfg,
+        ),
         daemon=True,
         name="GetActions",
     )
@@ -602,12 +823,30 @@ def demo_cli(cfg: RTCDemoConfig):
     # Start action executor thread
     actor_thread = Thread(
         target=actor_control,
-        args=(robot_wrapper, robot_action_processor, action_queue, shutdown_event, cfg),
+        args=(robot_wrapper, robot_action_processor, action_queue, shutdown_event, interrupt, cfg),
         daemon=True,
         name="Actor",
     )
     actor_thread.start()
     logger.info("Started actor thread")
+
+    # Start keyboard listener thread (Enter parks at free_state / resumes)
+    keyboard_thread = Thread(
+        target=keyboard_listener,
+        args=(
+            interrupt,
+            action_queue,
+            robot_wrapper,
+            free_state_path,
+            cfg.fps,
+            cfg.free_state_move_duration,
+            shutdown_event,
+        ),
+        daemon=True,
+        name="KeyboardListener",
+    )
+    keyboard_thread.start()
+    logger.info("Started keyboard listener thread")
 
     logger.info("Started stop by duration thread")
 
@@ -616,14 +855,19 @@ def demo_cli(cfg: RTCDemoConfig):
     start_time = time.time()
 
     try:
-        while not shutdown_event.is_set() and (time.time() - start_time) < cfg.duration:
+        # Parked time is excluded from the duration so a park never times the run out.
+        while not shutdown_event.is_set() and (
+            time.time() - start_time - interrupt.parked_total()
+        ) < cfg.duration:
             time.sleep(10)
 
+            elapsed = time.time() - start_time - interrupt.parked_total()
+
             # Log queue status periodically
-            if int(time.time() - start_time) % 5 == 0:
+            if int(elapsed) % 5 == 0:
                 logger.info(f"[MAIN] Action queue size: {action_queue.qsize()}")
 
-            if time.time() - start_time > cfg.duration:
+            if elapsed > cfg.duration:
                 break
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, shutting down...")

@@ -8,10 +8,10 @@
 #  ARM_SIDE 로 좌/우 팔 선택 (default: left = robot6):
 #    ARM_SIDE=left  → follower=so101_robot6 (/dev/ttyACM1)
 #                     leader=so101_robot2_leader (/dev/ttyACM3)
-#                     wrist cam=/dev/video2
+#                     wrist cam=/dev/video0     (USB 04:00.0-2)
 #    ARM_SIDE=right → follower=so101_robot7 (/dev/ttyACM4)
 #                     leader=so101_robot3_leader (/dev/ttyACM5)
-#                     wrist cam=/dev/video16
+#                     wrist cam=/dev/video2     (USB 16:00.4-2)
 #
 #  Top camera (RealSense 254622075836) 는 항상 활성화. WS4 전용 RS.
 #
@@ -69,14 +69,14 @@ case "$ARM_SIDE" in
         _DEFAULT_FOLLOWER_ID="so101_robot6"
         _DEFAULT_LEADER_PORT="/dev/ttyACM3"
         _DEFAULT_LEADER_ID="so101_robot2_leader"
-        _DEFAULT_WRIST_CAM_ID="/dev/video2"
+        _DEFAULT_WRIST_CAM_ID="/dev/video0"
         ;;
     right)
         _DEFAULT_FOLLOWER_PORT="/dev/ttyACM4"
         _DEFAULT_FOLLOWER_ID="so101_robot7"
         _DEFAULT_LEADER_PORT="/dev/ttyACM5"
         _DEFAULT_LEADER_ID="so101_robot3_leader"
-        _DEFAULT_WRIST_CAM_ID="/dev/video16"
+        _DEFAULT_WRIST_CAM_ID="/dev/video2"
         ;;
     *)
         echo "[ERROR] ARM_SIDE 는 left|right 중 하나여야 합니다 (현재: '$ARM_SIDE')" >&2

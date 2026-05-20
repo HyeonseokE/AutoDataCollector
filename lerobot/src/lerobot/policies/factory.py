@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import importlib
 import logging
-from typing import Any, TypedDict, Unpack
+from typing import Any, TypedDict
+try:
+    from typing import Unpack  # Python 3.11+ native
+except ImportError:  # pragma: no cover
+    from typing_extensions import Unpack  # Python 3.10 fallback
 
 import torch
 

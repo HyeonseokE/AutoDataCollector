@@ -339,7 +339,11 @@ class SmolVLMWithExpertModel(nn.Module):
 
         # Expert
         expert_layer = model_layers[1][layer_idx]
-        if expert_layer is not None:
+        # Mirror forward_attn_layer (line 215): skip when either the expert layer
+        # OR the expert input is None. preselective_filter 의 prefix-only encoder
+        # 호출 (inputs_embeds=[prefix, None]) 시 expert 처리 skip 해야 .input_layernorm(None)
+        # AttributeError ('NoneType' has no 'dtype') 가 안 난다.
+        if expert_layer is not None and inputs_embeds[1] is not None:
             expert_hidden_states = expert_layer.input_layernorm(inputs_embeds[1])
 
             expert_input_shape = expert_hidden_states.shape[:-1]

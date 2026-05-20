@@ -19,7 +19,11 @@ import logging
 import math
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, Unpack
+from typing import TYPE_CHECKING, Literal, TypedDict
+try:
+    from typing import Unpack  # Python 3.11+ native
+except ImportError:  # pragma: no cover
+    from typing_extensions import Unpack  # Python 3.10 fallback
 
 import numpy as np
 import torch

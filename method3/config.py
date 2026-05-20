@@ -97,6 +97,8 @@ def load_phase2_config(
     reembedding = ReembeddingConfig(
         dct_coeffs=dct,
         skip_invalid=bool(re.get("skip_invalid", False)),
+        show_progress=bool(re.get("show_progress", True)),
+        frame_stride=int(re.get("frame_stride", 1)),
     )
 
     return Method3AcquisitionConfig(

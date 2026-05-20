@@ -442,6 +442,66 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Perturbation] Failed to read phase1_config.yaml: {e}")
             return None
 
+    def _setup_phase1_readiness_hook(self) -> None:
+        """Build the per-episode Phase1 readiness hook.
+
+        Read precedence (mirror of ``_setup_perturbation_on_skills``):
+
+          1. ``pipeline_config/phase1_config.yaml`` → ``readiness:`` section
+             (preferred — Phase1 settings live in the Phase1-dedicated file)
+          2. ``recording_config_ws*.yaml`` → ``method3_phase1:`` section
+             (fallback for ergonomics; emits a deprecation hint)
+
+        Disabled (no-op hook) when neither file has the section or
+        ``enabled: false``. Idempotent — re-reads each call so edits between
+        resume retries take effect on the next run.
+        """
+        from method3_integration import Phase1ReadinessHook, Phase1ReadinessHookConfig
+        # default-disabled hook so the loop call site can unconditionally check
+        # `.enabled` without None-guards.
+        self._phase1_readiness_hook = Phase1ReadinessHook(Phase1ReadinessHookConfig())
+
+        # ── 1) phase1_config.yaml.readiness — preferred source.
+        section: dict | None = None
+        source: str | None = None
+        ph1_path = Path(__file__).resolve().parent / "pipeline_config" / "phase1_config.yaml"
+        if ph1_path.exists():
+            try:
+                import yaml as _yaml
+                with open(ph1_path, "r") as f:
+                    ph1_cfg = _yaml.safe_load(f) or {}
+                if ph1_cfg.get("readiness") is not None:
+                    section = ph1_cfg["readiness"]
+                    source = str(ph1_path.name)
+            except Exception as e:
+                print(f"[method3:phase1] phase1_config.yaml read failed: {e}")
+
+        # ── 2) recording_config_ws*.yaml.method3_phase1 — fallback (legacy).
+        if section is None and self.recording_config:
+            rc_path = Path(self.recording_config)
+            if rc_path.exists():
+                try:
+                    import yaml as _yaml
+                    with open(rc_path, "r") as f:
+                        rc_cfg = _yaml.safe_load(f) or {}
+                    if rc_cfg.get("method3_phase1") is not None:
+                        section = rc_cfg["method3_phase1"]
+                        source = f"{rc_path.name} (deprecated location — move to phase1_config.yaml readiness:)"
+                except Exception as e:
+                    print(f"[method3:phase1] recording_config read failed: {e}")
+
+        if section is None:
+            return
+
+        hook_cfg = Phase1ReadinessHookConfig.from_yaml_section(section)
+        self._phase1_readiness_hook = Phase1ReadinessHook(hook_cfg)
+        if hook_cfg.enabled:
+            print(
+                f"[method3:phase1] readiness hook ENABLED ← {source} | "
+                f"B₁_min={hook_cfg.phase1_min} B₁_max={hook_cfg.phase1_max} "
+                f"τ_ready={hook_cfg.tau_ready} auto_stop={hook_cfg.auto_stop_on_ready}"
+            )
+
     def _setup_perturbation_on_skills(self) -> None:
         """Wire the Phase1 subgoal selector from phase1_config.yaml to skills.
 
@@ -1216,14 +1276,14 @@ class ForwardAndResetPipeline(BasePipeline):
         self._skill_planner_chunk_size = 50
         self._skill_planner_ingest_thread = None
 
-        # mode 결정 — phase2_config.yaml.skill_planner_transport.mode 만 읽는다.
-        # endpoint / policy / buffer 등 server 운영 설정은 server yaml 에서 머지.
+        # mode + server 운영 설정 — phase2_config.yaml 만 읽는다.
+        # 2026-05-21: 옛 phase2_server_infer_settings.yaml 의 transport/policy/selector
+        # 섹션을 phase2_config.yaml top-level 로 통합. 단일 SoT.
         psf_raw: dict = {}
         full_cfg: dict = {}      # legacy fallback container — 미사용 path 라도 정의 보장
         cfg_src: str = ""
         pkg_root = Path(__file__).resolve().parent / "pipeline_config"
         ph2_path = pkg_root / "phase2_config.yaml"
-        server_yaml_path = pkg_root / "phase2_server_infer_settings.yaml"
         try:
             import yaml as _yaml
         except ImportError:
@@ -1237,27 +1297,18 @@ class ForwardAndResetPipeline(BasePipeline):
                     key = "skill_planner_transport" if ph2_cfg.get("skill_planner_transport") else "preselective_filter (legacy)"
                     cfg_src = f"phase2_config.yaml [{key}]"
                     print(f"[skill_planner_transport] mode-yaml ← {ph2_path} [{key}]")
-            except Exception as e:
-                print(f"[skill_planner_transport] phase2_config.yaml read failed ({e}); "
-                      f"falling back to recording_config")
-        # server 운영 설정 머지 — endpoint / policy / buffer / debug
-        if _yaml and server_yaml_path.exists():
-            try:
-                with open(server_yaml_path, "r") as f:
-                    srv_cfg = _yaml.safe_load(f) or {}
-                # 평탄화: transport.address → transport_address, transport.timeout_s → transport_timeout_s
-                t = srv_cfg.get("transport") or {}
+                # transport/policy/selector 머지 — 같은 yaml 의 top-level.
+                t = ph2_cfg.get("transport") or {}
                 psf_raw.setdefault("transport_address", t.get("address"))
                 psf_raw.setdefault("transport_timeout_s", t.get("timeout_s"))
                 psf_raw.setdefault("debug_verbose", t.get("debug_verbose", False))
-                # policy / selector 도 머지
-                if "policy" not in psf_raw and "policy" in srv_cfg:
-                    psf_raw["policy"] = srv_cfg["policy"]
-                if "selector" not in psf_raw and "selector" in srv_cfg:
-                    psf_raw["selector"] = srv_cfg["selector"]
-                print(f"[skill_planner_transport] server-yaml ← {server_yaml_path}")
+                if "policy" not in psf_raw and "policy" in ph2_cfg:
+                    psf_raw["policy"] = ph2_cfg["policy"]
+                if "selector" not in psf_raw and "selector" in ph2_cfg:
+                    psf_raw["selector"] = ph2_cfg["selector"]
             except Exception as e:
-                print(f"[skill_planner_transport] server yaml read failed ({e})")
+                print(f"[skill_planner_transport] phase2_config.yaml read failed ({e}); "
+                      f"falling back to recording_config")
         if not psf_raw and self.recording_config:
             cfg_path = Path(self.recording_config)
             if cfg_path.exists():
@@ -4524,6 +4575,10 @@ class ForwardAndResetPipeline(BasePipeline):
         self._session_dir = session_dir
         self._finalize_subgoal_buffer(session_dir)
         self._setup_phase2_session(session_dir)
+        # Method3 Stage 1 — per-episode Phase1 readiness hook (opt-in via
+        # method3_phase1 section of recording config). When enabled, the loop
+        # can early-stop on R_ready > τ or B₁_max.
+        self._setup_phase1_readiness_hook()
         seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
 
         # 헤더 출력
@@ -4610,6 +4665,18 @@ class ForwardAndResetPipeline(BasePipeline):
                 import traceback; traceback.print_exc()
                 all_results['episodes'].append({'episode': episode_num, 'result': None, 'success': False, 'error': str(e)})
 
+            # Method3 Stage 1 — Phase1 readiness check after each episode.
+            # Disabled (no-op) when method3_phase1.enabled is false in yaml.
+            _hook = getattr(self, "_phase1_readiness_hook", None)
+            if _hook is not None and _hook.enabled:
+                _sel = getattr(self, "_subgoal_selector", None)
+                _buf = getattr(_sel, "buffer", None) if _sel is not None else None
+                if _hook.should_stop(episode_num, _buf):
+                    print(MAGENTA + BOLD +
+                          f"  [method3:phase1] loop terminated early at ep={episode_num} "
+                          f"(reason={_hook.stop_reason})  ".center(70) + RESET)
+                    break
+
             time.sleep(2)
 
         self._finalize_session(all_results, session_dir, num_episodes, instruction, objects, skip_reset)
@@ -4663,6 +4730,8 @@ class ForwardAndResetPipeline(BasePipeline):
         self._session_dir = session_dir
         self._finalize_subgoal_buffer(session_dir)
         self._setup_phase2_session(session_dir)
+        # Method3 Stage 1 — readiness hook on resume too (same opt-in via yaml).
+        self._setup_phase1_readiness_hook()
         batch_slots, seed_positions, batch_attempted = self._load_resume_state(session_dir)
 
         # 헤더 출력
@@ -4840,6 +4909,17 @@ class ForwardAndResetPipeline(BasePipeline):
                     print(f"\n{RED}[{episode_num:02d}/{num_episodes:02d}] Error: {e}{RESET}")
                     import traceback; traceback.print_exc()
                     all_results['episodes'].append({'episode': episode_num, 'result': None, 'success': False, 'error': str(e)})
+
+                # Method3 Stage 1 — Phase1 readiness check (same hook as run_multiple_episodes).
+                _hook = getattr(self, "_phase1_readiness_hook", None)
+                if _hook is not None and _hook.enabled:
+                    _sel = getattr(self, "_subgoal_selector", None)
+                    _buf = getattr(_sel, "buffer", None) if _sel is not None else None
+                    if _hook.should_stop(episode_num, _buf):
+                        print(MAGENTA + BOLD +
+                              f"  [method3:phase1] resume loop terminated early at ep={episode_num} "
+                              f"(reason={_hook.stop_reason})  ".center(70) + RESET)
+                        break
                 time.sleep(2)
 
         self._finalize_session(all_results, session_dir, num_episodes, instruction, objects, skip_reset)

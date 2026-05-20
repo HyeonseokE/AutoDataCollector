@@ -6,8 +6,9 @@
 # SSH port forwarding tunnel 을 열어 *로컬 client* 가 yaml 의
 # ``transport.address: 127.0.0.1:<port>`` 그대로 호출할 수 있게 한다.
 #
-# 모든 연결 정보는 ``pipeline_config/phase2_server_infer_settings.yaml`` 의
-# ``remote:`` 섹션에서 자동으로 읽어온다. ~/.ssh/config 를 따로 건드릴 필요 없음.
+# 모든 연결 정보는 ``pipeline_config/phase2_config.yaml`` 의 ``remote:``
+# 섹션에서 자동으로 읽어온다. ~/.ssh/config 를 따로 건드릴 필요 없음.
+# (옛 phase2_server_infer_settings.yaml 는 2026-05-21 통합됨.)
 #
 # 우선순위:
 #   shell env > yaml 값 > built-in default
@@ -25,7 +26,7 @@ set -euo pipefail
 # ============================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PHASE2_SERVER_YAML="${PHASE2_SERVER_YAML:-$PROJ_ROOT/pipeline_config/phase2_server_infer_settings.yaml}"
+PHASE2_SERVER_YAML="${PHASE2_SERVER_YAML:-$PROJ_ROOT/pipeline_config/phase2_config.yaml}"
 
 # ============================================================
 # Helpers

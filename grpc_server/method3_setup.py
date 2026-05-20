@@ -87,54 +87,44 @@ def setup_method3_phase2_server(
         Method3ServerStack 또는 None (preselective_filter / encoder 가 yaml 에서
         비활성화돼 있으면).
     """
-    # 우선순위:
-    #   1) phase2_server_infer_settings.yaml (server 운영 설정 — endpoint/policy/buffer)
-    #   2) phase2_config.yaml.skill_planner_transport (mode 만 가짐)
-    #   3) phase2_config.yaml.preselective_filter      (legacy alias)
-    #   4) recording_config.preselective_filter         (legacy fallback)
+    # 2026-05-21: 옛 phase2_server_infer_settings.yaml 를 phase2_config.yaml 으로
+    # 통합. server 운영 설정 (transport/policy/selector/buffer/remote) 도 phase2_config
+    # 의 top-level 섹션에서 읽음. VLA checkpoint 는 phase2_config.yaml 의
+    # ``phase1_trained_vla_path`` 가 *유일한 SoT* — client/server mismatch 방지.
     psf_raw: dict = {}
     ph2_yaml_path = Path(phase2_yaml) if phase2_yaml else None
     ph2_raw = _load_phase2_yaml(recording_cfg, ph2_yaml_path)
     psf_raw = dict(
         ph2_raw.get("skill_planner_transport")
-        or ph2_raw.get("preselective_filter")
         or recording_cfg.get("preselective_filter")
         or {}
     )
-    # 서버 운영 설정 머지 — phase2_server_infer_settings.yaml
-    server_yaml_path = (
-        (ph2_yaml_path.parent / "phase2_server_infer_settings.yaml")
-        if ph2_yaml_path else None
-    )
-    if server_yaml_path and server_yaml_path.exists():
-        try:
-            with open(server_yaml_path, "r", encoding="utf-8") as f:
-                srv_cfg = yaml.safe_load(f) or {}
-            t = srv_cfg.get("transport") or {}
-            psf_raw.setdefault("transport_address", t.get("address"))
-            psf_raw.setdefault("transport_timeout_s", t.get("timeout_s"))
-            psf_raw.setdefault("debug_verbose", t.get("debug_verbose", False))
-            if "policy" not in psf_raw and "policy" in srv_cfg:
-                psf_raw["policy"] = srv_cfg["policy"]
-            if "selector" not in psf_raw and "selector" in srv_cfg:
-                psf_raw["selector"] = srv_cfg["selector"]
-            # buffer override
-            buf = srv_cfg.get("buffer") or {}
-            if db_save_dir is None and buf.get("save_dir"):
-                db_save_dir = buf["save_dir"]
-            if buf.get("filename"):
-                db_filename = buf["filename"]
-            print(f"[method3_setup] server-yaml ← {server_yaml_path}")
-        except Exception as e:
-            print(f"[method3_setup] server yaml read failed ({e})")
+    # 서버 운영 설정 — phase2_config.yaml 의 top-level 섹션에서 머지.
+    t = ph2_raw.get("transport") or {}
+    psf_raw.setdefault("transport_address", t.get("address"))
+    psf_raw.setdefault("transport_timeout_s", t.get("timeout_s"))
+    psf_raw.setdefault("debug_verbose", t.get("debug_verbose", False))
+    if "policy" not in psf_raw and "policy" in ph2_raw:
+        psf_raw["policy"] = ph2_raw["policy"]
+    if "selector" not in psf_raw and "selector" in ph2_raw:
+        psf_raw["selector"] = ph2_raw["selector"]
+    buf = ph2_raw.get("buffer") or {}
+    if db_save_dir is None and buf.get("save_dir"):
+        db_save_dir = buf["save_dir"]
+    if buf.get("filename"):
+        db_filename = buf["filename"]
 
     if not psf_raw:
         return None
 
+    # VLA checkpoint 의 *유일한 source* — phase2_config.yaml.phase1_trained_vla_path.
+    # 옛 policy.checkpoint 키는 phase2_config 의 phase1_trained_vla_path 와 mismatch
+    # race 가 잦아 *제거*. policy 안의 다른 키 (family/device/autocast_dtype/state_weight)
+    # 는 server runtime config 로 유지.
     policy_cfg = psf_raw.get("policy") or {}
-    ckpt = policy_cfg.get("checkpoint")
+    ckpt = ph2_raw.get("phase1_trained_vla_path") or policy_cfg.get("checkpoint")
     if not ckpt:
-        print("[method3_setup] no VLA checkpoint specified — disabling")
+        print("[method3_setup] no VLA checkpoint — set phase1_trained_vla_path in phase2_config.yaml; disabling")
         return None
 
     # 1) VLA encoder (frozen) — shared dep, encode + (옵션) denoise loss

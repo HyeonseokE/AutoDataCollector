@@ -266,7 +266,7 @@ else
   warn "  copy it from your robot host:"
   warn "    scp <robot_host>:<path>/AutoDataCollector/pipeline_config/recording_config_ws3.yaml \\"
   warn "        $YAML"
-  warn "  the server reads phase2_server_infer_settings + skill_perturbation sections."
+  warn "  the server reads phase2_config.yaml (server-side sections) + skill_perturbation."
 fi
 
 # ──────────────────────────────────────────────────────────────────────

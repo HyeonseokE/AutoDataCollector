@@ -115,8 +115,9 @@ reembedding:
   # < R 인 frame 만 re-embed. cheap parquet read 로 *video decode 없이* pre-pass.
   # kNN 결과 보존 (candidate neighbor 는 어차피 subgoal 근처) — spec §6 의 *목적*
   # 충족하면서 10x 가속. null 이면 spec 정석 전체 re-embed.
-  subgoal_filter_radius_m: 0.05    # 5 cm — 정밀 grasp tolerance, ~1.5x speedup
+  subgoal_filter_radius_m: 0.03    # 3 cm — *공격적 filter* (~3000 frames keep). client/server 토론 후 사용자 결정.
   subgoal_filter_min_keep: 30      # filter 후 frame 수가 이보다 적으면 R 자동 확장
+  decode_workers: 16               # video decode 병렬 thread 수. H100 server (64+ cores) 권장 16. RTX 3050 권장 4.
 
 # =============================================================================
 # Phase2 Server (H100 gRPC) — 옛 phase2_server_infer_settings.yaml 통합 (2026-05-21)

@@ -103,6 +103,7 @@ def load_phase2_config(
         batch_size=int(re.get("batch_size", 32)),
         subgoal_filter_radius_m=(None if _sg_r is None else float(_sg_r)),
         subgoal_filter_min_keep=int(re.get("subgoal_filter_min_keep", 30)),
+        decode_workers=int(re.get("decode_workers", 1)),
     )
 
     return Method3AcquisitionConfig(

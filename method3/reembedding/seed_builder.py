@@ -53,6 +53,10 @@ class ReembeddingConfig:
     subgoal_filter_min_keep: int = 30
                                  # filter 후 frame 수가 이보다 적으면 radius
                                  # 자동 확장 (× 1.5 까지 최대 3회 retry).
+    decode_workers: int = 1      # observation_loader 의 video decode 병렬도.
+                                 # 1 = 순차 (legacy). >1 = ThreadPoolExecutor.
+                                 # I/O bound 라 thread 가 GIL 영향 거의 없음.
+                                 # H100 server (64+ cores) 권장: 16. RTX 3050: 4.
 
 
 def _apply_subgoal_filter(
@@ -234,7 +238,14 @@ def build_phase1_vector_db(
             chunk_indices = [i for i, _ in keep]
             chunk_entries = [e for _, e in keep]
 
-        observations = [observation_loader(e.observation_ref) for e in chunk_entries]
+        # video decode — workers > 1 면 ThreadPoolExecutor 로 병렬 (I/O bound)
+        if cfg.decode_workers > 1 and len(chunk_entries) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=int(cfg.decode_workers)) as _pool:
+                observations = list(_pool.map(
+                    lambda e: observation_loader(e.observation_ref), chunk_entries))
+        else:
+            observations = [observation_loader(e.observation_ref) for e in chunk_entries]
         instructions = [e.instruction for e in chunk_entries]
 
         # §6 — VLA encoder. batch path 가 있으면 한 번에, 없으면 frame 별 loop.

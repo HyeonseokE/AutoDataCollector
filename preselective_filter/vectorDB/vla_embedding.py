@@ -239,6 +239,103 @@ class _TorchVLAExtractor(VLAKeyExtractor):
         denom = m.sum().clamp(min=1.0)
         return ((f * m[:, None]).sum(dim=0) / denom).cpu().numpy()
 
+    def _masked_mean_batch(self, feats: Any, pad_mask: Any) -> np.ndarray:
+        """Mean-pool feats (B, L, H) per-sample over pad_mask (B, L) → (B, H)."""
+        torch = self._torch
+        f = feats.to(torch.float32)
+        if pad_mask is None:
+            return f.mean(dim=1).cpu().numpy()
+        m = pad_mask.to(torch.float32)
+        denom = m.sum(dim=1, keepdim=True).clamp(min=1.0)
+        return ((f * m.unsqueeze(-1)).sum(dim=1) / denom).cpu().numpy()
+
+    def _build_batch_stacked(
+        self, observations: list, instructions: list, states: list,
+    ) -> dict[str, Any]:
+        """N single contexts → batch_size=N preprocessed dict.
+
+        각 single ``_build_batch(o,i,s) → preprocessor`` 결과의 같은 key tensor
+        들을 dim 0 으로 concat. instruction 이 chunk 안에서 다르면 token sequence
+        길이가 달라질 수 있어 max-len 으로 right-pad. images / state 같은 고정
+        shape tensor 는 단순 cat.
+        """
+        torch = self._torch
+        pres = []
+        for o, i, s in zip(observations, instructions, states):
+            single = self._build_batch(o, str(i), s)
+            pres.append(self.preprocessor(single))
+        if not pres:
+            return {}
+        all_keys = set().union(*(p.keys() for p in pres))
+        out: dict[str, Any] = {}
+        for k in all_keys:
+            vals = [p.get(k) for p in pres]
+            if all(torch.is_tensor(v) for v in vals if v is not None):
+                tensors = [v for v in vals if v is not None]
+                # variable seq_len 처리 (예: 다른 instruction → 다른 token length)
+                if all(t.dim() >= 2 for t in tensors):
+                    lens = [t.shape[1] for t in tensors]
+                    if any(l != lens[0] for l in lens):
+                        max_len = max(lens)
+                        padded = []
+                        for t in tensors:
+                            if t.shape[1] < max_len:
+                                # pad spec: F.pad 는 마지막 dim 부터 → dim=1 만 pad
+                                pad = (0,) * (2 * (t.dim() - 2)) + (0, max_len - t.shape[1])
+                                padded.append(torch.nn.functional.pad(t, pad))
+                            else:
+                                padded.append(t)
+                        tensors = padded
+                out[k] = torch.cat(tensors, dim=0)
+            else:
+                # non-tensor (예: "task" str) — list 로 보관
+                out[k] = vals
+        return out
+
+    def encode_batch(
+        self, observations: list, instructions: list, states: list,
+    ) -> np.ndarray:
+        """Batched encode — N contexts → (N, D) key vectors.
+
+        subclass 가 ``_backbone_feature_batch`` 를 구현해야 한다. 미구현 family
+        는 single-loop fallback (NotImplementedError 시 caller 가 처리).
+        """
+        n = len(observations)
+        assert n == len(instructions) == len(states), (
+            f"observations/instructions/states 길이가 다름: "
+            f"{n}, {len(instructions)}, {len(states)}"
+        )
+        if n == 0:
+            return np.zeros((0, self._embedding_dim or 0), dtype=np.float32)
+        if not hasattr(self, "_backbone_feature_batch"):
+            raise NotImplementedError(
+                f"{type(self).__name__} does not implement _backbone_feature_batch"
+            )
+
+        torch = self._torch
+        with torch.no_grad():
+            vl = self._backbone_feature_batch(observations, instructions, states)  # (N, D_vl)
+
+        # per-sample L2 normalize (axis=-1)
+        vl_norm = np.linalg.norm(vl, axis=-1, keepdims=True)
+        vl_unit = vl / np.maximum(vl_norm, 1e-12)
+
+        if self._fuses_state:
+            keys = np.ascontiguousarray(vl_unit, dtype=np.float32)
+        else:
+            states_arr = np.stack([
+                np.asarray(s, dtype=np.float32).reshape(-1) for s in states
+            ])  # (N, D_s)
+            s_norm = np.linalg.norm(states_arr, axis=-1, keepdims=True)
+            states_unit = (states_arr / np.maximum(s_norm, 1e-12)) * self.state_weight
+            keys = np.ascontiguousarray(
+                np.concatenate([vl_unit, states_unit], axis=1), dtype=np.float32,
+            )
+
+        if self._embedding_dim is None:
+            self._embedding_dim = int(keys.shape[1])
+        return keys
+
     def encode(
         self, observation: Any, instruction: str, state: np.ndarray,
     ) -> np.ndarray:
@@ -396,6 +493,47 @@ class _SmolVLAExtractor(_TorchVLAExtractor):
             )
         prefix_out = outputs_embeds[0]
         return self._masked_mean(prefix_out, prefix_pad_masks)
+
+    def _backbone_feature_batch(self, observations, instructions, states):
+        """Batched variant of ``_backbone_feature`` — N contexts → (N, D_vl).
+
+        모든 single 의 ``_build_batch + preprocessor`` 결과를 dim 0 으로 stack 한
+        뒤 같은 forward path 를 한 번만 호출. embed_prefix / vlm_with_expert
+        모두 batch dim 을 그대로 지원하므로 single-loop 와 *수치 동일* 한 결과
+        를 N배 throughput 으로 얻는다.
+        """
+        from lerobot.policies.smolvla.modeling_smolvla import make_att_2d_masks
+
+        torch = self._torch
+        batch = self._build_batch_stacked(observations, instructions, states)
+
+        model = self.policy.model
+        images, img_masks = self.policy.prepare_images(batch)
+        proc_state = self.policy.prepare_state(batch)
+        tokens = batch[self._lang_tokens_key]
+        masks = batch[self._lang_mask_key]
+
+        with self._autocast():
+            prefix_embs, prefix_pad_masks, prefix_att_masks = model.embed_prefix(
+                images, img_masks, tokens, masks, state=proc_state,
+            )
+            ref_w = model.vlm_with_expert.get_vlm_model().text_model
+            if next(ref_w.parameters()).dtype == torch.bfloat16:
+                prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
+
+            att_2d = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+            position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+            outputs_embeds, _pkv = model.vlm_with_expert.forward(
+                attention_mask=att_2d,
+                position_ids=position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=False,
+                fill_kv_cache=False,
+            )
+        prefix_out = outputs_embeds[0]                       # (B, L, D_vl)
+        return self._masked_mean_batch(prefix_out, prefix_pad_masks)  # (B, D_vl)
 
 
 # --------------------------------------------------------------------------

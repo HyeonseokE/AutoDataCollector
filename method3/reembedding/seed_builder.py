@@ -37,9 +37,13 @@ class ReembeddingConfig:
                                  # (기본 False — §6 은 dataset 전체 re-embed)
     show_progress: bool = True   # tqdm progress bar (False → 무음)
     frame_stride: int = 1        # 매 frame_stride 번째 entry 만 re-embed.
-                                 # 1 = spec 정석 (전체). 5~10 = dense temporal
-                                 # sampling 의 redundancy 를 활용한 wall-clock
-                                 # speedup. retrieval-key 정확도는 거의 동일.
+                                 # 1 = spec 정석 (전체, 기본). 5~10 = dense
+                                 # temporal sampling redundancy 활용 wall-clock
+                                 # speedup. 정석을 원하면 그대로 1 유지.
+    batch_size: int = 32         # GPU batched VLA forward 배치. encoder 가
+                                 # ``encode_batch`` 를 지원하면 N개 한 번에
+                                 # forward → GPU 활용도 N배. 1 = single-loop
+                                 # legacy 경로.
 
 
 def _fallback_progress(iterable, total: int, label: str):
@@ -102,43 +106,87 @@ def build_phase1_vector_db(
     db = SkillVectorDB()
     stride = max(1, int(cfg.frame_stride))
     N_full = len(raw_dataset)
-    indices = range(0, N_full, stride)
+    indices = list(range(0, N_full, stride))
     N = len(indices)
     if stride > 1:
         print(f"[reembed] frame_stride={stride} → 처리할 entry {N_full} → {N} "
               f"({100.0 * N / max(1, N_full):.1f}%)")
-    # progress bar — 9k+ frames × VLA forward 의 진행 가시화. tqdm 미설치 시
-    # silent fallback (간단 % 로그). show_progress=False 면 무음.
+
+    batch_size = max(1, int(cfg.batch_size))
+    use_batch = batch_size > 1 and hasattr(encoder, "encode_batch")
+    if use_batch:
+        print(f"[reembed] GPU batched forward — batch_size={batch_size} "
+              f"(encoder={type(encoder).__name__}.encode_batch)")
+    else:
+        if batch_size > 1:
+            print(f"[reembed] batch_size={batch_size} 요청됐으나 encoder 가 "
+                  f"encode_batch 미지원 → single-loop fallback")
+        batch_size = 1
+
+    # progress bar 는 *frame 단위* 로 카운트한다 (batch 안에서도 frame 별 append).
     if cfg.show_progress:
         try:
             from tqdm.auto import tqdm
-            iterator = tqdm(indices, desc="[reembed] skill-wise DB build",
-                            unit="frame", dynamic_ncols=True, total=N)
+            pbar = tqdm(total=N, desc="[reembed] skill-wise DB build",
+                        unit="frame", dynamic_ncols=True)
         except ImportError:
-            iterator = _fallback_progress(indices, N, "skill-wise DB")
+            pbar = None
     else:
-        iterator = indices
-    for idx in iterator:
-        entry = raw_dataset.get(idx)
-        if cfg.skip_invalid and not entry.validity_flag:
-            continue
-        observation = observation_loader(entry.observation_ref)
-        e_vla = encoder.encode(observation, entry.instruction)            # §6
-        e_i = state_retrieval_key(e_vla, entry.proprioception)            # §7.3
-        z_i = dct_action_descriptor(entry.action_chunk, cfg.dct_coeffs)   # §4.2
-        db.append(VectorDBEntry(
-            skill_id=entry.skill_id,
-            state_key=e_i,
-            action_descriptor=z_i,
-            ref=raw_dataset.pointer(idx),                                 # §3.1 dataset_ref
-            meta={
-                "phase": "phase1",
-                "skill_id": entry.skill_id,
-                "subgoal": np.asarray(entry.subgoal, dtype=float).tolist(),
-                "planner_type": entry.planner_type,
-                "instruction": entry.instruction,
-                "time_index": int(entry.time_index),
-                "accepted_by": "phase1_seed",
-            },
-        ))
+        pbar = None
+
+    # chunked outer loop. batch_size=1 이면 기존 single-loop 와 동등.
+    processed = 0
+    for chunk_start in range(0, N, batch_size):
+        chunk_indices = indices[chunk_start: chunk_start + batch_size]
+        chunk_entries = [raw_dataset.get(i) for i in chunk_indices]
+
+        # skip_invalid 필터 — chunk 안에서 invalid 만 제외 (단순 in-place 필터)
+        if cfg.skip_invalid:
+            keep = [(i, e) for i, e in zip(chunk_indices, chunk_entries) if e.validity_flag]
+            if not keep:
+                if pbar:
+                    pbar.update(len(chunk_indices))
+                processed += len(chunk_indices)
+                continue
+            chunk_indices = [i for i, _ in keep]
+            chunk_entries = [e for _, e in keep]
+
+        observations = [observation_loader(e.observation_ref) for e in chunk_entries]
+        instructions = [e.instruction for e in chunk_entries]
+
+        # §6 — VLA encoder. batch path 가 있으면 한 번에, 없으면 frame 별 loop.
+        if use_batch and len(observations) > 1:
+            e_vla_batch = encoder.encode_batch(observations, instructions)   # (B, D_vla)
+        else:
+            e_vla_batch = np.stack([
+                encoder.encode(o, i) for o, i in zip(observations, instructions)
+            ])
+
+        # frame 단위 post-processing (CPU). DCT + state concat + db.append.
+        for j, (idx, entry) in enumerate(zip(chunk_indices, chunk_entries)):
+            e_vla = np.asarray(e_vla_batch[j], dtype=np.float64).reshape(-1)
+            e_i = state_retrieval_key(e_vla, entry.proprioception)           # §7.3
+            z_i = dct_action_descriptor(entry.action_chunk, cfg.dct_coeffs)  # §4.2
+            db.append(VectorDBEntry(
+                skill_id=entry.skill_id,
+                state_key=e_i,
+                action_descriptor=z_i,
+                ref=raw_dataset.pointer(idx),                                # §3.1
+                meta={
+                    "phase": "phase1",
+                    "skill_id": entry.skill_id,
+                    "subgoal": np.asarray(entry.subgoal, dtype=float).tolist(),
+                    "planner_type": entry.planner_type,
+                    "instruction": entry.instruction,
+                    "time_index": int(entry.time_index),
+                    "accepted_by": "phase1_seed",
+                },
+            ))
+
+        if pbar:
+            pbar.update(len(chunk_indices))
+        processed += len(chunk_indices)
+
+    if pbar:
+        pbar.close()
     return db

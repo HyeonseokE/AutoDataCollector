@@ -99,6 +99,7 @@ def load_phase2_config(
         skip_invalid=bool(re.get("skip_invalid", False)),
         show_progress=bool(re.get("show_progress", True)),
         frame_stride=int(re.get("frame_stride", 1)),
+        batch_size=int(re.get("batch_size", 32)),
     )
 
     return Method3AcquisitionConfig(

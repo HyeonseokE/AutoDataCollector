@@ -76,6 +76,32 @@ class PretrainedVLAStateEncoder:
             dtype=np.float64,
         ).reshape(-1)
 
+    def encode_batch(
+        self, observations: list, instructions: list,
+    ) -> np.ndarray:
+        """Batched encode — N contexts → (N, D_vla).
+
+        VLAKeyExtractor 가 ``encode_batch`` 를 지원하면 GPU 에서 한 번의
+        forward 로 N 개 처리. 미지원이면 single-loop fallback.
+        """
+        if self._closed:
+            raise RuntimeError("encoder already closed")
+        n = len(observations)
+        assert n == len(instructions)
+        if n == 0:
+            return np.zeros((0, self.embedding_dim or 0), dtype=np.float64)
+
+        states = [self._zero_state] * n
+        if hasattr(self._extractor, "encode_batch"):
+            return np.asarray(
+                self._extractor.encode_batch(observations, instructions, states),
+                dtype=np.float64,
+            )
+        # fallback — extractor 가 batch 미지원 family.
+        return np.stack([
+            self.encode(o, i) for o, i in zip(observations, instructions)
+        ])
+
     @property
     def embedding_dim(self) -> int | None:
         """VLA backbone 출력 차원. 첫 ``encode`` 호출 전엔 None."""

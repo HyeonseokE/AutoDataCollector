@@ -1,17 +1,18 @@
-"""Preselective acquirer gRPC server (retrieval-augmented).
+"""method3 phase2 useful-OOD gRPC server (server-side acquisition).
 
 Boots once on the planning host (e.g., H100) holding:
 - curobo MotionPlanner backend (in-process, GPU)
-- frozen VLA encoder (SmolVLA, key-embedding extractor — GPU)
-- IG·AC Selector + FaissBufferStore vector DB (server-local persistence)
+- frozen VLA encoder (smolvla / pi0 / pi05 / groot — GPU)
+- Phase2MISelector + SkillVectorDB (server-local persistence)
+- (옵션) LeRobotVLAInformativenessScorer for U_VLA (§12)
 
-The VLA is frozen and used ONLY to produce the FAISS key embedding
-(mean-pooled embed_prefix = VL feature + proprioception).
+Spec reference: final_method3_spec_useful_ood_updated §11-§13.
 
-A single client RPC `PlanAndSelect` does plan_batch → encode → IG·AC →
-returns chosen trajectory + selection_id. Pending (ctx, selection) tuples
-are kept in an in-memory dict keyed by selection_id; `CommitToBuffer`
-flushes them to the FaissBufferStore on judge-TRUE, or drops on judge-FALSE.
+A single client RPC ``PlanAndSelect`` does plan_batch → Phase2Candidate 변환
+→ Useful-OOD selection → returns chosen trajectory + selection_id.
+``IngestEpisode`` grows the SkillVectorDB from a streamed forward demo.
+``CommitToBuffer`` is retained for protocol compatibility (no-op in the new
+spec, since accept happens inline at PlanAndSelect time).
 
 Run:
     python -m preselective_rpc.server \\
@@ -38,7 +39,18 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from preselective_filter import Candidate, Context, Selection
+from method3.phase2_mi_selection import (
+    LeRobotVLAInformativenessScorer,
+    Phase2MISelector,
+    SkillVectorDB,
+    VectorDBEntry,
+)
+from method3.phase2_mi_selection.action_descriptor import dct_action_descriptor
+from method3.phase2_mi_selection.curobo_candidate_gen import (
+    CurobogenConfig,
+    candidates_from_trajectory_list,
+)
+from method3.reembedding.seed_builder import state_retrieval_key
 from preselective_rpc import preselective_pb2, preselective_pb2_grpc
 from preselective_rpc._codec import (
     decode_jpeg,
@@ -46,10 +58,7 @@ from preselective_rpc._codec import (
     decode_pickle,
     encode_pickle,
 )
-from preselective_filter.integration import (
-    setup_preselective_filter,
-    trajectory_to_action_chunk,
-)
+from preselective_rpc.method3_setup import setup_method3_phase2_server, Method3ServerStack
 
 
 # --------------------------------------------------------------------------
@@ -100,32 +109,46 @@ def _build_curobo(
 class PreselectiveAcquirerServicer(
     preselective_pb2_grpc.PreselectiveAcquirerServicer
 ):
+    """method3 phase2 useful-OOD acquirer (server-side).
+
+    선택 알고리즘은 옛 IG·AC 가 아니라 ``Phase2MISelector`` (§13.2). SkillVectorDB
+    는 PlanAndSelect 시점에 accepted 후보를 inline 으로 append (옛 *CommitToBuffer*
+    의 retro-commit 패턴 대체). IngestEpisode 는 raw demo frame 들을 직접
+    SkillVectorDB 에 append.
+    """
+
     def __init__(
         self,
-        selector,                    # preselective_filter.Selector
-        encoder,                     # preselective_filter.vectorDB.VLAKeyExtractor
-        curobo_backend,              # CuroboBackend
+        stack: Method3ServerStack,    # method3_setup 가 만든 bundle
+        curobo_backend,               # CuroboBackend
         recording_fps: int = 10,
         chunk_size: int = 50,
         debug_verbose: bool = False,
+        action_horizon: int = 12,
+        n_windows: int = 3,
     ) -> None:
-        self.selector = selector
-        self.encoder = encoder
+        self.stack = stack
+        self.selector = stack.selector
+        self.encoder = stack.encoder
+        self.vla_scorer = stack.vla_scorer
+        self.db = stack.db
+        self.db_path = stack.db_path
         self.curobo = curobo_backend
         self.recording_fps = int(recording_fps)
-        # Action-chunk resampling horizon. Buffer-only: action_dim is derived
-        # per-request as arm_dof+1 (no VLA padding). Every candidate in one
-        # plan_batch shares arm_dof, so all chunks are mutually comparable.
         self._chunk_size = int(chunk_size)
         self.debug_verbose = debug_verbose
 
-        # Selection cache — selection_id → (Context, Selection)
-        # Bounded by episode length × concurrent_clients; cleared on Commit.
-        self._pending: dict[str, tuple[Context, Selection]] = {}
+        # Phase2Candidate (T, H) chunking 파라미터 — curobo_candidate_gen 의 input.
+        self._candidate_cfg = CurobogenConfig(
+            n_windows=int(n_windows),
+            action_horizon=int(action_horizon),
+        )
 
-        # Serializes all VLA-encoder + buffer access. The encoder is
-        # thread-unsafe; with concurrent clients PlanAndSelect and the
-        # long-running IngestEpisode must not touch it at the same time.
+        # Selection cache — selection_id → (Phase2Candidate, Phase2Selection)
+        # CommitToBuffer 의 retro 호환 — 새 spec 에선 accept 가 inline 이라 unused.
+        self._pending: dict[str, tuple[Any, Any]] = {}
+
+        # Serializes all VLA-encoder + DB access (encoder thread-unsafe).
         self._lock = threading.Lock()
 
     # ----------------------------------------------------------------
@@ -162,70 +185,90 @@ class PreselectiveAcquirerServicer(
         if not cands:
             return preselective_pb2.PlanResponse(used_fallback=True)
 
-        # 2. Wrap curobo candidates into fixed-shape action chunks.
+        # 2. TrajectoryCandidate → Phase2Candidate.
+        #    encoder 와 candidate 변환은 lock 안에서 (encoder thread-unsafe).
         instruction = str(request.instruction or "")
         state_arr = np.asarray(state, dtype=float)
         skill_id = str(request.skill_id or "move_to")
+        # seed_subgoal anchor — client 가 보낸 goal_qpos 의 EE xyz 가 가장 자연.
+        # FK 없으면 goal_qpos 첫 3 element 를 placeholder (downstream 영향 작음).
+        try:
+            seed_xyz = np.asarray(goal_qpos, dtype=np.float64).reshape(-1)[:3]
+            if seed_xyz.shape[0] < 3:
+                seed_xyz = np.pad(seed_xyz, (0, 3 - seed_xyz.shape[0]))
+        except Exception:
+            seed_xyz = np.zeros(3, dtype=np.float64)
 
-        wrapped: list[Candidate] = []
-        for c in cands:
-            wp = c.waypoints
-            arm_dof = int(wp.shape[1])
-            times = np.arange(wp.shape[0], dtype=float) / float(self.recording_fps)
-            chunk = trajectory_to_action_chunk(
-                waypoints=wp,
-                times=times,
-                chunk_size=self._chunk_size,
-                action_dim=arm_dof + 1,   # no VLA padding — real dims only
-                fps=self.recording_fps,
-                current_gripper=0.0,
-                arm_dof=arm_dof,
-            )
-            wrapped.append(Candidate(
-                skill_id=skill_id, action_chunk=chunk, payload=c,
-            ))
-
-        # 3. Encode the FAISS key + run the selector under the encoder/buffer
-        #    lock (the frozen VLA is thread-unsafe; IngestEpisode shares it).
         try:
             with self._lock:
-                key_emb = self.encoder.encode(raw_imgs, instruction, state_arr)
-                ctx = Context(
-                    observation=np.zeros(0, dtype=np.float32),
-                    state=state_arr,
-                    instruction=instruction,
+                # 3. Phase2Candidate batch — encoder 가 state_keys 채움.
+                p2_cands = candidates_from_trajectory_list(
+                    cands,
                     skill_id=skill_id,
-                    key_embedding=key_emb,
+                    seed_subgoal=seed_xyz,
+                    current_observation=raw_imgs,
+                    instruction=instruction,
+                    encoder=self.encoder,
+                    config=self._candidate_cfg,
                 )
-                selection = self.selector.select(ctx, wrapped)
+                if not p2_cands:
+                    return preselective_pb2.PlanResponse(used_fallback=True)
+                # 4. Useful-OOD selection (§13.2): argmax U_VLA s.t. M̃_MI ≥ τ_MI.
+                #    vla_scorer 가 None 이면 argmax M_MI fallback.
+                selection = self.selector.select(p2_cands, vla_scorer=self.vla_scorer)
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(f"encode/select failed: {e}")
+            context.set_details(f"phase2 candidate/select failed: {e}")
             return preselective_pb2.PlanResponse()
-        chosen = selection.chosen_candidate.payload
 
-        # 4. selection_id is returned for protocol compatibility; the buffer is
-        #    now grown by IngestEpisode (raw demo), not by committing this pick.
+        chosen_p2 = selection.chosen_candidate
+        chosen_traj = chosen_p2.payload.get("traj") if isinstance(chosen_p2.payload, dict) else None
+        if chosen_traj is None:
+            # candidates_from_trajectory_list 가 payload 에 algo/cost 만 넣어둠 →
+            # 원본 TrajectoryCandidate 를 부속 참조로 다시 가져온다.
+            chosen_traj = cands[selection.chosen_index]
+
+        # 5. inline accept — useful-OOD 가 accepted 면 SkillVectorDB 에 즉시 append
+        #    (옛 CommitToBuffer 의 retro pattern 대체. 학습 데이터의 무결성은
+        #    client 의 judge-FALSE 시 IngestEpisode 미호출로 자연 보존).
         sel_id = uuid.uuid4().hex
+        if selection.accepted:
+            try:
+                with self._lock:
+                    self.selector.accept_to_buffer(
+                        chosen_p2,
+                        ref={"selection_id": sel_id, "skill_id": skill_id},
+                        meta={
+                            "algo": (chosen_p2.payload or {}).get("algo", ""),
+                            "u_vla": selection.u_vla_chosen,
+                            "instruction": instruction,
+                        },
+                    )
+            except Exception as e:
+                print(f"[server] accept_to_buffer failed: {e}")
 
-        # 5. Pack response
+        # 6. Pack response — TrajectoryCandidate.waypoints 그대로 (client 가 그걸 실행).
         traj_dict = {
-            "waypoints": np.asarray(chosen.waypoints, dtype=np.float32),
-            "times": (np.arange(chosen.waypoints.shape[0], dtype=np.float32)
+            "waypoints": np.asarray(chosen_traj.waypoints, dtype=np.float32),
+            "times": (np.arange(chosen_traj.waypoints.shape[0], dtype=np.float32)
                       / float(self.recording_fps)),
-            "algo": str(getattr(chosen, "algo", "curobo")),
-            "cost": float(getattr(chosen, "cost", 0.0)),
-            "seed": int(getattr(chosen, "seed", 0)),
+            "algo": str(getattr(chosen_traj, "algo", "curobo")),
+            "cost": float(getattr(chosen_traj, "cost", 0.0)),
+            "seed": int(getattr(chosen_traj, "seed", 0)),
         }
+        # score_report — useful-OOD 의 per-candidate report.
         score_report_json = "[]"
         try:
             import json
             score_report_json = json.dumps([
                 {
                     "i": r.candidate_index,
-                    "novelty": r.novelty_raw, "ig": r.ig,
-                    "consistency": r.consistency_raw, "ac": r.ac,
-                    "score": r.score,
+                    "delta_h_a": r.delta_h_a,
+                    "delta_h_a_given_s": r.delta_h_a_given_s,
+                    "m_mi": r.q2,
+                    "m_mi_norm": r.q2_norm,
+                    "u_vla": r.u_vla,
+                    "under_covered": r.under_covered,
                 }
                 for r in selection.reports
             ])
@@ -236,7 +279,8 @@ class PreselectiveAcquirerServicer(
             elapsed = (time.perf_counter() - t0) * 1000.0
             print(
                 f"[server] PlanAndSelect K={len(cands)} chose "
-                f"idx={selection.chosen_index} ({elapsed:.0f}ms) "
+                f"idx={selection.chosen_index} accepted={selection.accepted} "
+                f"u_vla={selection.u_vla_chosen} ({elapsed:.0f}ms) "
                 f"sel_id={sel_id[:8]}"
             )
 
@@ -245,59 +289,46 @@ class PreselectiveAcquirerServicer(
             chosen_index=int(selection.chosen_index),
             score_report_json=score_report_json,
             selection_id=sel_id,
-            used_fallback=False,
+            used_fallback=not selection.accepted,
         )
 
     # ----------------------------------------------------------------
     def CommitToBuffer(self, request, context):
-        committed = 0
-        dropped = 0
+        """Deprecated in the new spec.
+
+        method3 phase2 useful-OOD 는 PlanAndSelect 시점에 inline accept_to_buffer.
+        client 측이 judge-FALSE 면 IngestEpisode 를 *호출 안 함* 으로써 자연 보존.
+        호환을 위해 RPC 는 살아남지만 no-op + DB save 만 수행.
+        """
+        totals = {sid: len(self.db.entries(sid)) for sid in self.db.skill_ids()}
+        # PlanAndSelect 가 inline append 한 결과를 디스크로 flush — judge-TRUE 시 점만 save.
         if request.judge_true:
-            for sid in request.selection_ids:
-                pending = self._pending.pop(sid, None)
-                if pending is None:
-                    continue
-                ctx, selection = pending
-                try:
-                    self.selector.add_to_buffer(ctx, selection)
-                    committed += 1
-                except Exception as e:
-                    print(f"[server] add_to_buffer failed for {sid[:8]}: {e}")
-        else:
-            for sid in request.selection_ids:
-                if self._pending.pop(sid, None) is not None:
-                    dropped += 1
-
-        totals = {}
-        try:
-            totals = self.selector.buffer.summary()
-        except Exception:
-            pass
-
+            try:
+                self.db.save(self.db_path)
+            except Exception as e:
+                print(f"[server] DB save failed: {e}")
         if self.debug_verbose:
             print(
-                f"[server] Commit: judge={request.judge_true} "
-                f"committed={committed} dropped={dropped} "
+                f"[server] CommitToBuffer (compat-only): judge={request.judge_true} "
                 f"buffer={totals}"
             )
-
         return preselective_pb2.CommitResponse(
-            committed=committed, dropped=dropped, buffer_totals=totals,
+            committed=0, dropped=0, buffer_totals=totals,
         )
 
     # ----------------------------------------------------------------
     def IngestEpisode(self, request_iterator, context):
-        """Grow the vector DB from a streamed forward demo.
+        """Grow the SkillVectorDB from a streamed forward demo (raw phase1).
 
-        The client streams the recorded episode frame-by-frame; for each frame
-        the server encodes key_t with its frozen VLA and appends a
-        (key_t, value_t) buffer entry. Holds the encoder/buffer lock for the
-        whole episode so a concurrent PlanAndSelect can't race the encoder.
+        client streams 각 frame; server 가 encode (image+instr → VLA key, +proprio
+        concat) + action chunk DCT descriptor 로 ``VectorDBEntry`` 만들어 append.
+        useful-OOD 의 reference buffer (§14 의 ``B_t^{(m)} = P_phase1 ∪ D_phase2,t``)
+        가 이걸로 자란다.
         """
-        from preselective_filter.integration import ingest_frame
-
         t0 = time.perf_counter()
         n = 0
+        # config — phase2_config.yaml.reembedding.dct_coeffs 가 있으면 그것, 없으면 3.
+        dct_k = int(getattr(self.stack.config, "dct_coeffs", 3))
         try:
             with self._lock:
                 for fm in request_iterator:
@@ -307,25 +338,35 @@ class PreselectiveAcquirerServicer(
                             k: decode_jpeg(v)
                             for k, v in decode_pickle(fm.images_pickle).items()
                         }
-                    ingest_frame(
-                        self.encoder, self.selector.buffer,
-                        images=images,
-                        instruction=str(fm.instruction or ""),
-                        state=decode_ndarray(fm.state),
-                        action_chunk=decode_ndarray(fm.action_chunk),
-                        skill_id=str(fm.skill_id or "move_to"),
-                    )
+                    proprio = decode_ndarray(fm.state)
+                    action_chunk = decode_ndarray(fm.action_chunk)
+                    instruction = str(fm.instruction or "")
+                    skill_id = str(fm.skill_id or "move_to")
+                    # VLA key (zero-state — proprio 는 별도 concat in retrieval key)
+                    zero_state = np.zeros_like(np.asarray(proprio, dtype=np.float64))
+                    e_vla = self.encoder.encode(images, instruction, zero_state)
+                    state_key = state_retrieval_key(np.asarray(e_vla, dtype=np.float64), proprio)
+                    z_a = dct_action_descriptor(action_chunk, dct_k)
+                    self.db.append(VectorDBEntry(
+                        skill_id=skill_id,
+                        state_key=state_key,
+                        action_descriptor=z_a,
+                        ref={"source": "ingest_episode"},
+                        meta={"phase": "phase1", "instruction": instruction,
+                              "accepted_by": "phase1_seed"},
+                    ))
                     n += 1
+                # 에피소드 끝나면 디스크 flush
+                try:
+                    self.db.save(self.db_path)
+                except Exception as e:
+                    print(f"[server] DB save after IngestEpisode failed: {e}")
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"IngestEpisode failed after {n} frames: {e}")
             return preselective_pb2.IngestResponse(frames_ingested=n)
 
-        totals = {}
-        try:
-            totals = self.selector.buffer.summary()
-        except Exception:
-            pass
+        totals = {sid: len(self.db.entries(sid)) for sid in self.db.skill_ids()}
         if self.debug_verbose:
             elapsed = time.perf_counter() - t0
             print(
@@ -338,12 +379,7 @@ class PreselectiveAcquirerServicer(
 
     # ----------------------------------------------------------------
     def Ready(self, request, context):
-        totals = {}
-        try:
-            totals = self.selector.buffer.summary()
-        except Exception:
-            pass
-        sel_cfg = self.selector.config
+        totals = {sid: len(self.db.entries(sid)) for sid in self.db.skill_ids()}
         emb_dim = getattr(self.encoder, "embedding_dim", None)
         return preselective_pb2.ServerInfo(
             smolvla_checkpoint="<frozen VLA encoder>",
@@ -352,8 +388,9 @@ class PreselectiveAcquirerServicer(
             buffer_total=int(sum(totals.values())),
             buffer_per_skill=totals,
             selector_summary=(
-                f"FAISS retrieval k={sel_cfg.context_k} "
-                f"key_dim={emb_dim if emb_dim is not None else '?'}"
+                f"method3 Phase2MISelector tau_MI={self.stack.config.tau_MI} "
+                f"key_dim={emb_dim if emb_dim is not None else '?'} "
+                f"u_vla={'on' if self.vla_scorer else 'off'}"
             ),
         )
 
@@ -367,16 +404,30 @@ def serve(args: argparse.Namespace) -> None:
     with cfg_path.open("r", encoding="utf-8") as f:
         recording_cfg = yaml.safe_load(f)
 
-    print(f"[server] building Selector + VLA encoder from {cfg_path} ...")
-    result = setup_preselective_filter(recording_cfg)
-    if result is None:
+    print(f"[server] building method3 phase2 Phase2MISelector + VLA encoder from {cfg_path} ...")
+    # phase2_config.yaml — project_root 기준 표준 위치 시도 후 fallback.
+    phase2_yaml_path = project_root / "pipeline_config" / "phase2_config.yaml"
+    stack = setup_method3_phase2_server(
+        recording_cfg,
+        phase2_yaml=phase2_yaml_path if phase2_yaml_path.exists() else None,
+    )
+    if stack is None:
         raise RuntimeError(
-            "preselective_filter is disabled in the yaml — server has nothing to do."
+            "method3 phase2 server stack failed — VLA checkpoint missing or "
+            "phase2_config.yaml not found."
         )
-    selector, encoder = result
 
     print(f"[server] loading curobo backend ({args.urdf}) ...")
+    # skill perturbation 설정 — 새 phase2_config.yaml.skill_perturbation 우선,
+    # legacy recording_config.perturbation.skill 도 호환.
     skill_cfg = (recording_cfg.get("perturbation") or {}).get("skill") or {}
+    if phase2_yaml_path.exists():
+        try:
+            with phase2_yaml_path.open("r", encoding="utf-8") as _f:
+                ph2 = yaml.safe_load(_f) or {}
+            skill_cfg = ph2.get("skill_perturbation") or skill_cfg
+        except Exception:
+            pass
     curobo = _build_curobo(
         args.urdf, skill_cfg, project_root,
         transit_pitch_max_deg=recording_cfg.get("transit_pitch_max_deg"),
@@ -385,8 +436,7 @@ def serve(args: argparse.Namespace) -> None:
     psf_cfg = recording_cfg.get("preselective_filter") or {}
     sel_cfg = psf_cfg.get("selector") or {}
     servicer = PreselectiveAcquirerServicer(
-        selector=selector,
-        encoder=encoder,
+        stack=stack,
         curobo_backend=curobo,
         recording_fps=int(recording_cfg.get("recording_fps", 10)),
         chunk_size=int(sel_cfg.get("chunk_size", 50)),

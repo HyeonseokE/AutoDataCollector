@@ -186,8 +186,20 @@ set_defaults() {
 # ssh 명령에 붙일 옵션 배열.
 # SSH_USING_ALIAS=1 일 때만 ~/.ssh/config 의 alias 항목을 그대로 신뢰 (port·key
 # 등은 ssh_config 에 위임). 아니면 user@hostname 직접 연결로 -p / -i 명시.
+#
+# ControlMaster — 같은 host 에 *반복 ssh* 가 많으면 sshd 의 MaxStartups /
+# fail2ban 으로 "Connection reset by peer" 가 자주 발생. ControlPath 의 socket
+# 을 재사용해 새 SSH handshake 를 회피한다. ControlPersist=300 = 마지막 ssh
+# 종료 후 5분 더 socket 유지.
 build_ssh_opts() {
-  SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+  local cm_dir="$LOG_DIR/cm"
+  mkdir -p "$cm_dir" 2>/dev/null
+  SSH_OPTS=(
+    -o StrictHostKeyChecking=accept-new
+    -o ControlMaster=auto
+    -o "ControlPath=$cm_dir/cm-%r@%h:%p"
+    -o ControlPersist=300
+  )
   if [ "${SSH_USING_ALIAS:-0}" != "1" ]; then
     if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
       SSH_OPTS+=(-p "$SSH_PORT")

@@ -294,25 +294,39 @@ else
   ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" bash -s <<REMOTE_CMD
 set -euo pipefail
 cd "$REMOTE_PROJECT"
+
+# conda 위치 탐지 + 원격 shell PATH 에 prepend.
+# tmux 가 환경변수를 일부 못 상속하는 케이스가 있어, 탐지된 PATH 값을
+# *그대로 tmux 명령 인자에 literal 로* 박아넣어 child shell 에서 보장.
+CONDA_BIN=""
+for d in \$HOME/miniconda3/bin \$HOME/anaconda3/bin /opt/conda/bin /opt/miniconda3/bin; do
+    if [ -d "\$d" ]; then
+        CONDA_BIN="\$d"
+        break
+    fi
+done
+if [ -z "\$CONDA_BIN" ]; then
+    echo "  remote: ERROR — no conda installation found (miniconda3/anaconda3/opt)"
+    exit 1
+fi
+export PATH="\$CONDA_BIN:\$PATH"
+echo "  remote: conda PATH = \$CONDA_BIN"
+
 export ENV_NAME="$SERVER_ENV_NAME"
 export GPU_ID="$SERVER_GPU_ID"
 export HOST="$SERVER_HOST"
 export PORT="$REMOTE_PORT"
 export RECORDING_CONFIG="$SERVER_RECORDING_CONFIG"
 export URDF="$SERVER_URDF"
-# conda command 를 PATH 에 명시. ~/.bashrc 의 conda init 이 non-interactive
-# / non-login shell 에서 source 되지 않는 환경이 흔하므로, miniconda/anaconda
-# 의 bin/ 를 prepend 해서 ``command -v conda`` 가 통과되게 한다. 그러면
-# setup_h100_server.sh 의 preflight + run_h100_server.sh 의 conda info / activate
-# 모두 정상 동작.
-CONDA_PATH_PREFIX='for d in \$HOME/miniconda3 \$HOME/anaconda3 /opt/conda /opt/miniconda3; do [ -d "\$d/bin" ] && export PATH="\$d/bin:\$PATH" && break; done'
 
 if command -v tmux >/dev/null 2>&1; then
+  # \$PATH 는 *원격 shell 이* expand → 탐지된 PATH 가 literal 로 tmux 명령에
+  # 박힘. 그 결과 tmux child shell 의 첫 줄이 PATH 를 명시 export 한 효과.
   tmux new-session -d -s '$TMUX_SESSION' \
-    "bash -c '$CONDA_PATH_PREFIX; bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log'"
+      "PATH='\$PATH' bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log"
   echo "  remote: tmux session started"
 else
-  nohup bash -c "$CONDA_PATH_PREFIX; bash grpc_server/run_server.sh" > /tmp/phase2_server.log 2>&1 &
+  nohup env PATH="\$PATH" bash grpc_server/run_server.sh > /tmp/phase2_server.log 2>&1 &
   echo "  remote: tmux not available — using nohup (pid=\$!)"
 fi
 REMOTE_CMD

@@ -1,11 +1,11 @@
 #!/bin/bash
-# preselective_rpc 서버에 에피소드 하나를 ingest 하는 런처.
+# grpc_server 서버에 에피소드 하나를 ingest 하는 런처.
 #
 # 긴 경로 붙여넣기 사고를 피하려고, 데이터셋 경로 등은 아래 변수에서 편집한다
 # (에디터로 한 번만 수정). 그 뒤 인자 없이 실행:
-#   bash preselective_rpc/ingest_episode.sh
+#   bash grpc_server/ingest_episode.sh
 # 모든 값은 호출 시 환경변수로도 덮어쓸 수 있다:
-#   DATASET_ROOT=/path EPISODE_INDEX=1 bash preselective_rpc/ingest_episode.sh
+#   DATASET_ROOT=/path EPISODE_INDEX=1 bash grpc_server/ingest_episode.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -42,7 +42,7 @@ fi
 if [ -z "$DATASET_ROOT" ]; then
     echo "XX DATASET_ROOT 가 비어 있습니다." >&2
     echo "   ingest_episode.sh 상단의 DATASET_ROOT 를 편집하거나," >&2
-    echo "   DATASET_ROOT=/path bash preselective_rpc/ingest_episode.sh 로 실행하세요." >&2
+    echo "   DATASET_ROOT=/path bash grpc_server/ingest_episode.sh 로 실행하세요." >&2
     exit 1
 fi
 
@@ -67,7 +67,7 @@ if [ ! -d "$DATASET_ROOT" ]; then
 fi
 
 export PYTHONNOUSERSITE=1
-exec "$PY" -m preselective_rpc.tools.ingest_episode \
+exec "$PY" -m grpc_server.tools.ingest_episode \
     --address "$ADDRESS" \
     --dataset-root "$DATASET_ROOT" \
     --chunk-size "$CHUNK_SIZE" \

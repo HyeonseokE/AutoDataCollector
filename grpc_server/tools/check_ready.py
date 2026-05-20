@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""preselective_rpc 서버 readiness 점검.
+"""grpc_server 서버 readiness 점검.
 
 서버에 Ready RPC 를 보내고 응답(체크포인트/디바이스/버퍼 상태 등)을 출력한다.
 
 실행 (AutoDataCollector 프로젝트 루트에서):
-    python -m preselective_rpc.tools.check_ready
-    python -m preselective_rpc.tools.check_ready --address 127.0.0.1:50061 --timeout 10
+    python -m grpc_server.tools.check_ready
+    python -m grpc_server.tools.check_ready --address 127.0.0.1:50061 --timeout 10
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import argparse
 import pprint
 import sys
 
-from preselective_rpc.client import PreselectiveClient
+from grpc_server.client import PreselectiveClient
 
 
 def main() -> int:

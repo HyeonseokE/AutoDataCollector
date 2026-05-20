@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""preselective_rpc 서버에 에피소드 하나를 ingest (vector-DB 성장).
+"""grpc_server 서버에 에피소드 하나를 ingest (vector-DB 성장).
 
 에피소드를 로컬에서 읽어(CPU only) 프레임별로 서버에 스트리밍하면, 서버가
 frozen VLA 로 key_t 를 인코딩해 버퍼에 (key_t, value_t) 항목을 추가한다.
 반환값: {frames, buffer_totals, episode}.
 
 실행 (AutoDataCollector 프로젝트 루트에서):
-    python -m preselective_rpc.tools.ingest_episode --dataset-root /path/to/dataset
+    python -m grpc_server.tools.ingest_episode --dataset-root /path/to/dataset
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import argparse
 import pprint
 import sys
 
-from preselective_rpc.client import PreselectiveClient
+from grpc_server.client import PreselectiveClient
 
 
 def main() -> int:

@@ -28,7 +28,7 @@ from typing import Any
 
 import numpy as np
 
-from preselective_rpc.client import PreselectiveClient
+from grpc_server.client import PreselectiveClient
 
 
 @dataclass(frozen=True)

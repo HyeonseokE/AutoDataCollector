@@ -1,7 +1,7 @@
 """method3.phase2_server_inference — H100 gRPC transport client + demo ingest.
 
 Phase2 의 candidate generation + selection 을 원격 H100 server 에서 돌릴 때 쓰는
-client-side adapter 들. server 본체는 ``preselective_rpc.server`` 에서 booting,
+client-side adapter 들. server 본체는 ``grpc_server.server`` 에서 booting,
 이 패키지는 그것을 client 측에서 *호출* 하는 thin 어댑터만 담는다.
 
   - ``grpc_planner_adapter.GrpcPlannerClient``

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# One-shot environment setup for the preselective_rpc gRPC server on H100.
+# One-shot environment setup for the grpc_server gRPC server on H100.
 #
 # Idempotent — safe to re-run. Detects what's already in place and skips it.
 #
 # Run from the AutoDataCollector project root after `git clone`:
-#   bash preselective_rpc/setup_h100_server.sh
+#   bash grpc_server/setup_h100_server.sh
 #
 # Optional env vars:
 #   ENV_NAME        conda env to create/use (default: lerobot)
@@ -20,7 +20,7 @@ PY_VER="${PY_VER:-3.12}"
 CUROBO_REF="${CUROBO_REF:-main}"
 ROBOT_IDS="${ROBOT_IDS:-0 1 2 3 4 6 8}"
 
-# Resolve project root (this script lives at preselective_rpc/setup_h100_server.sh)
+# Resolve project root (this script lives at grpc_server/setup_h100_server.sh)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJ_ROOT"
@@ -212,15 +212,15 @@ else
   info "faiss already present"
 fi
 
-if ! python -c "import sys; sys.path.insert(0, '.'); from preselective_rpc.client import PreselectiveClient" 2>/dev/null; then
+if ! python -c "import sys; sys.path.insert(0, '.'); from grpc_server.client import PreselectiveClient" 2>/dev/null; then
   info "pip install -e .  (lerobot_cap project metadata)"
   pip install -e "$PROJ_ROOT" --no-deps --no-build-isolation
 fi
 
 # Always-runs: refresh proto stubs in case .proto evolved post-clone.
-if [[ -f "$PROJ_ROOT/preselective_rpc/preselective.proto" ]]; then
+if [[ -f "$PROJ_ROOT/grpc_server/preselective.proto" ]]; then
   info "regenerating proto stubs"
-  bash "$PROJ_ROOT/preselective_rpc/regen_proto.sh"
+  bash "$PROJ_ROOT/grpc_server/regen_proto.sh"
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -280,8 +280,8 @@ sys.path.insert(0, '.')
 import lerobot.policies.pi05.modeling_pi05        # pi05 reachable
 import curobo                                     # curobo reachable
 import grpc                                       # gRPC reachable
-from preselective_rpc.client import PreselectiveClient
-from preselective_rpc.server import PreselectiveAcquirerServicer
+from grpc_server.client import PreselectiveClient
+from grpc_server.server import PreselectiveAcquirerServicer
 from preselective_filter.integration import GrpcPlannerClient, setup_preselective_filter
 from preselective_filter import Selector, SelectorConfig
 print("  all imports OK")
@@ -290,7 +290,7 @@ PYEOF
 bold "DONE"
 echo
 echo "Next — start the server with ONE command:"
-echo "  bash preselective_rpc/run_h100_server.sh"
+echo "  bash grpc_server/run_h100_server.sh"
 echo
 echo "(run_h100_server.sh re-runs this setup idempotently, then launches the"
 echo " server. From the robot host, point the yaml's transport_address at this"

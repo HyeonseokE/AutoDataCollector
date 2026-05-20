@@ -5,9 +5,9 @@
 // the chosen trajectory. Defers buffer commit until task judge resolves.
 //
 // Generate stubs from project root:
-//   python -m grpc_tools.protoc -I preselective_rpc \
-//     --python_out=preselective_rpc --grpc_python_out=preselective_rpc \
-//     preselective_rpc/preselective.proto
+//   python -m grpc_tools.protoc -I grpc_server \
+//     --python_out=grpc_server --grpc_python_out=grpc_server \
+//     grpc_server/preselective.proto
 //
 // All bulky payloads (numpy arrays, jpeg images, trajectory waypoints) are
 // shipped as `bytes` and serialized application-side (numpy.save / pickle /

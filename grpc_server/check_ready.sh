@@ -1,9 +1,9 @@
 #!/bin/bash
-# preselective_rpc 서버 readiness 점검 런처.
+# grpc_server 서버 readiness 점검 런처.
 #
 # gpu_server 환경의 python 으로 check_ready 를 실행한다. conda activate 불필요.
-#   bash preselective_rpc/check_ready.sh
-#   bash preselective_rpc/check_ready.sh --address 127.0.0.1:50061 --timeout 10
+#   bash grpc_server/check_ready.sh
+#   bash grpc_server/check_ready.sh --address 127.0.0.1:50061 --timeout 10
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -20,4 +20,4 @@ if [ ! -x "$PY" ]; then
 fi
 
 export PYTHONNOUSERSITE=1
-exec "$PY" -m preselective_rpc.tools.check_ready "$@"
+exec "$PY" -m grpc_server.tools.check_ready "$@"

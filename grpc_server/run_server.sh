@@ -1,12 +1,12 @@
 #!/bin/bash
 # Preselective RPC Server Runner (전용 conda 환경)
 #
-# 전용 conda 환경(기본 gpu_server, Python 3.12)으로 preselective_rpc gRPC
+# 전용 conda 환경(기본 gpu_server, Python 3.12)으로 grpc_server gRPC
 # 서버를 띄운다. 실제 셋업/활성화/실행은 공식 run_h100_server.sh 에 위임하며,
 # 아래 핵심 설정만 인자로 넘긴다. 해당 환경이 없으면 setup 단계에서 새로
 # 생성된다 (기존 lerobot 환경은 건드리지 않음).
 #
-# 실행:  bash preselective_rpc/run_server.sh
+# 실행:  bash grpc_server/run_server.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ============================================================
 
 # 아래 값들은 모두 호출 시 환경변수로 덮어쓸 수 있다.
-#   예) GPU_ID=3 ENV_NAME=my_env bash preselective_rpc/run_server.sh
+#   예) GPU_ID=3 ENV_NAME=my_env bash grpc_server/run_server.sh
 
 # [필수] 사용할 conda 환경 — 없으면 Python 3.12로 새로 생성됨
 ENV_NAME="${ENV_NAME:-gpu_server}"

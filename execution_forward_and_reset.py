@@ -623,6 +623,35 @@ class ForwardAndResetPipeline(BasePipeline):
                 f"(preloaded {selector.buffer.total_size()} entries over "
                 f"{len(selector.buffer.skill_ids())} skills)"
             )
+            # Layout-consistency check — buffer 의 episode_id 가 현재 폴더
+            # layout 과 어긋나면 stale entry 가 reconcile 에서 통째로 drop 된다.
+            # 확장 migration 이 폴더만 옮기고 buffer 를 안 옮긴 케이스 (이번 RCA
+            # 의 사고 패턴) 를 시작 시점에 경고한다. 워크플로 호환성 유지를 위해
+            # 일단 WARN 으로만 노출 — 강제 abort 는 별도 flag 로 옵트인.
+            if session_dir:
+                _sd = Path(session_dir)
+                _folder_ids = {p.name for p in _sd.glob("episode_*") if p.is_dir()}
+                _buf_ids = {
+                    str(e.episode_id)
+                    for entries in selector.buffer._skills.values()
+                    for e in entries
+                    if e.episode_id
+                }
+                _orphan = _buf_ids - _folder_ids
+                if _orphan:
+                    print(
+                        f"[Perturbation] WARN — buffer has {len(_orphan)} episode_id(s) "
+                        f"with no matching folder (stale layout?): "
+                        f"{sorted(_orphan)[:5]}{'...' if len(_orphan)>5 else ''}"
+                    )
+                    print(
+                        f"[Perturbation] WARN — likely cause: extension migration ran "
+                        f"on folders but not on subgoal_buffer.npz. Run "
+                        f"`scripts/migrate_session_episodes_per_seed.py --apply` (now "
+                        f"handles buffer rewrite) to fix, or expect reconcile to drop "
+                        f"these entries on the next step."
+                    )
+
             # resume reconcile — 삭제된 에피소드의 stale entry 를 정리한다.
             # cleanup_dataset_for_resume 가 계산한 생존(judge=TRUE·폴더 존재)
             # 에피소드 집합으로 buffer 를 맞춰 데이터셋과 1:1 정합을 유지한다.
@@ -1175,7 +1204,7 @@ class ForwardAndResetPipeline(BasePipeline):
         / 미설정 / ``enabled_forward=false`` 면 silent no-op → robot 은 cartesian-
         line trajectory 그대로 (method3 phase2 useful-OOD selection 비활성).
 
-        gRPC mode: H100 server (preselective_rpc.server) 가 method3 Phase2MISelector
+        gRPC mode: H100 server (grpc_server.server) 가 method3 Phase2MISelector
         를 운영. 이 client 측은 GrpcPlannerClient 를 ``skills.set_skill_planner_client``
         에 install 만 한다. server 가 candidate 1개만 return 하므로 별도 selector
         hook 은 필요 없음 (``skills.set_skill_candidate_selector(None)``).
@@ -1301,7 +1330,7 @@ class ForwardAndResetPipeline(BasePipeline):
         addr = str(psf_raw.get("transport_address", "127.0.0.1:50061"))
         timeout_s = float(psf_raw.get("transport_timeout_s", 60.0))
         try:
-            from preselective_rpc.client import PreselectiveClient
+            from grpc_server.client import PreselectiveClient
             from method3.phase2_server_inference.grpc_planner_adapter import GrpcPlannerClient
         except Exception as e:
             print(f"[skill_planner_transport] grpc imports failed: {e}; disabling")
@@ -1570,8 +1599,29 @@ class ForwardAndResetPipeline(BasePipeline):
             # 5. 기존 dataset 존재 여부 미리 체크 (forward + reset)
             from lerobot.utils.constants import HF_LEROBOT_HOME
             reset_repo_id = self.dataset_repo_id + "_reset"
+
+            # Reset *frame* dataset writer toggle (default ON).
+            # ``recording_config.enable_reset_dataset_recording: false`` 로 끄면
+            # forward 만 dataset 으로 ingest 되고 reset frame 은 기록 안 함.
+            # session 폴더의 reset/ 메타 (judge·crops·code) 는 계속 저장.
+            self._enable_reset_dataset_recording = True
+            if self.recording_config:
+                try:
+                    import yaml as _yaml
+                    with open(self.recording_config, "r", encoding="utf-8") as _f:
+                        _rc = _yaml.safe_load(_f) or {}
+                    self._enable_reset_dataset_recording = bool(
+                        _rc.get("enable_reset_dataset_recording", True)
+                    )
+                except Exception as _e:
+                    print(f"[Recording] enable_reset_dataset_recording read failed "
+                          f"({_e}); defaulting to ON")
+
+            existing_repos = [self.dataset_repo_id]
+            if self._enable_reset_dataset_recording:
+                existing_repos.append(reset_repo_id)
             existing = []
-            for rid in [self.dataset_repo_id, reset_repo_id]:
+            for rid in existing_repos:
                 ds_path = HF_LEROBOT_HOME / rid
                 if ds_path.exists() and not self.resume_recording:
                     existing.append(str(ds_path))
@@ -1604,17 +1654,29 @@ class ForwardAndResetPipeline(BasePipeline):
             print(f"[Recording] Features: {list(self.dataset_recorder.features.keys())}")
 
             # 7. Reset 레코더 초기화 (별도 dataset, 동일 features)
-            print(f"\n[Recording] Initializing reset dataset recorder...")
-            print(f"  Reset Repo ID: {reset_repo_id}")
-            self.reset_dataset_recorder = DatasetRecorder(
-                repo_id=reset_repo_id,
-                fps=self.recording_fps,
-                resume=self.resume_recording,
-                features=features,
-                config_yaml=self.recording_config,
-                num_robots=1,
-            )
-            print(f"[Recording] Reset recorder initialized")
+            # enable_reset_dataset_recording=false 이면 None 유지 — 호출 site
+            # (_start_reset_episode_recording / _end_reset_episode_recording) 는
+            # ``if self.record_dataset and self.reset_dataset_recorder`` 가드로 보호.
+            if self._enable_reset_dataset_recording:
+                print(f"\n[Recording] Initializing reset dataset recorder...")
+                print(f"  Reset Repo ID: {reset_repo_id}")
+                self.reset_dataset_recorder = DatasetRecorder(
+                    repo_id=reset_repo_id,
+                    fps=self.recording_fps,
+                    resume=self.resume_recording,
+                    features=features,
+                    config_yaml=self.recording_config,
+                    num_robots=1,
+                )
+                print(f"[Recording] Reset recorder initialized")
+            else:
+                self.reset_dataset_recorder = None
+                print(
+                    f"\n[Recording] Reset dataset recording DISABLED "
+                    f"(recording_config.enable_reset_dataset_recording=false). "
+                    f"Reset frame data 는 ingest 되지 않고, judge/positions/code 메타만 "
+                    f"session 폴더에 저장됩니다."
+                )
 
             # Signal handler: Ctrl+C 시 finalize() 호출하여 데이터셋 보존
             self._install_recording_signal_handler()

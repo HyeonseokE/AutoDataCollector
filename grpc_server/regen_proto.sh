@@ -9,14 +9,14 @@ PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJ_ROOT"
 
 python -m grpc_tools.protoc \
-  -I preselective_rpc \
-  --python_out=preselective_rpc \
-  --grpc_python_out=preselective_rpc \
-  preselective_rpc/preselective.proto
+  -I grpc_server \
+  --python_out=grpc_server \
+  --grpc_python_out=grpc_server \
+  grpc_server/preselective.proto
 
 # grpc_tools emits a flat `import preselective_pb2`, which fails inside a
 # package. Patch the import to be relative.
 sed -i 's/^import preselective_pb2 as preselective__pb2$/from . import preselective_pb2 as preselective__pb2/' \
-  preselective_rpc/preselective_pb2_grpc.py
+  grpc_server/preselective_pb2_grpc.py
 
-echo "[regen_proto] stubs refreshed in preselective_rpc/"
+echo "[regen_proto] stubs refreshed in grpc_server/"

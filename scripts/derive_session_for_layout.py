@@ -311,10 +311,43 @@ def main() -> int:
     # apply: copy source → dest, rename inside dest, update dest's session_config
     copy_source_to_dest(source, dest)
     two_phase_rename(dest, moves)
+    _rewrite_buffer(dest, moves)
     update_session_config(dest, args.new_episodes, args.num_seeds, dry_run=False)
     print()
     print(f"  done. derived session ready at: {dest}")
     return 0
+
+
+def _rewrite_buffer(session_dir: Path, moves: Iterable["DeriveMove"]) -> None:
+    """subgoal_buffer.npz 의 ``episode_id`` 를 episode 매핑과 동일하게 치환.
+
+    폴더·judge_results rename 과 짝지어 buffer 도 새 layout 으로 따라가야 다음
+    resume 의 reconcile (`retain_episodes`) 이 buffer 의 Run A 부분을 drop 하지
+    않는다.
+    """
+    buf_path = session_dir / "subgoal_buffer.npz"
+    if not buf_path.exists():
+        return
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from method3.phase1_state_seeding.subgoal_buffer import SubgoalBuffer
+    except ImportError as e:
+        print(f"  [skip buffer] cannot import SubgoalBuffer: {e}")
+        return
+
+    mapping = {
+        f"episode_{m.old_ep:02d}": f"episode_{m.new_ep:02d}"
+        for m in moves if m.old_ep != m.new_ep
+    }
+    if not mapping:
+        return
+    buf = SubgoalBuffer(buffer_file=buf_path)
+    buf.load()
+    counts = buf.rewrite_episodes(mapping)
+    print(
+        f"\n  subgoal_buffer rewrite: rewritten={counts['rewritten']}, "
+        f"kept={counts['kept']}, unmapped={counts['unmapped']}"
+    )
 
 
 if __name__ == "__main__":

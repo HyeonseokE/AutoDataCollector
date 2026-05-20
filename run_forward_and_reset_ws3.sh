@@ -56,13 +56,13 @@ RECORD_DATASET=true
 
 # ============================================================
 # Method3 phase 토글 (final_method3_spec)
-#   phase1 — Phase1 buffer-aware subgoal seeding (기본).
+#   phase1 — Phase1 buffer-aware subgoal seeding (default).
 #   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
 # ============================================================
-PHASE="phase2"
+PHASE="phase1"
 
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/pnp_ours_100"
+RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_100"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

@@ -15,7 +15,7 @@ A single client RPC ``PlanAndSelect`` does plan_batch → Phase2Candidate 변환
 spec, since accept happens inline at PlanAndSelect time).
 
 Run:
-    python -m preselective_rpc.server \\
+    python -m grpc_server.server \\
         --host 0.0.0.0 --port 50061 \\
         --recording-config pipeline_config/recording_config_ws3.yaml \\
         --urdf assets/urdf/so101_robot4.urdf
@@ -51,14 +51,14 @@ from method3.phase2_mi_selection.curobo_candidate_gen import (
     candidates_from_trajectory_list,
 )
 from method3.reembedding.seed_builder import state_retrieval_key
-from preselective_rpc import preselective_pb2, preselective_pb2_grpc
-from preselective_rpc._codec import (
+from grpc_server import preselective_pb2, preselective_pb2_grpc
+from grpc_server._codec import (
     decode_jpeg,
     decode_ndarray,
     decode_pickle,
     encode_pickle,
 )
-from preselective_rpc.method3_setup import setup_method3_phase2_server, Method3ServerStack
+from grpc_server.method3_setup import setup_method3_phase2_server, Method3ServerStack
 
 
 # --------------------------------------------------------------------------

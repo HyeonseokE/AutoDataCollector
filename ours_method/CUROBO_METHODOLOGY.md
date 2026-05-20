@@ -497,7 +497,7 @@ e50e167  feat(curobo): add CuroboBackend.close() to explicitly free CUDA graph
 9cc3e67  feat(curobo): random K_via per candidate (multi-via support, K_max≤2)
 2bf895e  test(curobo): smoke test now exercises K_max=2 with 4 transits
 68144d0  test(curobo): add EE-arc visualization tool for plan_batch candidates
-ea8259e  feat(preselective_rpc): H100 gRPC server bootstrap script
+ea8259e  feat(grpc_server): H100 gRPC server bootstrap script
 ```
 
 ## 13. Future work / open items

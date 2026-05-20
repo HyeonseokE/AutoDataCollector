@@ -80,7 +80,7 @@ def setup_method3_phase2_server(
             vla_informativeness + skill_planner_transport 블록 source).
             None 이면 server 호스트의 기본 위치 시도.
         db_save_dir: server-local SkillVectorDB persistence 경로 root. None 이면
-            ``./preselective_rpc/buffer/`` 사용.
+            ``./grpc_server/buffer/`` 사용.
         db_filename: 캐시 파일명.
 
     Returns:

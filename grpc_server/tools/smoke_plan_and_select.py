@@ -8,7 +8,7 @@ Synthetic context (no robot, no cameras). Validates the full RPC path:
   5. selection_id → CommitToBuffer flushes / drops correctly
 
 Server must be running:
-  python -u -m preselective_rpc.server --host 127.0.0.1 --port 50061 \
+  python -u -m grpc_server.server --host 127.0.0.1 --port 50061 \
       --recording-config pipeline_config/recording_config_ws3.yaml \
       --urdf assets/urdf/so101_robot4.urdf
 """
@@ -23,7 +23,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from preselective_rpc.client import PreselectiveClient
+from grpc_server.client import PreselectiveClient
 
 
 def _make_synthetic_inputs(seed: int = 0):

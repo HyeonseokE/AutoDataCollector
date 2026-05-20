@@ -68,7 +68,7 @@ CUDA graph 캡쳐로 두 번째 호출부터 50ms → 5ms 수준으로 떨어진
         ┌────────┴─────────┐
         │                  │
         ▼                  ▼
-  CuroboBackend       GrpcPlannerClient → preselective_rpc.server (H100)
+  CuroboBackend       GrpcPlannerClient → grpc_server.server (H100)
   (in-process GPU)     (remote planning + IG·AC selection)
 ```
 
@@ -172,7 +172,7 @@ _teardown_skill_perturbation()
 | `perturbation/skill_level/planner.py` | `TrajectoryCandidate` dataclass (wire shape) |
 | `perturbation/skill_level/curobo_backend.py` | `CuroboBackend` + `CuroboBackendConfig` |
 | `vla_adaptor/grpc_planner_adapter.py` | `GrpcPlannerClient` — gRPC 모드 클라이언트 |
-| `preselective_rpc/server.py` | H100 측 plan+select gRPC 서버 |
+| `grpc_server/server.py` | H100 측 plan+select gRPC 서버 |
 | `skills/skills_lerobot.py` | `set_skill_planner_client` + `move_to_position` candidate 선택 / 시간 재파라미터화 |
 | `execution_forward_and_reset.py` | `_setup_skill_perturbation_on_skills` / `_teardown_skill_perturbation` |
 | `pipeline_config/recording_config_ws*.yaml` | `perturbation.skill` 섹션 |

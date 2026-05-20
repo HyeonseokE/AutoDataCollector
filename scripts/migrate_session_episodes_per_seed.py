@@ -224,10 +224,44 @@ def apply_judge_moves(session_dir: Path, moves: list[MigrationMove]) -> None:
         print(f"  [moved-judge] {src.name} → {dst.name}")
 
 
+def apply_buffer_rewrite(session_dir: Path, moves: list[MigrationMove]) -> None:
+    """subgoal_buffer.npz 의 ``episode_id`` 를 episode 매핑과 동일하게 치환.
+
+    폴더·judge_results rename 과 짝을 맞춰 buffer 도 새 layout 으로 따라가지
+    않으면, 다음 resume 의 ``retain_episodes`` reconcile 이 stale id 라 판단해
+    buffer 의 Run A 부분을 drop 한다.
+    """
+    buf_path = session_dir / "subgoal_buffer.npz"
+    if not buf_path.exists():
+        return
+    try:
+        # 지연 import: migration script 가 method3 의존성을 강제하지 않도록.
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from method3.phase1_state_seeding.subgoal_buffer import SubgoalBuffer
+    except ImportError as e:
+        print(f"  [skip buffer] cannot import SubgoalBuffer: {e}")
+        return
+
+    mapping = {
+        f"episode_{m.old_ep:02d}": f"episode_{m.new_ep:02d}"
+        for m in moves if m.old_ep != m.new_ep
+    }
+    if not mapping:
+        return
+    buf = SubgoalBuffer(buffer_file=buf_path)
+    buf.load()
+    counts = buf.rewrite_episodes(mapping)
+    print(
+        f"\n  subgoal_buffer rewrite: rewritten={counts['rewritten']}, "
+        f"kept={counts['kept']}, unmapped={counts['unmapped']}"
+    )
+
+
 def apply_moves(moves: list[MigrationMove], session_dir: Path) -> None:
-    """폴더 + judge_results 둘 다 mv (정상 마이그레이션 경로)."""
+    """폴더 + judge_results + subgoal_buffer 모두 atomic 하게 변환 (정상 경로)."""
     apply_folder_moves(moves)
     apply_judge_moves(session_dir, moves)
+    apply_buffer_rewrite(session_dir, moves)
 
 
 def update_session_config(session_dir: Path, num_episodes: int, num_seeds: int, dry_run: bool) -> None:

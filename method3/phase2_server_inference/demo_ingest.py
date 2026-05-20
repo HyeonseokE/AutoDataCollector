@@ -7,13 +7,13 @@ History — 옛 명칭/책임 (2026-05-20 정리):
   이 모듈은 원래 ``preselective_filter.integration.demo_ingest`` 였고 *client+
   server 양쪽* 의 vector DB 충전 함수 (``ingest_frame``, ``ingest_episode``,
   ``ingest_dataset``) 가 같이 있었다. server 측 buffer-write 책임은 method3
-  phase2 server (preselective_rpc.server) 가 직접 SkillVectorDB.append 하는
+  phase2 server (grpc_server.server) 가 직접 SkillVectorDB.append 하는
   방식으로 이전됐고, 이 파일에는 *순수 LeRobot dataset 읽기 helper* 만 남는다:
 
     - all_episode_indices(dataset)  : 어떤 episode index 들이 있나
     - open_chunked_dataset(...)     : action delta_timestamps 가 적용된 LeRobotDataset
 
-preselective_rpc.client.PreselectiveClient.ingest_episode 가 이 두 함수를 써서
+grpc_server.client.PreselectiveClient.ingest_episode 가 이 두 함수를 써서
 frame 스트림을 만든다.
 """
 from __future__ import annotations

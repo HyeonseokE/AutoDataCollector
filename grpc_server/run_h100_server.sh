@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ONE command to bring up the preselective_rpc gRPC server on the H100.
+# ONE command to bring up the grpc_server gRPC server on the H100.
 #
-#   bash preselective_rpc/run_h100_server.sh
+#   bash grpc_server/run_h100_server.sh
 #
 # It (1) runs the idempotent environment setup, (2) activates the conda env,
 # (3) preflights the config, then (4) starts the server in the foreground
@@ -68,13 +68,13 @@ print("  config OK — preselective_filter.enabled_forward is true")
 PYEOF
 
 # ── 4. start the server (foreground; Ctrl+C to stop) ─────────────────────
-bold "step 4/4  starting preselective_rpc server"
+bold "step 4/4  starting grpc_server server"
 echo "  bind             : $HOST:$PORT"
 echo "  recording-config : $RECORDING_CONFIG"
 echo "  urdf             : $URDF"
 echo "  (first start loads pi05 + curobo onto the GPU — give it a minute)"
 echo
-exec python -u -m preselective_rpc.server \
+exec python -u -m grpc_server.server \
   --host "$HOST" --port "$PORT" \
   --recording-config "$RECORDING_CONFIG" \
   --urdf "$URDF"

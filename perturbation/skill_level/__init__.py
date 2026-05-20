@@ -1,7 +1,7 @@
 """Skill-level perturbation: GPU-accelerated curobo planner.
 
 Uses curobo's in-process GPU motion planner with via-point diversity.
-The remote gRPC server (``preselective_rpc``) reuses the same backend.
+The remote gRPC server (``grpc_server``) reuses the same backend.
 
 Public API::
 

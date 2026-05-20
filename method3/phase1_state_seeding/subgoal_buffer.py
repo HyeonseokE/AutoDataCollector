@@ -240,6 +240,38 @@ class SubgoalBuffer:
             self.save()
         return removed
 
+    def rewrite_episodes(self, mapping) -> dict:
+        """episode_id 를 ``mapping`` ({old → new}) 에 따라 일괄 치환하고 영속화한다.
+
+        episodes_per_seed 확장 (e.g. 30/3 → 50/5) 으로 폴더가 rename 될 때
+        buffer 의 episode_id 도 같은 매핑으로 따라가야 폴더·judge_results 와의
+        1:1 정합이 유지된다. 폴더 rename 만 하고 이 메서드를 호출하지 않으면
+        다음 resume 의 ``retain_episodes`` reconcile 이 stale id 를 전부 drop
+        하는 사고가 난다.
+
+        Idempotent: mapping 에 없는 episode_id 는 통과 (이미 NEW layout 이거나
+        다른 source 의 entry). Returns 진단 dict ``{rewritten, kept, unmapped}``.
+        """
+        import dataclasses as _dc
+        m = {str(k): str(v) for k, v in dict(mapping).items()}
+        counts = {"rewritten": 0, "kept": 0, "unmapped": 0}
+        any_change = False
+        for skill_id, entries in self._skills.items():
+            for i, e in enumerate(entries):
+                tgt = m.get(str(e.episode_id))
+                if tgt is None:
+                    counts["unmapped"] += 1
+                    continue
+                if tgt != str(e.episode_id):
+                    entries[i] = _dc.replace(e, episode_id=tgt)
+                    counts["rewritten"] += 1
+                    any_change = True
+                else:
+                    counts["kept"] += 1
+        if any_change:
+            self.save()
+        return counts
+
     def file_path(self) -> Path | None:
         """현재 바인딩된 영속화 파일 경로 (없으면 None)."""
         return self._file

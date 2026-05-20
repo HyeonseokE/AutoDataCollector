@@ -15,8 +15,8 @@ from typing import Any
 import grpc
 import numpy as np
 
-from preselective_rpc import preselective_pb2, preselective_pb2_grpc
-from preselective_rpc._codec import (
+from grpc_server import preselective_pb2, preselective_pb2_grpc
+from grpc_server._codec import (
     decode_pickle,
     encode_jpeg,
     encode_ndarray,

@@ -247,10 +247,41 @@ class Phase1SubgoalSelector:
                         chosen = int(x)
                         break
             if chosen >= 0:
+                # COLD-START 도 trace 에 저장 (사용자 요청: 모든 selection 기록)
+                trace_path = getattr(self, "_trace_file", None)
+                if trace_path is not None:
+                    try:
+                        import json as _json, time as _time
+                        from pathlib import Path as _Path
+                        _Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+                        rec = {
+                            "ts": _time.time(),
+                            "skill": str(skill_id),
+                            "buffer_total_for_skill": int(keys.shape[0]),
+                            "n_candidates": int(len(candidates)),
+                            "n_valid": int(valid_idx.size),
+                            "candidates": [
+                                {"idx": int(j), "xyz": [float(v) for v in candidates[j]]}
+                                for j in valid_idx.tolist()
+                            ],
+                            "selected": {
+                                "idx": int(chosen),
+                                "xyz": [float(v) for v in candidates[chosen]],
+                                "cold_start": True,
+                                "feas_checks": int(n_checked),
+                            },
+                            "episode_id": getattr(self, "_current_episode_id", ""),
+                            "skill_order": getattr(self, "_current_skill_order", -1),
+                        }
+                        with open(trace_path, "a", encoding="utf-8") as f:
+                            f.write(_json.dumps(rec) + "\n")
+                    except Exception as e:
+                        print(f"[Subgoal-Phase1][trace] cold-start save failed: {e}")
+                CYAN = "\033[1;96m"; RESET = "\033[0m"
                 self._dbg(
                     f"skill={skill_id} | COLD-START buffer N={keys.shape[0]} "
-                    f"< min={cfg.min_buffer_size} → random cand#{chosen} "
-                    f"(feas checks={n_checked})"
+                    f"< min={cfg.min_buffer_size} → "
+                    f"{CYAN}random cand#{chosen}{RESET} (feas checks={n_checked})"
                 )
                 return SubgoalSelection(
                     candidates[chosen], chosen, cold_start=True, reports=[],
@@ -309,13 +340,53 @@ class Phase1SubgoalSelector:
     def _log_selection(self, skill_id, n_buffer, scale, candidates, valid_idx,
                        reports, best_idx, best_gain, n_feas_checks,
                        best_rank) -> None:
-        """판단 기준(s_g, gain 분포)과 선택 결과를 디버그 로그로 출력.
+        """판단 기준(s_g, gain 분포)과 선택 결과를 *cyan* 강조 로그로 출력
+        + (옵션) jsonl trace file 에 영구 저장. 사용자 요청 — 분석용.
 
         ``n_feas_checks`` 는 lazy feasibility 검사 횟수, ``best_rank`` 는 선택된
         후보의 gain 내림차순 등수(0 = 최고 gain 후보가 그대로 feasible).
         """
+        # ── 1. trace file save (선택된 수치 + 모든 candidate scores) ──
+        # session 폴더 에 .jsonl 로 append. 사용자 요청: episode/skill 순서별
+        # subgoal 후보 수치 + 선정된 수치 보존.
+        trace_path = getattr(self, "_trace_file", None)
+        if trace_path is not None:
+            try:
+                import json as _json, time as _time
+                from pathlib import Path as _Path
+                _Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+                rec = {
+                    "ts": _time.time(),
+                    "skill": str(skill_id),
+                    "buffer_total_for_skill": int(n_buffer),
+                    "scale_s_g": float(scale),
+                    "n_candidates": int(len(candidates)),
+                    "n_valid": int(valid_idx.size),
+                    "candidates": [
+                        {"idx": int(r.candidate_index),
+                         "gain": float(r.gain),
+                         "xyz": [float(v) for v in r.goal]}
+                        for r in reports
+                    ],
+                    "selected": {
+                        "idx": int(best_idx),
+                        "gain": float(best_gain),
+                        "xyz": [float(v) for v in candidates[best_idx]],
+                        "gain_rank": int(best_rank),
+                        "feas_checks": int(n_feas_checks),
+                        "cold_start": False,
+                    },
+                    "episode_id": getattr(self, "_current_episode_id", ""),
+                    "skill_order": getattr(self, "_current_skill_order", -1),
+                }
+                with open(trace_path, "a", encoding="utf-8") as f:
+                    f.write(_json.dumps(rec) + "\n")
+            except Exception as e:
+                print(f"[Subgoal-Phase1][trace] save failed: {e}")
+        # ── 2. cyan 강조 log (terminal) ──
         if not self.cfg.debug_verbose:
             return
+        CYAN = "\033[1;96m"; RESET = "\033[0m"; DIM = "\033[2;37m"
         gains = [r.gain for r in reports]
         order = sorted(range(len(reports)), key=lambda i: reports[i].gain,
                        reverse=True)
@@ -331,11 +402,20 @@ class Phase1SubgoalSelector:
             f"max={max(gains):.3f}"
         )
         self._dbg(
-            f"  CHOSEN cand#{best_idx} gain={best_gain:.3f} "
+            f"  {CYAN}CHOSEN cand#{best_idx} gain={best_gain:.4f}{RESET} "
             f"(gain-rank {best_rank}, feas checks={n_feas_checks}) "
-            f"goal=[{g[0]:.3f}, {g[1]:.3f}, {g[2]:.3f}]"
+            f"{CYAN}goal=[{g[0]:.3f}, {g[1]:.3f}, {g[2]:.3f}]{RESET}"
         )
-        self._dbg(f"  top: {top}")
+        self._dbg(f"  {DIM}top: {top}{RESET}")
+
+    def set_trace_file(self, path) -> None:
+        """jsonl trace 출력 경로 설정 — None 이면 trace 비활성."""
+        self._trace_file = str(path) if path else None
+
+    def set_current_context(self, episode_id: str = "", skill_order: int = -1) -> None:
+        """trace 의 *episode + skill_order* 필드 채우기 위해 호출자가 알려줌."""
+        self._current_episode_id = str(episode_id)
+        self._current_skill_order = int(skill_order)
 
     def stage_executed(
         self,

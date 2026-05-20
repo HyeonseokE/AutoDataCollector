@@ -184,6 +184,10 @@ def measure_phase1_readiness_loo(
 
 @dataclass
 class Phase1ReadinessHook:
+    def set_readiness_trace(self, path) -> None:
+        """jsonl 경로 설정 — 매 check() 마다 readiness_report append."""
+        self._readiness_trace_path = str(path) if path else None
+
     """Per-episode driver for readiness measurement + loop-stop signal.
 
     Owns nothing mutable on the pipeline side — only inspects the buffer and
@@ -354,6 +358,32 @@ class Phase1ReadinessHook:
             ]
         lines.append(f"per-skill : {per}")
         _panel(lines, color=BLUE)
+
+        # readiness trajectory jsonl — 분석용. 사용자 요청.
+        trace_path = getattr(self, "_readiness_trace_path", None)
+        if trace_path is not None:
+            try:
+                import json as _json, time as _time
+                from pathlib import Path as _Path
+                _Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+                rec = {
+                    "ts": _time.time(),
+                    "episodes_done": int(episodes_done),
+                    "episode_num": int(episode_num),
+                    "state_ready": float(report.r_ready),
+                    "state_ready_threshold": float(thr_r),
+                    "state_ready_ok": bool(ready_ok),
+                    "phase2_gain": float(g_bar) if gate_g else None,
+                    "phase2_gain_threshold": float(thr_g) if gate_g else None,
+                    "phase2_gain_ok": bool(gain_ok) if gate_g else None,
+                    "per_skill": {k: float(v) for k, v in report.per_skill.items()},
+                    "buffer_total": int(buffer.total_size()) if buffer else 0,
+                    "buffer_skills": list(buffer.skill_ids()) if buffer else [],
+                }
+                with open(trace_path, "a", encoding="utf-8") as f:
+                    f.write(_json.dumps(rec) + "\n")
+            except Exception as e:
+                print(f"[method3:phase1][trace] readiness save failed: {e}")
 
         all_pass = ready_ok and gain_ok
         if all_pass and self.cfg.auto_stop_on_ready:

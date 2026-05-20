@@ -504,6 +504,9 @@ class ForwardAndResetPipeline(BasePipeline):
 
         hook_cfg = Phase1ReadinessHookConfig.from_yaml_section(section)
         self._phase1_readiness_hook = Phase1ReadinessHook(hook_cfg)
+        # readiness trajectory jsonl — session_dir 안 (사용자 요청, 분석용).
+        # session_dir 가 아직 없을 수 있어 setup 시점엔 path 만 보관 후, 첫 check
+        # 직전 _finalize_subgoal_buffer 단계에서 set_readiness_trace 호출.
         if hook_cfg.enabled:
             print(
                 f"[method3:phase1] readiness hook ENABLED ← {source} | "
@@ -670,6 +673,20 @@ class ForwardAndResetPipeline(BasePipeline):
                 path = base / path
             selector.buffer.set_file(path)
             selector.buffer.load()
+            # subgoal selection trace (jsonl) — 분석용. 사용자 요청.
+            # session_dir/subgoal_phase1_trace.jsonl 에 각 select_subgoal 호출의
+            # candidate scores + 선정 정보 append.
+            if session_dir and hasattr(selector, "set_trace_file"):
+                trace_path = Path(session_dir) / "subgoal_phase1_trace.jsonl"
+                selector.set_trace_file(trace_path)
+                print(f"[Perturbation] subgoal trace → {trace_path}")
+            # readiness trajectory trace — phase1 readiness hook 의 매 check
+            # 결과를 session_dir/readiness_trajectory.jsonl 에 append.
+            _hook = getattr(self, "_phase1_readiness_hook", None)
+            if session_dir and _hook is not None and hasattr(_hook, "set_readiness_trace"):
+                r_path = Path(session_dir) / "readiness_trajectory.jsonl"
+                _hook.set_readiness_trace(r_path)
+                print(f"[method3:phase1] readiness trace → {r_path}")
             print(
                 f"[Perturbation] subgoal buffer file → {selector.buffer.file_path()} "
                 f"(preloaded {selector.buffer.total_size()} entries over "
@@ -3268,12 +3285,19 @@ class ForwardAndResetPipeline(BasePipeline):
                         # 콜백으로 교체된 reset_original_positions를 직접 사용
                         target_positions = reset_original_positions
 
-                    # 검출 완료 후 콜백: 실제 current_positions로 seed 생성
+                    # 검출 완료 후 콜백: 실제 current_positions로 seed 생성.
+                    # round_robin 에선 매 episode 마다 next seed 위치를 swap 함.
                     if pre_reset_callback is not None:
                         new_target = pre_reset_callback(current_positions=current_positions)
                         if new_target is not None:
                             reset_original_positions = new_target
                             target_positions = new_target
+                            print(f"\n  {CYAN}[Reset target UPDATED by pre_reset_callback]{RESET}")
+                            for _name, _info in new_target.items():
+                                _pos = _info.get("position") if isinstance(_info, dict) else _info
+                                if _pos and len(_pos) >= 3:
+                                    print(f"    {_name}: [{_pos[0]:.4f}, {_pos[1]:.4f}, {_pos[2]:.4f}]"
+                                          f"  {DIM}(actual reset 목적지){RESET}")
 
                     result['reset']['current_positions'] = current_positions
                     result['reset']['target_positions'] = target_positions

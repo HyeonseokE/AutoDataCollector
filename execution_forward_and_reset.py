@@ -771,7 +771,10 @@ class ForwardAndResetPipeline(BasePipeline):
         3. 결과 vector DB 를 ``self._phase2_vector_db`` 에 보관 — Phase2MISelector /
            candidate generator wiring (Task C) 가 이를 reference buffer 로 쓴다.
         """
-        if getattr(self, "method3_phase", "phase1") != "phase2":
+        _phase = getattr(self, "method3_phase", "phase1")
+        if _phase != "phase2":
+            print(f"[Method3 phase2] method3_phase={_phase} → SKIPPED "
+                  f"(P_phase1 build/load + Phase2MISelector 는 Phase2 전용)")
             return
         if not session_dir:
             print("[Method3 phase2] session_dir is None — vector DB load skipped")
@@ -1346,6 +1349,14 @@ class ForwardAndResetPipeline(BasePipeline):
         self._skill_planner_debug = False
         self._skill_planner_chunk_size = 50
         self._skill_planner_ingest_thread = None
+
+        # Phase guard — skill_planner_transport 는 *Phase2 전용*. Phase1 은
+        # cartesian baseline 이라 grpc/curobo 연결 자체가 의미 없음 (= GPU 부담만).
+        _phase = getattr(self, "method3_phase", "phase1")
+        if _phase != "phase2":
+            print(f"[skill_planner_transport] method3_phase={_phase} → SKIPPED "
+                  f"(grpc/curobo 는 Phase2 전용; Phase1 은 cartesian baseline)")
+            return
 
         # mode + server 운영 설정 — phase2_config.yaml 만 읽는다.
         # 2026-05-21: 옛 phase2_server_infer_settings.yaml 의 transport/policy/selector

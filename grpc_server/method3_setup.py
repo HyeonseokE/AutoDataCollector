@@ -91,7 +91,16 @@ def setup_method3_phase2_server(
     # 통합. server 운영 설정 (transport/policy/selector/buffer/remote) 도 phase2_config
     # 의 top-level 섹션에서 읽음. VLA checkpoint 는 phase2_config.yaml 의
     # ``phase1_trained_vla_path`` 가 *유일한 SoT* — client/server mismatch 방지.
+    #
+    # ⚠️ phase2_yaml=None 일 때 *반드시* default phase2_config.yaml 으로 fallback.
+    # server.py main() 이 --phase2-yaml 인자를 안 전달해도 ph2_raw 가 통합된 server
+    # 섹션을 읽어야 server boot 가능 (없으면 ckpt None → setup return None → fail).
     psf_raw: dict = {}
+    if phase2_yaml is None:
+        _default_ph2 = Path(__file__).resolve().parent.parent / "pipeline_config" / "phase2_config.yaml"
+        if _default_ph2.exists():
+            phase2_yaml = _default_ph2
+            print(f"[method3_setup] phase2_yaml default ← {phase2_yaml}")
     ph2_yaml_path = Path(phase2_yaml) if phase2_yaml else None
     ph2_raw = _load_phase2_yaml(recording_cfg, ph2_yaml_path)
     psf_raw = dict(

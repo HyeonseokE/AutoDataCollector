@@ -235,42 +235,53 @@ sweep_stale_control_sockets() {
   for sock in "$cm_dir"/*; do
     # 살아있는 master 인지 확인 (-O check). check 성공이면 valid → 건너뜀.
     if env -u LD_LIBRARY_PATH -u LD_PRELOAD "$_SYS_SSH" \
-        -o "ControlPath=$sock" -O check placeholder 2>/dev/null; then
+        -o "ControlPath=$sock" -O check placeholder >/dev/null 2>&1; then
       continue
     fi
-    rm -f "$sock"
+    rm -f "$sock" || true
     removed=$((removed + 1))
   done
   shopt -u nullglob
-  [ "$removed" -gt 0 ] && info "swept $removed stale ControlMaster socket(s) under $cm_dir"
+  if [ "$removed" -gt 0 ]; then
+    info "swept $removed stale ControlMaster socket(s) under $cm_dir"
+  fi
   return 0
 }
 
 # 50061 점유 process 의 *모든* pid 정리. tunnel.pid 파일에 *기록된 pid* 뿐 아니라
 # 다른 source (옛 background launcher, 사용자가 손수 띄운 tunnel 등) 의 잔재까지
 # bind 충돌의 모든 후보를 sweep.
+#
+# 모든 외부 명령에 ``|| true`` — lsof 가 매치 없을 때 exit 1 을 던지면 set -e 가
+# 함수 중간에 종료시켜 stop 분기 *silent fail* 의 원인이 됐다 (RCA 2026-05-21).
 sweep_port_holders() {
   local port="${1:-$LOCAL_PORT}"
   if ! command -v lsof >/dev/null 2>&1; then
     return 0
   fi
   local pids
-  pids=$(lsof -ti ":$port" 2>/dev/null)
+  pids=$(lsof -ti ":$port" 2>/dev/null || true)
   if [ -n "$pids" ]; then
     info "killing port :$port holder(s): $pids"
     # SIGTERM 먼저, 1초 후 SIGKILL
     kill $pids 2>/dev/null || true
     sleep 1
     local survivors
-    survivors=$(lsof -ti ":$port" 2>/dev/null)
-    [ -n "$survivors" ] && kill -9 $survivors 2>/dev/null || true
+    survivors=$(lsof -ti ":$port" 2>/dev/null || true)
+    if [ -n "$survivors" ]; then
+      kill -9 $survivors 2>/dev/null || true
+    fi
   fi
+  return 0
 }
 
 # ============================================================
 # Subcommand: stop
 # ============================================================
 if [ "${1:-}" = "stop" ]; then
+  # cleanup 도중에 외부 명령이 exit 1 을 던져도 *중간 종료 금지*. 모든 단계가
+  # 실행돼야 원격 server / GPU 까지 풀린다.
+  set +e
   bold "Stopping local tunnel + remote server"
   # 1) tunnel.pid 의 pid (있으면)
   if [ -f "$TUNNEL_PID_FILE" ]; then
@@ -278,20 +289,26 @@ if [ "${1:-}" = "stop" ]; then
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null && info "tunnel killed (pid=$pid)"
     fi
-    rm -f "$TUNNEL_PID_FILE"
+    rm -f "$TUNNEL_PID_FILE" 2>/dev/null || true
   fi
   # 2) 같은 port 의 다른 잔재 (옛 background launcher 등)
   sweep_port_holders "$LOCAL_PORT"
   # 3) ControlMaster sockets — 살아있는 master 만 남기고 stale 제거
   sweep_stale_control_sockets
-  # 4) 원격
+  # 4) 원격 — *반드시* 도달해야 GPU 풀린다.
   if [ -n "$REMOTE_HOST" ]; then
-    info "killing remote tmux session: $TMUX_SESSION"
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
-        "tmux kill-session -t '$TMUX_SESSION' 2>/dev/null || true; \
-         pkill -f 'grpc_server.server' 2>/dev/null || true" \
-      && info "remote stop signal sent" \
-      || warn "remote stop ssh failed"
+    info "killing remote tmux session: $TMUX_SESSION + server process"
+    if ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+        "tmux kill-session -t '$TMUX_SESSION' 2>/dev/null; \
+         pkill -9 -f 'grpc_server.server' 2>/dev/null; \
+         rm -f /tmp/phase2_server.log; \
+         echo remote-stop-ok" 2>/dev/null \
+        | grep -q "remote-stop-ok"; then
+      info "remote stop signal sent (tmux + server killed)"
+    else
+      warn "remote stop ssh failed — manual check:"
+      warn "  ssh $REMOTE_HOST 'tmux kill-session -t $TMUX_SESSION; pkill -9 -f grpc_server.server'"
+    fi
   else
     warn "REMOTE_HOST not set — skipping remote stop"
   fi

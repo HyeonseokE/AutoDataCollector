@@ -1380,23 +1380,49 @@ class ForwardAndResetPipeline(BasePipeline):
         """
         addr = str(psf_raw.get("transport_address", "127.0.0.1:50061"))
         timeout_s = float(psf_raw.get("transport_timeout_s", 60.0))
+        # ANSI 빨간색 안내 — mode=grpc 일 때 fail 은 *silent fallback 금지*. spec
+        # 위반 데이터 수집 (cartesian-line trajectory only) 을 막기 위해 명시 종료.
+        _RED = "\033[91m"; _BOLD = "\033[1m"; _RST = "\033[0m"
         try:
             from grpc_server.client import PreselectiveClient
             from method3.phase2_server_inference.grpc_planner_adapter import GrpcPlannerClient
         except Exception as e:
-            print(f"[skill_planner_transport] grpc imports failed: {e}; disabling")
-            return
+            msg = (
+                f"\n{_RED}{_BOLD}[skill_planner_transport] grpc imports failed: {e}{_RST}\n"
+                f"{_RED}    grpcio / grpc_server / method3 모듈을 import 못 함. 확인:{_RST}\n"
+                f"{_RED}      1) conda env 활성 확인 (현재 conda env 안에서 실행 중?)         {_RST}\n"
+                f"{_RED}      2) pip install grpcio grpcio-tools                              {_RST}\n"
+                f"{_RED}      3) python -c \"from grpc_server.client import PreselectiveClient\"{_RST}\n"
+                f"{_RED}{_BOLD}    → session 종료 (mode=grpc 일 때 silent fallback 금지).{_RST}\n"
+            )
+            print(msg)
+            raise RuntimeError(
+                "grpc client imports failed — install grpcio + verify grpc_server module"
+            )
 
         client = PreselectiveClient(server_address=addr, timeout_s=timeout_s)
         try:
             info = client.ready()
         except Exception as e:
-            print(f"[skill_planner_transport] grpc Ready() failed at {addr}: {e}; disabling")
             try:
                 client.close()
             except Exception:
                 pass
-            return
+            msg = (
+                f"\n{_RED}{_BOLD}[skill_planner_transport] grpc Ready() failed at {addr}: {e}{_RST}\n"
+                f"{_RED}    → gRPC 서버 연결 실패. 다음 절차로 서버를 띄우세요:{_RST}\n"
+                f"{_RED}      1) bash grpc_server/launch_remote_server.sh                     {_RST}\n"
+                f"{_RED}         (yaml.remote 섹션의 ssh + GPU + tmux 자동 설정)             {_RST}\n"
+                f"{_RED}      2) Ready 응답 확인:                                              {_RST}\n"
+                f"{_RED}         python -m grpc_server.tools.check_ready --address {addr}    {_RST}\n"
+                f"{_RED}      3) Ready 되면 ws3.sh 다시 실행.                                 {_RST}\n"
+                f"{_RED}{_BOLD}    → session 종료 (mode=grpc 일 때 silent fallback 금지).{_RST}\n"
+            )
+            print(msg)
+            raise RuntimeError(
+                f"grpc Ready() failed at {addr} — start the server with "
+                f"'bash grpc_server/launch_remote_server.sh' first"
+            )
         print(
             f"[skill_planner_transport] grpc connected: {addr} | "
             f"device={info.get('device')} buffer={info.get('buffer_total')} "

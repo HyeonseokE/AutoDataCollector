@@ -187,18 +187,15 @@ set_defaults() {
 # SSH_USING_ALIAS=1 일 때만 ~/.ssh/config 의 alias 항목을 그대로 신뢰 (port·key
 # 등은 ssh_config 에 위임). 아니면 user@hostname 직접 연결로 -p / -i 명시.
 #
-# ControlMaster — 같은 host 에 *반복 ssh* 가 많으면 sshd 의 MaxStartups /
-# fail2ban 으로 "Connection reset by peer" 가 자주 발생. ControlPath 의 socket
-# 을 재사용해 새 SSH handshake 를 회피한다. ControlPersist=300 = 마지막 ssh
-# 종료 후 5분 더 socket 유지.
+# *ControlMaster 사용 안 함* — 옛 master 의 stale socket 이 *새 launcher 의
+# tunnel 을 silent reject* 하는 race 가 너무 자주 발생. launcher 1회당 ssh 가
+# 3~4번 (stop check, tmux start, tunnel) → sshd MaxStartups 10:30:60 안. 매번
+# fresh handshake 가 더 robust.
 build_ssh_opts() {
-  local cm_dir="$LOG_DIR/cm"
-  mkdir -p "$cm_dir" 2>/dev/null
   SSH_OPTS=(
     -o StrictHostKeyChecking=accept-new
-    -o ControlMaster=auto
-    -o "ControlPath=$cm_dir/cm-%r@%h:%p"
-    -o ControlPersist=300
+    -o ControlMaster=no
+    -o ControlPath=none
   )
   if [ "${SSH_USING_ALIAS:-0}" != "1" ]; then
     if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "22" ]; then
@@ -295,18 +292,20 @@ if [ "${1:-}" = "stop" ]; then
   sweep_port_holders "$LOCAL_PORT"
   # 3) ControlMaster sockets — 살아있는 master 만 남기고 stale 제거
   sweep_stale_control_sockets
-  # 4) 원격 — *반드시* 도달해야 GPU 풀린다.
+  # 4) 모든 ControlMaster socket 강제 삭제 (stale check 없이 그냥 다 삭제).
+  #    이번 stop 후 다음 launcher 가 fresh ssh 로 시작하도록.
+  rm -rf "$LOG_DIR/cm" 2>/dev/null
+  # 5) 원격 — *반드시* 도달해야 GPU 풀린다. 마지막 명령 ``true`` 로 exit 0 보장.
   if [ -n "$REMOTE_HOST" ]; then
     info "killing remote tmux session: $TMUX_SESSION + server process"
     if ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
         "tmux kill-session -t '$TMUX_SESSION' 2>/dev/null; \
          pkill -9 -f 'grpc_server.server' 2>/dev/null; \
          rm -f /tmp/phase2_server.log; \
-         echo remote-stop-ok" 2>/dev/null \
-        | grep -q "remote-stop-ok"; then
+         true" 2>/dev/null; then
       info "remote stop signal sent (tmux + server killed)"
     else
-      warn "remote stop ssh failed — manual check:"
+      warn "remote stop ssh exit != 0 (connect issue?). 수동:"
       warn "  ssh $REMOTE_HOST 'tmux kill-session -t $TMUX_SESSION; pkill -9 -f grpc_server.server'"
     fi
   else
@@ -435,27 +434,59 @@ fi
 # nohup 은 외부 command 이므로 bash function `ssh` 를 보지 못함 — 명시적으로
 # system binary + LD_LIBRARY_PATH 우회를 사용해야 conda env 의 OpenSSL ABI
 # mismatch 를 피한다 (위 ssh() wrapper 와 동일한 회피).
-# Tunnel ssh 는 *standalone* — ControlMaster multiplex 에서 제외. multiplex 로
-# 묶이면 stale/duplicate master 가 -L 추가 요청을 silent reject 하는 race 발생.
-# step 2 의 짧은 ssh 들은 그대로 ControlMaster 사용해서 sshd rate-limit 회피.
+# Tunnel ssh — standalone (build_ssh_opts 가 이미 ControlMaster=no).
+# ExitOnForwardFailure=yes 로 *port bind 실패 시 ssh 즉시 exit* (= 우리 polling
+# 이 ssh 죽음을 빨리 감지).
 nohup env -u LD_LIBRARY_PATH -u LD_PRELOAD "$_SYS_SSH" -N -T \
     "${SSH_OPTS[@]}" \
-    -o ControlMaster=no \
-    -o ControlPath=none \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ExitOnForwardFailure=yes \
     -L "$LOCAL_PORT:localhost:$REMOTE_PORT" \
     "$REMOTE_HOST" \
     > "$TUNNEL_LOG" 2>&1 &
-echo $! > "$TUNNEL_PID_FILE"
-sleep 1
-if ! kill -0 "$(cat "$TUNNEL_PID_FILE")" 2>/dev/null; then
-  err "tunnel failed to start. log:"
-  tail -20 "$TUNNEL_LOG"
+TUNNEL_PID=$!
+echo "$TUNNEL_PID" > "$TUNNEL_PID_FILE"
+
+# Polling — port 가 listen 시작하거나, ssh 가 죽거나, 15초 timeout.
+# 옛 ``sleep 1 + kill -0`` 패턴은 standalone ssh 의 첫 fork 시간 race 와
+# port-bind race 둘 다 잡지 못해 *살아있는 tunnel 도 dead 로 오판* 했다.
+TUNNEL_WAIT_MAX=15
+elapsed=0
+tunnel_ok=0
+while [ $elapsed -lt $TUNNEL_WAIT_MAX ]; do
+  # ssh 죽음 즉시 감지
+  if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    err "tunnel ssh exited (pid=$TUNNEL_PID). log:"
+    sed 's/^/    /' "$TUNNEL_LOG" 2>/dev/null | tail -20
+    rm -f "$TUNNEL_PID_FILE"
+    exit 2
+  fi
+  # port LISTEN 시작했는지 (= forward 실제로 bound)
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -ti ":$LOCAL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      tunnel_ok=1
+      break
+    fi
+  else
+    # lsof 없으면 그냥 1초 대기 후 OK 로 간주 (fallback)
+    sleep 1
+    tunnel_ok=1
+    break
+  fi
+  sleep 0.5
+  elapsed=$((elapsed + 1))
+done
+
+if [ "$tunnel_ok" = "1" ]; then
+  info "tunnel listening on localhost:$LOCAL_PORT (pid=$TUNNEL_PID) log=$TUNNEL_LOG"
+else
+  err "tunnel did not bind localhost:$LOCAL_PORT within ${TUNNEL_WAIT_MAX}s. log:"
+  sed 's/^/    /' "$TUNNEL_LOG" 2>/dev/null | tail -20
+  kill "$TUNNEL_PID" 2>/dev/null || true
+  rm -f "$TUNNEL_PID_FILE"
   exit 2
 fi
-info "tunnel pid=$(cat "$TUNNEL_PID_FILE")  log=$TUNNEL_LOG"
 
 # ============================================================
 # Step 4 — Ready RPC polling

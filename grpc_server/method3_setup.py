@@ -172,6 +172,47 @@ def setup_method3_phase2_server(
             print(f"[method3_setup] DB load failed ({e}); starting fresh")
             db = SkillVectorDB()
 
+    # 2026-05-21: 옛 architecture 는 client 가 P_phase1 build → npz cache 보관.
+    # grpc mode 에서는 *score 계산이 server* 라 client 의 npz 가 사용 안 됨
+    # (= server 의 db 는 empty 시작 → useful-OOD 의 기준 분포 P_phase1 부재).
+    # 이제 *server 가 직접 P_phase1 build* — cache 비어있고 yaml 에 dataset path
+    # 있으면 자체 re-embed. server cache npz 영구 저장 (= 다음 부팅 즉시 load).
+    if db.total_size() == 0:
+        phase1_ds_path = ph2_raw.get("phase1_dataset_path")
+        if phase1_ds_path:
+            try:
+                print(f"[method3_setup] server-side P_phase1 build start "
+                      f"(dataset={phase1_ds_path})")
+                from method3.reembedding.lerobot_adapter import LeRobotPhase1RawAdapter
+                from method3.reembedding.seed_builder import (
+                    ReembeddingConfig, build_phase1_vector_db,
+                )
+                raw_ds = LeRobotPhase1RawAdapter(str(phase1_ds_path))
+                re_cfg_raw = ph2_raw.get("reembedding") or {}
+                _sg_r = re_cfg_raw.get("subgoal_filter_radius_m")
+                re_cfg = ReembeddingConfig(
+                    skip_invalid=bool(re_cfg_raw.get("skip_invalid", False)),
+                    show_progress=bool(re_cfg_raw.get("show_progress", True)),
+                    frame_stride=int(re_cfg_raw.get("frame_stride", 1)),
+                    batch_size=int(re_cfg_raw.get("batch_size", 32)),
+                    subgoal_filter_radius_m=(None if _sg_r is None else float(_sg_r)),
+                    subgoal_filter_min_keep=int(re_cfg_raw.get("subgoal_filter_min_keep", 30)),
+                )
+                db = build_phase1_vector_db(
+                    raw_ds, encoder, raw_ds.load_observation, re_cfg,
+                    g_seed_buffer=None,   # G_seed 는 client session 의 npz — 별도 RPC 로
+                                          # 받아야. 일단 fallback (skill.goal_position).
+                )
+                db.save(db_path)
+                print(f"[method3_setup] server-side P_phase1 saved ← {db_path} "
+                      f"({db.total_size()} entries over {len(db.skill_ids())} skills)")
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                print(f"[method3_setup] server-side P_phase1 build FAILED ({e}); "
+                      f"db remains empty — acquisition 진행 시 IngestEpisode 로만 누적")
+        else:
+            print(f"[method3_setup] phase1_dataset_path 미설정 — db empty 시작")
+
     selector = Phase2MISelector(vector_db=db, config=phase2_mi)
 
     # 3) VLA-side informativeness (옵션) — yaml.vla_informativeness.enabled 일 때

@@ -499,7 +499,9 @@ class ForwardAndResetPipeline(BasePipeline):
             print(
                 f"[method3:phase1] readiness hook ENABLED ← {source} | "
                 f"B₁_min={hook_cfg.phase1_min} B₁_max={hook_cfg.phase1_max} "
-                f"τ_ready={hook_cfg.tau_ready} auto_stop={hook_cfg.auto_stop_on_ready}"
+                f"state_ready={hook_cfg.state_ready_threshold} "
+                f"phase2_gain={hook_cfg.phase2_potential_gain_threshold} "
+                f"auto_stop={hook_cfg.auto_stop_on_ready}"
             )
 
     def _setup_perturbation_on_skills(self) -> None:
@@ -540,33 +542,11 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         self._subgoal_phase = {"forward": fwd, "reset": reset}
 
-        # mode: "gaussian" (legacy 3D blob) | "buffer_aware" (Phase1 scoring).
-        mode = str(pert_raw.get("mode", "gaussian")).strip().lower()
-        if mode in ("buffer_aware", "buffer-aware", "phase1"):
-            self._setup_buffer_aware_subgoal(pert_raw, fwd, reset)
-            return
-
-        try:
-            from method3.phase1_state_seeding import (
-                SubgoalPerturbation, SubgoalPerturbationConfig,
-            )
-            pert = SubgoalPerturbation(SubgoalPerturbationConfig(
-                enabled=True,
-                sigma=float(pert_raw.get("sigma", 0.05)),
-                clip_factor=float(pert_raw.get("clip_factor", 2.0)),
-            ))
-            self._skills.set_perturbation(pert)
-            print(
-                f"[Perturbation] Subgoal-level ENABLED "
-                f"(sigma={pert.cfg.sigma}m, clip_radius={pert.cfg.clip_radius:.3f}m, "
-                f"phase=forward:{fwd} reset:{reset})"
-            )
-            # Apply any seed that was scheduled before skills existed.
-            pending = getattr(self, "_pending_perturbation_seed", None)
-            if pending is not None:
-                self._skills.set_perturbation_rng(pending)
-        except Exception as e:
-            print(f"[Perturbation] Failed to construct perturbation: {e}")
+        # Phase1 buffer-aware subgoal scoring is now the sole path —
+        # `mode` yaml key is no longer read (was always `buffer_aware`).
+        # Legacy SubgoalPerturbation (gaussian blob) is dead path; if needed
+        # it can be restored from git history.
+        self._setup_buffer_aware_subgoal(pert_raw, fwd, reset)
 
     def _setup_buffer_aware_subgoal(self, pert_raw: dict, fwd: bool, reset: bool) -> None:
         """Wire the buffer-aware Phase1 subgoal selector (문서 phase1_subgoal_scoring_core).
@@ -599,9 +579,9 @@ class ForwardAndResetPipeline(BasePipeline):
                 x_bounds=_opt_bounds(reach_raw.get("x_bounds")),
                 y_bounds=_opt_bounds(reach_raw.get("y_bounds")),
             )
-            # §4.2 hemisphere dist 의 방향 기준점 (로봇 좌표 원점). 기본 (0,0,0).
-            _ro = pert_raw.get("robot_origin") or [0.0, 0.0, 0.0]
-            robot_origin = tuple(float(x) for x in _ro)
+            # §4.2 hemisphere dist 의 방향 기준점 — robot base 가 좌표 원점이라
+            # (0,0,0) 으로 고정. yaml 노출 제거 (이전 robot_origin 키는 무시됨).
+            robot_origin = (0.0, 0.0, 0.0)
             # per_skill: skill_id 별 부분 override. 지원 키 sigma/clip_factor/
             # n_candidates. 비어 있거나 항목 누락이면 전역 값 그대로.
             _per_skill_raw = pert_raw.get("per_skill") or {}
@@ -626,7 +606,10 @@ class ForwardAndResetPipeline(BasePipeline):
                 min_buffer_size=int(pert_raw.get("min_buffer_size", 8)),
                 candidate_dist=str(pert_raw.get("candidate_dist", "uniform_ball")),
                 robot_origin=robot_origin,
-                max_resample=int(pert_raw.get("max_resample", 200)),
+                # max_resample: rejection 재샘플 상한. 200 이면 충분
+                # (truncated Gaussian 에서 ~200 회 안에 거의 무조건 valid 샘플 확보).
+                # yaml 노출 제거 (이전 max_resample 키는 무시됨).
+                max_resample=200,
                 reachability=reachability,
                 per_skill_overrides=per_skill_overrides,
                 debug_verbose=bool(pert_raw.get("debug_verbose", False)),
@@ -783,6 +766,17 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         if not session_dir:
             print("[Method3 phase2] session_dir is None — vector DB load skipped")
+            return
+        # 2026-05-21: grpc mode 에서는 *server 가 P_phase1 build/own*. client 측
+        # build 는 redundant + npz 가 사용 안 됨 (server 의 SkillVectorDB 가
+        # useful-OOD selection 의 reference). client 는 ingest_episode 만 책임.
+        if getattr(self, "_skill_planner_grpc_client", None) is not None:
+            print("[Method3 phase2] grpc mode — server-owned P_phase1, "
+                  "skip client-side build (server 가 자체 build/load)")
+            self._phase2_vector_db = None
+            self._phase2_selector = None
+            self._phase2_vla_scorer = None
+            self._phase2_g_seed_buffer = self._load_phase2_g_seed_buffer(session_dir)
             return
         try:
             from method3.reembedding.build_or_load import (

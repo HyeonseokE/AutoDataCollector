@@ -266,7 +266,7 @@ else
   warn "  copy it from your robot host:"
   warn "    scp <robot_host>:<path>/AutoDataCollector/pipeline_config/recording_config_ws3.yaml \\"
   warn "        $YAML"
-  warn "  the server reads preselective_filter + perturbation.skill sections only."
+  warn "  the server reads phase2_server_infer_settings + skill_perturbation sections."
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -282,8 +282,12 @@ import curobo                                     # curobo reachable
 import grpc                                       # gRPC reachable
 from grpc_server.client import PreselectiveClient
 from grpc_server.server import PreselectiveAcquirerServicer
-from preselective_filter.integration import GrpcPlannerClient, setup_preselective_filter
-from preselective_filter import Selector, SelectorConfig
+# method3-native client adapter (옛 preselective_filter.integration 자리)
+from method3.phase2_server_inference.grpc_planner_adapter import GrpcPlannerClient
+# server-side setup helper (옛 setup_preselective_filter 자리)
+from grpc_server.method3_setup import setup_method3_phase2_server
+# selector — Phase2MISelector + SkillVectorDB (옛 preselective_filter.Selector 자리)
+from method3.phase2_mi_selection import Phase2MISelector, Phase2MIConfig, SkillVectorDB
 print("  all imports OK")
 PYEOF
 

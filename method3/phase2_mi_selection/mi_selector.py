@@ -1,21 +1,36 @@
-"""Phase2 MI-style candidate selector — 문서 final_method3_spec §11-12.
+"""Phase2 MI-side usefulness + Useful-OOD selector — final_method3_spec_useful_ood_updated §11-13.
 
-후보 trajectory 들을 받아 MI-style score 로 평가·선택한다:
+후보 trajectory 들을 받아 두 축으로 평가·선택한다::
 
-  §11  Q2(ξ) = β·ΔH_A(D_t, ξ) − λ·ΔH_A|S(D_t, ξ)
-       ξ* = argmax Q2
-  §12  배치 내부 정규화 Q̃2 = (Q2 − μ_Q) / (σ_Q + ε)
-       accept: Q̃2(ξ*) > τ_Q̃   (Option B — normalized score threshold)
-  §14  accepted 후보는 skill-wise vector DB 에 window 별 entry 로 누적한다.
+  §11  M_MI(D_t, ξ) = β·ΔH_A(D_t, ξ) − λ·ΔH_A|S(D_t, ξ)            ← buffer-side
+  §12  U_VLA(ξ) = Agg_τ [(1/R) Σ_r L_denoise^{(r)}(o_τ,I,p_τ,A; π_θ^{(1)})] ← model-side
+  §13  ξ* = argmax U_VLA(ξ)   s.t.   M̃_MI(D_t, ξ) ≥ τ_MI            (Useful-OOD rule)
+
+M_MI 는 candidate batch 안에서 정규화한다::
+
+       M̃_MI = (M_MI − μ_M) / (σ_M + ε)         (§13.2)
+
+기본값 ``τ_MI = 0`` 은 *batch 평균 이상* 의 MI-useful 후보만 통과시킨다는 의미.
+이로써 Harmful OOD (high U_VLA + low M_MI) 와 Redundant ID (모두 낮음) 가 제거되고,
+Useful OOD (high U_VLA + high M_MI) 가 우선 선택된다.
+
+covered window 가 부족한 후보는 ``under_covered=True`` 로 마크되어 통과에서 제외된다
+(§9.1 — MI score 를 신뢰성 있게 평가할 수 없는 후보). 후보는 Phase1 seed anchor 주변
+에서만 생성되므로 (`phase1_seed_anchor_logic`) 정상 경로에선 드물다.
+
+§14 — accepted 후보는 skill-wise vector DB 에 window 별 entry 로 누적한다.
 
 ΔH_A 는 action_coverage(§8), ΔH_A|S 는 conditional_ambiguity(§9) 에서 온다.
-covered window 가 부족한 후보는 under-covered 로 표시해 accept 에서 제외한다
-(§9.1 — MI score 를 신뢰성 있게 평가할 수 없는 후보). 후보는 모두 Phase1 seed
-anchor 주변에서 생성되므로 (phase1_seed_anchor_logic) 정상 경로에선 드물다.
+U_VLA 는 ``vla_informativeness.VLAInformativenessScorer`` 가 책임지며 selector 는
+값만 받는다 — VLA policy 의존성이 selector 핵심 경로에 들어가지 않게 분리.
+
+Backward-compat: ``vla_scorer=None`` 으로 ``select`` 를 호출하면 stage 2 가
+``argmax M_MI among eligible`` 로 fallback (이전 ``argmax Q2`` 동작과 동등).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
@@ -24,6 +39,11 @@ from method3.phase2_mi_selection.action_descriptor import dct_action_descriptor
 from method3.phase2_mi_selection.conditional_ambiguity import conditional_ambiguity
 from method3.phase2_mi_selection.radius import state_neighborhood_radius
 from method3.phase2_mi_selection.vector_db import SkillVectorDB, VectorDBEntry
+
+if TYPE_CHECKING:
+    from method3.phase2_mi_selection.vla_informativeness import (
+        VLAInformativenessScorer,
+    )
 
 
 @dataclass(frozen=True)
@@ -35,6 +55,11 @@ class Phase2Candidate:
     state_keys 는 이미 계산된 retrieval key ``e_τ = [φ_VLA(o_τ,I); p_τ]`` 이다
     (VLA embedding 추출은 이 라이브러리 밖에서 수행 — 호출부가 채워 넘긴다).
     action descriptor ``z_τ^a`` 는 selector 가 action_chunks 에서 DCT 로 계산한다.
+
+    §12 U_VLA 채점을 활성화하려면 raw observation/instruction/proprio 도 필요하다
+    (옵셔널 — 없어도 selector 의 MI 경로는 동작). LeRobotVLAInformativenessScorer
+    의 default batch_builder 는 ``observations`` 가 이미 LeRobot batch dict 라면
+    그대로 사용한다 — caller 가 family-aware 로 미리 채워 넣을 수 있게 둔다.
     """
 
     skill_id: str
@@ -42,11 +67,17 @@ class Phase2Candidate:
     action_chunks: np.ndarray      # (T, H, action_dim) — window 별 A_{τ:τ+H-1}
     seed_subgoal: np.ndarray | None = None  # anchor — 이 후보가 perturb 한 Phase1 seed g
     payload: object | None = None  # caller pass-through (raw pointer 등)
+    # §12 U_VLA 용 raw 입력 — vla_scorer 를 안 쓰면 무시. observations 는 LeRobot
+    # policy.forward 가 받는 batch dict 그대로 (caller 가 family-aware 로 채움)
+    # 또는 family-별 batch_builder 가 해석할 수 있는 임의 구조.
+    observations: object | None = None
+    instruction: str | None = None
+    proprios: np.ndarray | None = None  # (T, P) — window 별 proprio
 
 
 @dataclass
 class Phase2MIConfig:
-    """Phase2 MI scoring 파라미터 (문서 §8-12, §16)."""
+    """Phase2 scoring · Useful-OOD selection 파라미터 (문서 §8-13, §16)."""
 
     dct_coeffs: int = 3           # §4.2 K — DCT action descriptor 저주파 성분 수
     k_nn_a: int = 5               # §8 action-space kNN 의 k
@@ -58,33 +89,52 @@ class Phase2MIConfig:
     eps: float = 1e-6             # log/정규화 분모 안정화
     beta: float = 1.0             # §11 ΔH_A 가중
     lambda_: float = 1.0          # §11 ΔH_A|S 가중
-    accept_threshold: float = 0.0  # §12 τ_Q̃ — normalized score accept 기준
+    tau_MI: float = 0.0           # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
+    accept_threshold: Optional[float] = None  # deprecated alias of tau_MI (yaml 호환)
     amb_agg: str = "mean"         # §9.4 covered aggregation: "mean" | "max"
     min_covered_windows: int = 1  # §9.1 T_min — 미만이면 under-covered
     debug_verbose: bool = False
 
+    def __post_init__(self) -> None:
+        # 기존 yaml 들이 accept_threshold 만 지정하던 호환 경로를 보존.
+        if self.accept_threshold is not None:
+            self.tau_MI = float(self.accept_threshold)
+
 
 @dataclass(frozen=True)
 class Phase2ScoreReport:
-    """후보 하나의 Phase2 점수 리포트."""
+    """후보 하나의 Phase2 점수 리포트.
+
+    ``q2`` / ``q2_norm`` 은 신규 spec 의 ``M_MI`` / ``M̃_MI`` 와 같은 값이다 —
+    필드명은 호환을 위해 보존하고 의미만 §11 (MI-side usefulness) 로 재정의.
+    ``u_vla`` 는 ``vla_scorer`` 가 주어졌을 때만 채워지는 model-side informativeness.
+    """
 
     candidate_index: int
     delta_h_a: float            # ΔH_A — action coverage gain (§8)
     delta_h_a_given_s: float    # ΔH_A|S — conditional ambiguity increase (§9)
-    q2: float                   # §11 Q2 = β·ΔH_A − λ·ΔH_A|S
-    q2_norm: float              # §12 Q̃2 — 배치 정규화 후 채워진다
+    q2: float                   # §11 M_MI = β·ΔH_A − λ·ΔH_A|S
+    q2_norm: float              # §13.2 M̃_MI — batch 정규화
     covered_ratio: float        # §15.1 R_cov(ξ)
     under_covered: bool         # covered window < T_min → MI 평가 신뢰 불가
+    u_vla: float = 0.0          # §12 U_VLA — vla_scorer 가 있을 때만 의미
 
 
 @dataclass
 class Phase2Selection:
-    """``select`` 결과 — argmax Q2 + Option B accept 판정 (§11-12)."""
+    """``select`` 결과 — Useful-OOD rule (§13.2) 의 판정.
+
+    ``accepted`` 는 ``M̃_MI ≥ τ_MI`` (+ covered) 를 만족하는 후보가 1개 이상 있고
+    그중 max U_VLA 후보가 정상 선택됐을 때 True. eligible 이 비어 있으면
+    ``chosen_index`` 는 argmax M_MI 로 fallback 되고 ``accepted=False``.
+    """
 
     chosen_index: int
     chosen_candidate: Phase2Candidate
     accepted: bool
     reports: list[Phase2ScoreReport] = field(default_factory=list)
+    u_vla_chosen: Optional[float] = None  # 선택된 후보의 U_VLA — vla_scorer 없으면 None
+    eligible_indices: list[int] = field(default_factory=list)  # §13.2 stage 1 통과한 후보
 
 
 class Phase2MISelector:
@@ -164,49 +214,96 @@ class Phase2MISelector:
             under_covered=under,
         )
 
-    def select(self, candidates: list[Phase2Candidate]) -> Phase2Selection:
-        """후보 batch 를 평가하고 argmax Q2 + Option B accept 판정 (문서 §11-12).
+    def select(
+        self,
+        candidates: list[Phase2Candidate],
+        vla_scorer: "VLAInformativenessScorer | None" = None,
+    ) -> Phase2Selection:
+        """후보 batch 를 Useful-OOD rule (§13.2) 로 평가·선택한다.
+
+        3-stage:
+          1. M_MI(ξ) 계산 + batch 정규화 (M̃_MI).
+          2. eligible := {i : M̃_MI[i] ≥ τ_MI ∧ not under_covered[i]}.
+          3. vla_scorer 가 있으면  ξ* = argmax_{i∈eligible} U_VLA(ξ_i).
+             없으면 (backward-compat)  ξ* = argmax_{i∈eligible} M_MI(ξ_i).
+
+        eligible 이 비면 ``accepted=False``, ``chosen`` 은 argmax M_MI 로 fallback.
 
         Args:
-            candidates: 현재 skill ``m`` 의 후보 trajectory set ``Ξ_t^{(m)}``.
+            candidates: 현재 skill ``m`` 의 후보 trajectory set ``Ξ_t^{(m)}(g)``.
+            vla_scorer: §12 ``U_VLA`` 계산기. None 이면 stage 3 는 M_MI 로 fallback.
 
         Returns:
-            Phase2Selection. ``accepted`` 는 정규화 score Q̃2(ξ*) 가
-            ``accept_threshold`` 를 넘고 후보가 under-covered 가 아닐 때 True.
+            Phase2Selection.
         """
         if not candidates:
             raise ValueError("candidates is empty")
         cfg = self.cfg
         reports = [self.score_one(i, c) for i, c in enumerate(candidates)]
 
-        # §12 — 배치 내부 정규화: Q̃2 = (Q2 − μ_Q) / (σ_Q + ε).
-        q2 = np.array([r.q2 for r in reports], dtype=np.float64)
-        mu, sigma = float(q2.mean()), float(q2.std())
-        q2_norm = (q2 - mu) / (sigma + cfg.eps)
+        # Stage 1 — §11 M_MI 계산 + §13.2 batch 정규화 M̃_MI.
+        m_mi = np.array([r.q2 for r in reports], dtype=np.float64)
+        mu, sigma = float(m_mi.mean()), float(m_mi.std())
+        m_mi_norm = (m_mi - mu) / (sigma + cfg.eps)
+
+        # U_VLA 채점 — vla_scorer 가 주어졌을 때만. eligible 후보에만 호출해
+        # 비용 절약 (cost-aware: stage 1 통과한 것에만 R-stochastic eval 수행).
+        u_vla = np.zeros(len(candidates), dtype=np.float64)
+
+        # Stage 2 — eligible: M̃_MI ≥ τ_MI ∧ not under_covered.
+        eligible = [
+            i for i, r in enumerate(reports)
+            if m_mi_norm[i] >= cfg.tau_MI and not r.under_covered
+        ]
+
+        if vla_scorer is not None and eligible:
+            for i in eligible:
+                u_vla[i] = float(vla_scorer.score(candidates[i]))
+
+        # report 에 정규화 score · U_VLA 를 채워 dataclass 재생성.
         reports = [
             Phase2ScoreReport(
-                r.candidate_index, r.delta_h_a, r.delta_h_a_given_s, r.q2,
-                float(q2_norm[i]), r.covered_ratio, r.under_covered)
+                candidate_index=r.candidate_index,
+                delta_h_a=r.delta_h_a,
+                delta_h_a_given_s=r.delta_h_a_given_s,
+                q2=r.q2,
+                q2_norm=float(m_mi_norm[i]),
+                covered_ratio=r.covered_ratio,
+                under_covered=r.under_covered,
+                u_vla=float(u_vla[i]),
+            )
             for i, r in enumerate(reports)
         ]
 
-        # §11 — argmax Q2 (정규화는 단조 변환이므로 argmax 동일).
-        chosen = int(np.argmax(q2))
-        # §12 Option B — normalized score 가 threshold 초과 + covered 신뢰 가능.
-        accepted = (
-            bool(q2_norm[chosen] > cfg.accept_threshold)
-            and not reports[chosen].under_covered
-        )
+        # Stage 3 — eligible 안에서 max U_VLA (없으면 fallback to max M_MI).
+        if eligible:
+            if vla_scorer is not None:
+                chosen = max(eligible, key=lambda i: u_vla[i])
+                rule = "argmax U_VLA s.t. M̃_MI≥τ_MI"
+            else:
+                chosen = max(eligible, key=lambda i: m_mi[i])
+                rule = "argmax M_MI s.t. M̃_MI≥τ_MI  (vla_scorer=None)"
+            accepted = True
+        else:
+            # fallback — eligible 이 비면 argmax M_MI 반환하되 accept=False.
+            chosen = int(np.argmax(m_mi))
+            accepted = False
+            rule = "fallback argmax M_MI (no eligible)"
+
+        u_chosen: Optional[float] = float(u_vla[chosen]) if vla_scorer is not None else None
         self._dbg(
-            f"batch K={len(candidates)} | chose cand#{chosen} "
-            f"Q2={q2[chosen]:.4f} Q̃2={q2_norm[chosen]:.4f} "
-            f"accepted={accepted}"
+            f"batch K={len(candidates)} eligible={len(eligible)} | "
+            f"chose cand#{chosen} M_MI={m_mi[chosen]:.4f} M̃_MI={m_mi_norm[chosen]:.4f} "
+            f"U_VLA={u_chosen if u_chosen is not None else 'n/a'} "
+            f"accepted={accepted} rule='{rule}'"
         )
         return Phase2Selection(
             chosen_index=chosen,
             chosen_candidate=candidates[chosen],
             accepted=accepted,
             reports=reports,
+            u_vla_chosen=u_chosen,
+            eligible_indices=list(eligible),
         )
 
     def accept_to_buffer(

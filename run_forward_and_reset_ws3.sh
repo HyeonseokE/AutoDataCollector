@@ -11,63 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ============================================================
-# 핵심 설정 (Essential Configuration) / 워크스페이스 명시 / 에피소드 갯수 명시
+# (Essential Configuration)
 # ============================================================
-
-# # Grasping:                                                                  
-# (1, 완료) pick up the red block and place it on the blue plate
-# (2, 완료) distribute chocolate pies to each plate                           
-# (3) -
-
-# # Arrangement:                                                               
-# (1, 완료) place the yellow block between chocolate pies             
-# (2, 완료) arrange yellow, red, and purple blocks in a line from left to right
-# (3, 완료) stack the blocks in the order of red and yellow
-# (3, 완료) stack the blocks in the order of red and yellow, purple
-
-# # Non-grasping:
-# (1, 성공) turn on the microphone by pressing the power button
-# (2, 성공) Push the bowl of cereal 5cm from left to right
-# (3, 성공) Open the trash can lid
-
-# # Deformable:
-# (1, 완료) fold the towel
-# (2) sweep the floor with a towel
-# (3) bend the microphone gooseneck leftward
-
-# # Articulated:
-# (1) open the drawers
-# (2) close the drawers
-# (3) beat the red block with a hammer
-
-# # Insertion/Assembly:
-# (1) assemble the battery pack
-# (2) peg-in-hole
-# (3) clean the desk
-
-# # Rotation:
-# (1) tighten the bolt
-# (2) open the bottle
-# (3) mix the tea
-
-# # Contact-rich:
-# (1) wipe the dish with a sponge
-# (2) sweep the floor with a brush
-# (3) shake the bottle
-
-# INSTRUCTION="make sandwich using the ingredients on the table"
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# INSTRUCTION="fold the green towel"
-# INSTRUCTION="pick up the brown peg and insert it into the hole of the gray structure"
-# INSTRUCTION = "Pick up the banana and place it in the bowl. 
-# You may need to handover the banana from one arm to the other if the initial arm picking the banana cannot reach the bowl. 
-# After picking the banana with one arm, you can handover the banana by first placing it carefully on the table surface and then using the other arm to pick it up. 
-# The placing position must be on the table, as far as possible from other objects but absolutely within the reachable table area of the other arm. 
-# Make sure to move the picking arm out of the way before the receiving arm moves towards grasping the object."
-
-# INSTRUCTION="Assemble the green hinge and red hinge.
-# You need to carefully assemble the green hinge's male part to red hinge's hole part.
-# since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
 # [필수] 로봇 번호 배열 — 순서가 arm 그룹을 결정 (최대 4대):
 #   ROBOT_IDS[0] → left_arm
@@ -119,7 +64,7 @@ RESET_INSTRUCTION=""
 ## Reset_instruction(Empty is default: "move objects to certain position")
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=30   # smoke test — grpc IngestEpisode 통합 확인용 (원래 60)
+NUM_EPISODES=50  # 30→100 확장 (2026-05-20 마이그레이션). 기존 30 episode 는 seed 당 10 slot 의 0..2 위치로 재배치됨 — scripts/migrate_session_episodes_per_seed.py 참고
 NUM_RANDOM_SEEDS=10  # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
@@ -142,9 +87,20 @@ EXECUTE_RESET=true # Reset 실행 여부
 # Dataset Recording 설정
 RECORD_DATASET=true
 
+# ============================================================
+# Method3 phase 토글 (final_method3_spec §2)
+#   phase1 — Phase1 buffer-aware subgoal seeding (기본).
+#   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
+#            로드, 없으면 pipeline_config/phase2_config.yaml 의
+#            ``phase1_trained_vla_path`` + ``phase1_dataset_path`` 로 §6
+#            re-embedding 자동 구축. HF repo_id ("user/name") 도 그대로 인식 —
+#            로컬 캐시 miss 면 lerobot 가 다운로드.
+# ============================================================
+PHASE="phase1"
+
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/session_20260519_225321"
+RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_50"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================
@@ -408,6 +364,9 @@ fi
 if [ ${#RESETSPACE_PER_ROBOT[@]} -gt 0 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --resetspace-per-robot ${RESETSPACE_PER_ROBOT[@]}"
 fi
+
+# Method3 phase 토글 — phase2 일 때 VLA/dataset 경로는 phase2_config.yaml 에서 자동 로드.
+EXTRA_ARGS="$EXTRA_ARGS --phase $PHASE"
 
 # ============================================================
 # 파이프라인 실행

@@ -85,7 +85,9 @@ def load_phase2_config(
         beta=float(mi.get("beta", 1.0)),
         # YAML 의 'lambda' 는 파이썬 예약어 → dataclass 필드는 lambda_.
         lambda_=float(mi.get("lambda", mi.get("lambda_", 1.0))),
-        accept_threshold=float(mi.get("accept_threshold", 0.0)),
+        # §13.2 — Useful-OOD constraint. accept_threshold 는 deprecated alias 로
+        # tau_MI 가 없을 때만 fallback (Phase2MIConfig.__post_init__ 가 매핑).
+        tau_MI=float(mi.get("tau_MI", mi.get("accept_threshold", 0.0))),
         amb_agg=str(mi.get("amb_agg", "mean")),
         min_covered_windows=int(mi.get("min_covered_windows", 1)),
         debug_verbose=bool(mi.get("debug_verbose", False)),

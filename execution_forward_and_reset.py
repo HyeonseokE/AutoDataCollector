@@ -147,6 +147,10 @@ class ForwardAndResetPipeline(BasePipeline):
         detect_model: str = None,
         resetspace: str = None,
         recording_config: str = None,
+        # Method3 phase mode (final_method3_spec)
+        method3_phase: str = "phase1",
+        phase1_trained_vla_path: Optional[str] = None,
+        phase1_dataset_path: Optional[str] = None,
     ):
         """
         초기화
@@ -164,6 +168,14 @@ class ForwardAndResetPipeline(BasePipeline):
             multi_turn: True면 crop-then-point 멀티턴 LLM 코드 생성 사용
             cad_image_dirs: CAD 참조 이미지 디렉토리 리스트 (옵션)
             recording_config: recording config YAML 경로 (None이면 기본 recording_config.yaml)
+            method3_phase: "phase1" (subgoal seeding, 기본) | "phase2" (MI selection).
+                phase1 → buffer-aware subgoal selector active.
+                phase2 → Phase2MISelector + P_phase1 vector DB load (§6/§7).
+            phase1_trained_vla_path: Phase2 시 §6 frozen VLA encoder 체크포인트
+                경로. 아직 학습 안 됐을 땐 임시로 pretrained 모델 경로를 넣어도 됨.
+                phase=phase1 일 땐 무시.
+            phase1_dataset_path: Phase2 시 §6 re-embedding 의 raw dataset 경로
+                (LeRobot repo_id 또는 local path). 캐시된 P_phase1 이 있으면 무시.
         """
         self.robot_id = robot_id
         self.llm_model = llm_model
@@ -184,6 +196,17 @@ class ForwardAndResetPipeline(BasePipeline):
         self.recording_config = recording_config
         self.multi_turn_info: Dict = {}
         self.reset_multi_turn_info: Dict = {}
+
+        # Method3 phase mode (final_method3_spec §2)
+        if method3_phase not in ("phase1", "phase2"):
+            raise ValueError(
+                f"method3_phase must be 'phase1' or 'phase2', got {method3_phase!r}")
+        self.method3_phase = method3_phase
+        self.phase1_trained_vla_path = phase1_trained_vla_path
+        self.phase1_dataset_path = phase1_dataset_path
+        self._phase2_vector_db = None  # P_phase1 — _setup_phase2_session 이 채움
+        self._phase2_selector = None   # Phase2MISelector — _setup_phase2_session 이 채움
+        self._phase2_vla_scorer = None  # U_VLA scorer — yaml.vla_informativeness.enabled=true 일 때만
 
         # Recording options
         self.record_dataset = record_dataset
@@ -425,8 +448,16 @@ class ForwardAndResetPipeline(BasePipeline):
         Phase1 설정은 ``pipeline_config/phase1_config.yaml`` 에서 읽는다 (없으면
         recording_config 의 ``perturbation.subgoal`` 로 폴백). recording_config
         가 없거나 perturbation 이 비활성이면 silent no-op.
+
+        ``method3_phase == "phase2"`` 면 Phase1 subgoal selector 설치를 건너뛴다
+        (Phase2 의 candidate generator 와 동시에 돌면 충돌). Phase2 자체 설정은
+        session_dir 가 확정된 뒤 ``_setup_phase2_session`` 에서 수행.
         """
         self._subgoal_phase = {"forward": False, "reset": False}
+        if getattr(self, "method3_phase", "phase1") == "phase2":
+            print("[Method3] phase=phase2 → Phase1 subgoal selector skipped "
+                  "(P_phase1 load / MI selector setup deferred to _setup_phase2_session)")
+            return
         if not self.recording_config:
             return
         cfg_path = Path(self.recording_config)
@@ -609,6 +640,307 @@ class ForwardAndResetPipeline(BasePipeline):
                 )
         except Exception as e:
             print(f"[Perturbation] subgoal buffer finalize skipped: {e}")
+
+    def _load_phase2_runtime_paths(self) -> tuple[str | None, str | None]:
+        """phase2_config.yaml 에서 ``phase1_trained_vla_path`` / ``phase1_dataset_path``
+        를 읽어 (vla_path, dataset_path) 로 반환. CLI 인자가 비어 있을 때 fallback.
+
+        두 값 모두 비어 있는 키는 None 으로 정규화. yaml 부재·읽기 실패 시 (None, None).
+        """
+        cfg_path = Path(__file__).resolve().parent / "pipeline_config" / "phase2_config.yaml"
+        if not cfg_path.exists():
+            return None, None
+        try:
+            import yaml as _yaml
+            with open(cfg_path, "r") as f:
+                cfg = _yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[Method3 phase2] phase2_config.yaml read failed: {e}")
+            return None, None
+        vla = cfg.get("phase1_trained_vla_path") or None
+        ds = cfg.get("phase1_dataset_path") or None
+        return (str(vla) if vla else None, str(ds) if ds else None)
+
+    @staticmethod
+    def _resolve_phase1_path(path: str | None) -> str | None:
+        """local path 면 그대로, HF repo_id ("user/name") 면 그대로 (lerobot 가 다운로드).
+
+        - 절대경로면서 존재: 그대로 반환 (local 사용).
+        - 그 외: 문자열 그대로 반환 — LeRobotDataset / make_vla_key_extractor 가
+          HF Hub 에서 자동 다운로드한다.
+        - None / 빈 문자열: None 반환.
+        """
+        if not path:
+            return None
+        p = Path(str(path)).expanduser()
+        if p.is_absolute() and p.exists():
+            return str(p)
+        return str(path)
+
+    def _setup_phase2_session(self, session_dir: str | None) -> None:
+        """Phase2 — §6 P_phase1 vector DB load/build + (future) MI selector wiring.
+
+        session_dir 가 확정된 시점에 호출된다 (run_multiple_episodes / resume).
+        ``method3_phase != "phase2"`` 면 silent no-op.
+
+        1. ``<session_dir>/phase1_vector_db.npz`` 캐시 hit → 그대로 로드.
+        2. miss → ``phase1_trained_vla_path`` 로 frozen encoder 로드 +
+           ``phase1_dataset_path`` LeRobot dataset 으로 §6 Step 3-4 (re-embedding)
+           수행 → SkillVectorDB 생성·저장.
+        3. 결과 vector DB 를 ``self._phase2_vector_db`` 에 보관 — Phase2MISelector /
+           candidate generator wiring (Task C) 가 이를 reference buffer 로 쓴다.
+        """
+        if getattr(self, "method3_phase", "phase1") != "phase2":
+            return
+        if not session_dir:
+            print("[Method3 phase2] session_dir is None — vector DB load skipped")
+            return
+        try:
+            from method3.reembedding.build_or_load import (
+                build_or_load_phase1_vector_db,
+            )
+            # CLI 우선, 미지정 시 phase2_config.yaml 에서 fallback.
+            yaml_vla, yaml_ds = self._load_phase2_runtime_paths()
+            vla_path = self._resolve_phase1_path(self.phase1_trained_vla_path or yaml_vla)
+            ds_path = self._resolve_phase1_path(self.phase1_dataset_path or yaml_ds)
+            if vla_path:
+                print(f"[Method3 phase2] phase1_trained_vla_path ← {vla_path}")
+            if ds_path:
+                print(f"[Method3 phase2] phase1_dataset_path     ← {ds_path}")
+            self._phase2_vector_db = build_or_load_phase1_vector_db(
+                session_dir,
+                phase1_trained_vla_path=vla_path,
+                phase1_dataset_path=ds_path,
+            )
+            print(
+                f"[Method3 phase2] P_phase1 ready — "
+                f"{self._phase2_vector_db.total_size()} entries over "
+                f"{len(self._phase2_vector_db.skill_ids())} skills "
+                f"(skills={self._phase2_vector_db.skill_ids()})"
+            )
+        except Exception as e:
+            print(f"[Method3 phase2] P_phase1 load/build FAILED: {e}")
+            import traceback; traceback.print_exc()
+            self._phase2_vector_db = None
+
+        # Phase2MISelector + (옵셔널) U_VLA scorer wiring — useful_ood_updated §11-13.
+        # candidate generator 가 후보 batch 를 만들면 `_phase2_select(...)` 가
+        # M_MI + Useful-OOD rule 로 ξ* 를 고른다.
+        self._phase2_selector = self._build_phase2_selector()
+        self._phase2_vla_scorer = self._build_phase2_vla_scorer(vla_path)
+
+        # G_seed anchor buffer (Phase1 누적 subgoal) + skill candidate hook 등록.
+        # skills_lerobot 의 plan_batch hook 자리에 Useful-OOD selector 를 꽂아
+        # K candidates 중 ξ* 를 골라 그 index 를 반환한다 — accepted 면 즉시
+        # vector DB 에 flush 까지 한다 (§14).
+        self._phase2_g_seed_buffer = self._load_phase2_g_seed_buffer(session_dir)
+        self._attach_phase2_skill_hook()
+
+    def _build_phase2_selector(self):
+        """phase2_config.yaml.mi_selection 으로 Phase2MISelector 인스턴스화.
+
+        ``_phase2_vector_db`` 가 없으면 None.
+        """
+        if self._phase2_vector_db is None:
+            return None
+        try:
+            from method3.config import load_phase2_config
+            from method3.phase2_mi_selection import Phase2MISelector
+            acq = load_phase2_config(
+                "pipeline_config/phase2_config.yaml",
+                phase1_raw_dir="", phase2_raw_dir="",
+            )
+            sel = Phase2MISelector(
+                vector_db=self._phase2_vector_db,
+                config=acq.phase2_mi,
+            )
+            print(
+                f"[Method3 phase2] selector ready — tau_MI={sel.cfg.tau_MI}, "
+                f"k_nn_a={sel.cfg.k_nn_a}, q={sel.cfg.q_quantile}"
+            )
+            return sel
+        except Exception as e:
+            print(f"[Method3 phase2] selector setup FAILED: {e} — phase2 selection 불가")
+            import traceback; traceback.print_exc()
+            return None
+
+    def _build_phase2_vla_scorer(self, vla_path: str | None):
+        """yaml.vla_informativeness.enabled=true 면 LeRobotVLAInformativenessScorer
+        를 만들어 반환. 그 외 (또는 로딩 실패) 는 None — selector 가 fallback 으로
+        ``argmax M_MI among eligible`` 사용.
+
+        VLA policy 는 preselective_filter 의 ``make_vla_key_extractor`` 가 wrap
+        한 policy 를 그대로 재사용한다 (같은 freeze 된 Phase1-trained VLA).
+        """
+        if not vla_path:
+            return None
+        try:
+            import yaml
+            cfg_path = Path("pipeline_config/phase2_config.yaml")
+            raw = yaml.safe_load(cfg_path.read_text()) or {} if cfg_path.exists() else {}
+            vla_cfg = (raw.get("vla_informativeness") or {}) if isinstance(raw, dict) else {}
+            if not vla_cfg.get("enabled", False):
+                print(
+                    "[Method3 phase2] vla_informativeness.enabled=false — U_VLA 비활성, "
+                    "selection 은 argmax M_MI 로 fallback (backward-compat)"
+                )
+                return None
+            from preselective_filter.vectorDB.vla_embedding import (
+                make_vla_key_extractor,
+            )
+            from method3.phase2_mi_selection import (
+                LeRobotVLAInformativenessScorer,
+            )
+            extractor = make_vla_key_extractor(vla_path)
+            scorer = LeRobotVLAInformativenessScorer(
+                policy=extractor.policy,
+                R=int(vla_cfg.get("R", 8)),
+                agg=str(vla_cfg.get("agg", "mean")),
+            )
+            print(
+                f"[Method3 phase2] U_VLA scorer ready — "
+                f"family={extractor.__class__.__name__} R={scorer.R} agg={scorer.agg}"
+            )
+            return scorer
+        except Exception as e:
+            print(
+                f"[Method3 phase2] U_VLA scorer setup FAILED: {e} — "
+                f"selection 은 argmax M_MI 로 fallback"
+            )
+            import traceback; traceback.print_exc()
+            return None
+
+    def _phase2_select(self, candidates):
+        """Phase2MISelector + (옵셔널) VLA scorer 로 §13.2 Useful-OOD selection 실행.
+
+        Phase2 candidate generator 가 후보 batch 를 만들면 호출된다. selector 가
+        미준비 (phase1 모드 또는 setup 실패) 면 RuntimeError. candidate 가
+        observations/instruction/proprios 를 채워 보내면 U_VLA 도 채점됨.
+        """
+        if self._phase2_selector is None:
+            raise RuntimeError(
+                "phase2 selector not initialized — call _setup_phase2_session first "
+                "(make sure method3_phase='phase2' and P_phase1 build succeeded)."
+            )
+        return self._phase2_selector.select(
+            candidates, vla_scorer=self._phase2_vla_scorer,
+        )
+
+    def _load_phase2_g_seed_buffer(self, session_dir: str | None):
+        """Phase1 누적 ``subgoal_buffer.npz`` 를 anchor buffer 로 로드 (§7).
+
+        없으면 빈 buffer 반환 — phase2 hook 이 anchor lookup 실패 시 RNG fallback.
+        """
+        try:
+            from method3.phase2_mi_selection.seed_anchor import load_g_seed
+            buf = load_g_seed(session_dir or ".")
+            print(
+                f"[Method3 phase2] G_seed buffer loaded — "
+                f"skills={list(buf._skills.keys()) if hasattr(buf, '_skills') else 'n/a'}, "
+                f"total entries={len(buf) if hasattr(buf, '__len__') else 'n/a'}"
+            )
+            return buf
+        except Exception as e:
+            print(f"[Method3 phase2] G_seed load FAILED: {e} — anchor lookup 우회")
+            return None
+
+    def _attach_phase2_skill_hook(self) -> None:
+        """skills_lerobot 의 ``_skill_candidate_selector`` hook 에 Useful-OOD 부착.
+
+        selector / vector_db 미준비면 silent skip — phase2 동작은 안 되지만 phase1
+        경로는 영향 없음. hook signature: ``(cands, current_joints, goal_joint_rad,
+        is_transit) -> int | None`` — None 반환 시 skills_lerobot 가 RNG fallback.
+        """
+        if self._phase2_selector is None:
+            return
+        if not hasattr(self, "_skills") or self._skills is None:
+            return
+        try:
+            self._skills.set_skill_candidate_selector(self._make_phase2_skill_selector())
+            print("[Method3 phase2] skill candidate hook attached — Useful-OOD rule active")
+        except Exception as e:
+            print(f"[Method3 phase2] skill hook attach FAILED: {e}")
+
+    def _make_phase2_skill_selector(self):
+        """Returns the actual hook fn closed over self. Defined as a method 라
+        Pipeline 인스턴스 상태에 접근 가능 (selector, encoder, buffer, recorder).
+        """
+        from method3.phase2_mi_selection.curobo_candidate_gen import (
+            CurobogenConfig,
+            candidates_from_trajectory_list,
+        )
+        from method3.phase2_mi_selection.seed_anchor import pick_anchor
+
+        cfg = CurobogenConfig()
+
+        def _hook(cands, current_joints, goal_joint_rad, is_transit) -> int | None:
+            """ξ* index 반환. None 이면 skills_lerobot 의 RNG fallback."""
+            if not cands:
+                return None
+            # 현재 skill_id 는 skills_lerobot 호출자 가 hook 시그니처에 안 실어줌.
+            # acquisition 단계에서 skill 별 acquisition 정책이 필요해지면 별도 hook
+            # 으로 분리하되, 지금은 "default" skill bucket 으로 단일 키 사용 —
+            # vector DB 가 한 bucket 으로 동작하면서 selection rule 자체는 정상.
+            skill_id = "default"
+
+            # anchor: 현재 goal_joint_rad 의 EE xyz 추출은 비싸므로 일단 그대로
+            # 단순화 — anchor 가 없어도 candidate 의 action 다양성으로 selection
+            # rule 은 동작. seed_subgoal 은 candidate metadata 로만 의미.
+            anchor = None
+            if self._phase2_g_seed_buffer is not None:
+                # G_seed 가 있고 lookup 가능한 형태면 그대로 — target_xyz 추출은
+                # 호출자가 별도 wiring 할 때까지 None 으로 두고 buffer 의 첫 entry.
+                try:
+                    anchor = pick_anchor(self._phase2_g_seed_buffer, skill_id)
+                except Exception:
+                    anchor = None
+            seed = anchor if anchor is not None else np.zeros(3, dtype=np.float64)
+
+            # TrajectoryCandidate → Phase2Candidate. encoder 가 None 이면 state_keys
+            # 는 proprio 만으로 구성 (degraded 모드).
+            try:
+                p2_cands = candidates_from_trajectory_list(
+                    cands,
+                    skill_id=skill_id,
+                    seed_subgoal=seed,
+                    current_observation=None,
+                    instruction="",
+                    encoder=None,
+                    config=cfg,
+                )
+            except Exception as e:
+                print(f"[Method3 phase2] candidate adapter failed: {e} — RNG fallback")
+                return None
+            if not p2_cands:
+                return None
+
+            try:
+                result = self._phase2_select(p2_cands)
+            except Exception as e:
+                print(f"[Method3 phase2] selector failed: {e} — RNG fallback")
+                return None
+
+            # §14 flush — accepted 면 즉시 phase2 vector DB 에 window 별 entry append.
+            # ref/meta 는 episode/skill 정보 (호출자가 self 에 set 해두면 그대로 사용).
+            if result.accepted and self._phase2_selector is not None:
+                try:
+                    self._phase2_selector.accept_to_buffer(
+                        result.chosen_candidate,
+                        ref={
+                            "episode_id": getattr(self, "current_episode", None),
+                            "skill_id": skill_id,
+                        },
+                        meta={
+                            "algo": (result.chosen_candidate.payload or {}).get("algo", ""),
+                            "u_vla": result.u_vla_chosen,
+                        },
+                    )
+                except Exception as e:
+                    print(f"[Method3 phase2] accept_to_buffer failed: {e}")
+
+            return int(result.chosen_index)
+
+        return _hook
 
     def _teardown_subgoal_selector(self) -> None:
         """Persist the buffer-aware subgoal buffer to its ``.npz`` file.
@@ -3886,6 +4218,80 @@ class ForwardAndResetPipeline(BasePipeline):
     # 공통 헬퍼
     # ================================================================
 
+    def _verify_resume_layout(
+        self,
+        session_dir: str,
+        config_path: Path,
+        num_episodes: int,
+        episodes_per_seed: int,
+    ) -> None:
+        """Resume 시 session_config 의 layout 과 현재 (NUM_EPISODES, NUM_RANDOM_SEEDS)
+        가 일치하는지 검사.
+
+        ep_idx → (seed, slot) 매핑은 `episode_idx // episodes_per_seed` 로 계산되므로
+        ``episodes_per_seed`` 가 바뀌면 episode_NN 폴더와 (seed, slot) 의 1:1 매핑이
+        깨진다. 같은 세션을 phase1 → phase2 누적 확장(예: 30/10 → 100/10) 하려면
+        폴더 mv 마이그레이션이 선행돼야 한다. 본 함수는 그 조건을 검사하고 불일치 시
+        ``scripts/migrate_session_episodes_per_seed.py`` 명령 hint 와 함께 멈춘다.
+        """
+        try:
+            with open(config_path) as f:
+                cfg = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            YELLOW = "\033[93m"; RESET = "\033[0m"
+            print(f"\n{YELLOW}[Resume] session_config.json 읽기 실패 ({e}); layout 검사 스킵{RESET}")
+            return
+
+        stored_episodes = int(cfg.get("num_episodes") or 0)
+        stored_seeds = int(cfg.get("num_random_seeds") or 0)
+        stored_per_seed = int(cfg.get("episodes_per_seed") or 0)
+
+        # 0 = legacy session_config (해당 필드 없음) — 검사 우회
+        seeds_match = stored_seeds in (0, self.num_random_seeds)
+        per_seed_match = stored_per_seed in (0, episodes_per_seed)
+        if seeds_match and per_seed_match:
+            return
+
+        RED = "\033[91m"; YELLOW = "\033[93m"; BOLD = "\033[1m"; RESET = "\033[0m"
+        msg_lines = [
+            "",
+            f"{RED}{BOLD}[Resume] session layout mismatch — (seed, slot) ↔ episode_NN 매핑이 깨짐{RESET}",
+            f"{RED}  session_config.json: num_episodes={stored_episodes}, num_random_seeds={stored_seeds}, episodes_per_seed={stored_per_seed}{RESET}",
+            f"{RED}  current settings   : num_episodes={num_episodes}, num_random_seeds={self.num_random_seeds}, episodes_per_seed={episodes_per_seed}{RESET}",
+            "",
+        ]
+
+        # 수직 확장 케이스 — 같은 seed 개수에서 episodes_per_seed 증가
+        is_vertical_extension = (
+            stored_seeds == self.num_random_seeds
+            and stored_per_seed > 0
+            and episodes_per_seed > stored_per_seed
+            and num_episodes > stored_episodes
+        )
+        if is_vertical_extension:
+            msg_lines += [
+                f"{YELLOW}같은 seed 수에서 episodes_per_seed 가 늘어난 케이스입니다{RESET}",
+                f"{YELLOW}(예: phase1 → phase2 누적 확장). 폴더 ↔ (seed, slot) 매핑을{RESET}",
+                f"{YELLOW}유지하려면 다음 마이그레이션 명령을 먼저 실행하세요:{RESET}",
+                "",
+                f"  python scripts/migrate_session_episodes_per_seed.py \\",
+                f"      --session {session_dir} \\",
+                f"      --old-episodes {stored_episodes} \\",
+                f"      --new-episodes {num_episodes} \\",
+                f"      --num-seeds {self.num_random_seeds} \\",
+                f"      --apply",
+                "",
+                f"{YELLOW}(먼저 --apply 없이 실행해 dry-run 으로 mv 리스트 확인 권장){RESET}",
+                "",
+            ]
+        else:
+            msg_lines += [
+                f"{YELLOW}NUM_EPISODES / NUM_RANDOM_SEEDS 를 session_config.json 값과 맞추거나,{RESET}",
+                f"{YELLOW}새 세션을 시작하세요. 수직 확장만 마이그레이션 스크립트 사용 가능.{RESET}",
+                "",
+            ]
+        raise RuntimeError("\n".join(msg_lines))
+
     def _init_session(
         self,
         num_episodes: int,
@@ -3905,6 +4311,9 @@ class ForwardAndResetPipeline(BasePipeline):
         if session_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             session_dir = str(Path(save_dir) / f"session_{timestamp}")
+            is_resume = False
+        else:
+            is_resume = True
         Path(session_dir).mkdir(parents=True, exist_ok=True)
 
         self.total_episodes = num_episodes
@@ -3912,6 +4321,14 @@ class ForwardAndResetPipeline(BasePipeline):
 
         # 세션 설정 저장 (최초 생성 시만, resume 시 덮어쓰지 않음)
         config_path = Path(session_dir) / "session_config.json"
+
+        # resume 인데 stored layout 과 현재 (NUM_EPISODES, NUM_RANDOM_SEEDS) 가
+        # 불일치하면 (seed, slot) ↔ episode_NN 매핑이 깨지므로 명확히 멈추고
+        # 마이그레이션 명령을 hint 로 출력한다. phase1 → phase2 누적 확장
+        # (예: 30/10 → 100/10) 도 동일 detector 를 거친다.
+        if is_resume and config_path.exists():
+            self._verify_resume_layout(session_dir, config_path, num_episodes, episodes_per_seed)
+
         if not config_path.exists():
             session_config = {
                 "num_episodes": num_episodes,
@@ -4069,6 +4486,7 @@ class ForwardAndResetPipeline(BasePipeline):
         # call here still no-ops (selector not built yet) — kept harmless.
         self._session_dir = session_dir
         self._finalize_subgoal_buffer(session_dir)
+        self._setup_phase2_session(session_dir)
         seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
 
         # 헤더 출력
@@ -4207,6 +4625,7 @@ class ForwardAndResetPipeline(BasePipeline):
         # up the buffer persisted by the earlier run on resume).
         self._session_dir = session_dir
         self._finalize_subgoal_buffer(session_dir)
+        self._setup_phase2_session(session_dir)
         batch_slots, seed_positions, batch_attempted = self._load_resume_state(session_dir)
 
         # 헤더 출력
@@ -4656,6 +5075,31 @@ def main():
              "Order matches --robot order. Default: 'all' for each robot."
     )
 
+    # ── Method3 phase toggle (final_method3_spec §2) ──
+    parser.add_argument(
+        "--phase",
+        type=str,
+        choices=["phase1", "phase2"],
+        default="phase1",
+        help="Method3 phase. phase1 = subgoal seeding (buffer-aware, default). "
+             "phase2 = MI-based selection (Q2). phase2 requires --phase1-trained-vla-path "
+             "and either --phase1-dataset-path or a cached phase1_vector_db.npz in session_dir."
+    )
+    parser.add_argument(
+        "--phase1-trained-vla-path",
+        type=str,
+        default=None,
+        help="(--phase phase2) §6 frozen VLA encoder checkpoint. Phase1-trained VLA "
+             "가 준비되기 전엔 pretrained VLA 체크포인트 경로를 임시로 넣어 동작 확인 가능."
+    )
+    parser.add_argument(
+        "--phase1-dataset-path",
+        type=str,
+        default=None,
+        help="(--phase phase2) §6 re-embedding 의 Phase1 raw dataset (LeRobot repo_id "
+             "또는 local path). 캐시된 phase1_vector_db.npz 가 있으면 무시."
+    )
+
     args = parser.parse_args()
 
     # 서버 모드 설정 (환경변수로 전달)
@@ -4699,6 +5143,9 @@ def main():
             detect_model=args.detect_model,
             resetspace=single_resetspace,
             recording_config=args.recording_config,
+            method3_phase=args.phase,
+            phase1_trained_vla_path=args.phase1_trained_vla_path,
+            phase1_dataset_path=args.phase1_dataset_path,
         )
     else:
         # ── Multi-arm: UnifiedMultiArmPipeline ──

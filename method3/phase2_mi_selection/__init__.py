@@ -1,8 +1,14 @@
-"""Method3 Phase2 — MI-based Consistent Diversity Acquisition (문서 §7-14).
+"""Method3 Phase2 — Useful-OOD Acquisition (final_method3_spec_useful_ood_updated §7-14).
 
-Phase1 이 만든 state support 안에서, 후보 trajectory 를 MI-style score
-``Q2 = β·ΔH_A − λ·ΔH_A|S`` 로 평가하여 action diversity 는 키우되 유사 state
-에서 action ambiguity 는 키우지 않는 trajectory 만 선별 수집한다. 파일별 역할:
+Phase1 이 만든 state support 안에서, 후보 trajectory 를 두 축으로 평가한다::
+
+    M_MI(ξ) = β·ΔH_A − λ·ΔH_A|S         (§11 buffer-side usefulness)
+    U_VLA(ξ) = R-stochastic denoise loss (§12 model-side informativeness)
+    ξ* = argmax U_VLA(ξ)  s.t.  M̃_MI ≥ τ_MI    (§13.2 Useful-OOD rule)
+
+이로써 ① VLA 가 낯설지만(high U_VLA) ② buffer 입장에서도 의미 있는(high M_MI)
+"Useful OOD" 후보를 우선 수집한다. Harmful OOD 와 Redundant ID 는 M̃_MI constraint
+가 자동 제거. 파일별 역할:
 
     action_descriptor.py     — §4.2  DCT action descriptor ψ → z^a
     vector_db.py             — §3/§7.2  skill-wise vector DB B_t^{(m)}
@@ -10,7 +16,8 @@ Phase1 이 만든 state support 안에서, 후보 trajectory 를 MI-style score
     radius.py                — §16  state-neighborhood radius ρ_m
     action_coverage.py       — §8  action coverage gain ΔH_A
     conditional_ambiguity.py — §9  covered-state + conditional ambiguity ΔH_A|S
-    mi_selector.py           — §11-12  Q2 score + 배치 정규화 + accept + argmax
+    mi_selector.py           — §11 M_MI + §13 Useful-OOD selection rule
+    vla_informativeness.py   — §12 U_VLA (R-stochastic denoise loss)
 """
 from method3.phase2_mi_selection.action_coverage import (
     action_coverage_gain,
@@ -41,6 +48,14 @@ from method3.phase2_mi_selection.neighbor_search import (
 )
 from method3.phase2_mi_selection.radius import state_neighborhood_radius
 from method3.phase2_mi_selection.vector_db import SkillVectorDB, VectorDBEntry
+from method3.phase2_mi_selection.vla_informativeness import (
+    ActionMagnitudeScorer,
+    ConstantScorer,
+    LeRobotBatchBuilder,
+    LeRobotVLAInformativenessScorer,
+    VLAInformativenessScorer,
+    make_default_scorer,
+)
 
 __all__ = [
     # §4.2 DCT action descriptor
@@ -64,10 +79,17 @@ __all__ = [
     "covered_windows",
     "conditional_ambiguity",
     "ConditionalAmbiguityReport",
-    # §11-12 MI selector
+    # §11/§13 MI + Useful-OOD selector
     "Phase2Candidate",
     "Phase2MIConfig",
     "Phase2MISelector",
     "Phase2ScoreReport",
     "Phase2Selection",
+    # §12 U_VLA scorers + batch builder
+    "VLAInformativenessScorer",
+    "ConstantScorer",
+    "ActionMagnitudeScorer",
+    "LeRobotVLAInformativenessScorer",
+    "LeRobotBatchBuilder",
+    "make_default_scorer",
 ]

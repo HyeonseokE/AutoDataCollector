@@ -146,6 +146,17 @@ EXECUTE_RESET=true # Reset 실행 여부
 # Dataset Recording 설정
 RECORD_DATASET=true
 
+# ============================================================
+# Method3 phase 토글 (final_method3_spec §2)
+#   phase1 — Phase1 buffer-aware subgoal seeding (기본).
+#   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
+#            로드, 없으면 pipeline_config/phase2_config.yaml 의
+#            ``phase1_trained_vla_path`` + ``phase1_dataset_path`` 로 §6
+#            re-embedding 자동 구축. HF repo_id ("user/name") 도 그대로 인식 —
+#            로컬 캐시 miss 면 lerobot 가 다운로드.
+# ============================================================
+PHASE="phase1"
+
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
 RESUME_SESSION="./results/session_20260512_181737"
@@ -412,6 +423,9 @@ fi
 if [ ${#RESETSPACE_PER_ROBOT[@]} -gt 0 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --resetspace-per-robot ${RESETSPACE_PER_ROBOT[@]}"
 fi
+
+# Method3 phase 토글 — phase2 일 때 VLA/dataset 경로는 phase2_config.yaml 에서 자동 로드.
+EXTRA_ARGS="$EXTRA_ARGS --phase $PHASE"
 
 # ============================================================
 # 파이프라인 실행

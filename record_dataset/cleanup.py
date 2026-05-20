@@ -61,18 +61,27 @@ def cleanup_dataset_for_resume(
     # dataset 으로 early-exit 하기 전에 반드시 채워둔다).
     #   "kept_true"  = TRUE + 폴더 존재 → dataset에 기록됨, 유지
     #   "false"      = FALSE + 폴더 존재 → dataset에 미기록, 재취득
-    #   "missing"    = 폴더 삭제됨 → dataset에 기록되었을 수도 있음, 재취득
+    #   "missing"    = 폴더는 존재하지만 batch_info.json 없음 → 불완전 episode, 재취득
+    #
+    # NOTE: ep_states 는 sorted(glob("episode_*")) 의 *실제 존재하는* 폴더만
+    # 순회한다. 과거 코드는 range(1, max+1) 로 빈 번호도 missing 으로 잡아
+    # 그 자리 dataset idx 를 삭제했으나, episodes_per_seed 마이그레이션
+    # (예: 30/10 → 100/10, phase1→phase2 확장) 후엔 빈 번호(ep04~10 등)가
+    # 정상 상태이므로 잘못 삭제되는 문제가 있었다. sorted 폴더 순서가 dataset
+    # idx 0,1,2,… 와 1:1 정렬되므로 폴더 기반 스캔이 옳다.
+    #
+    # 부수효과: 사용자가 episode_NN 폴더를 직접 삭제했을 때 그 자리 dataset
+    # idx 가 자동 정리되던 동작은 사라진다. 정상 워크플로우에선 batch_info.
+    # judge="FALSE" 마킹으로 재취득을 표현하므로 영향 거의 없음. 그래도 폴더
+    # 직접 삭제로 dataset 청소가 필요하면 별도 CLI 로 분리할 것.
     episode_dirs = sorted(session_path.glob("episode_*"))
-    max_episode = 0
+    ep_states = []  # [(ep_num, state)]
     for ep_dir in episode_dirs:
         try:
             ep_num = int(ep_dir.name.split("_")[1])
-            max_episode = max(max_episode, ep_num)
         except (ValueError, IndexError):
             continue
-    ep_states = []  # [(ep_num, state)]
-    for ep_num in range(1, max_episode + 1):
-        batch_info_path = session_path / f"episode_{ep_num:02d}" / "batch_info.json"
+        batch_info_path = ep_dir / "batch_info.json"
         if not batch_info_path.exists():
             ep_states.append((ep_num, "missing"))
             stats["pipeline_episodes_to_rerun"] += 1
@@ -122,6 +131,11 @@ def cleanup_dataset_for_resume(
         print(f"[Cleanup] Warning: Cannot open dataset, removing: {e}")
         shutil.rmtree(dataset_path)
         return stats
+
+    # early-return 경로에서도 dataset 변경 없음을 정확히 표시 — 디폴트 0 으로
+    # 남아 "N → 0" 처럼 데이터셋 손실로 오해되지 않도록 dataset_episodes_after 를
+    # dataset_episodes_before 와 같게 유지.
+    stats["dataset_episodes_after"] = actual_dataset_episodes
 
     if actual_dataset_episodes == 0:
         print("[Cleanup] Dataset is empty, skipping")

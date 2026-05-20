@@ -25,6 +25,13 @@ cd "$SCRIPT_DIR"
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
 ROBOT_IDS=(4)
 
+# ============================================================
+# Method3 phase 토글 (final_method3_spec)
+#   phase1 — Phase1 buffer-aware subgoal seeding (default).
+#   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
+# ============================================================
+PHASE="phase2"
+
 ### ==================== [single arm task] ==================
 ## pick and place
 INSTRUCTION="pick up the red block and place it on the blue dish"
@@ -54,16 +61,9 @@ EXECUTE_RESET=true # Reset 실행 여부
 # Dataset Recording 설정
 RECORD_DATASET=true
 
-# ============================================================
-# Method3 phase 토글 (final_method3_spec)
-#   phase1 — Phase1 buffer-aware subgoal seeding (default).
-#   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
-# ============================================================
-PHASE="phase1"
-
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_100"
-# RESUME_SESSION="./results/session_20260319_174942"
+# RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_100"
+RESUME_SESSION="./results/pnp_ours_100"
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

@@ -238,12 +238,27 @@ def build_phase1_vector_db(
         instructions = [e.instruction for e in chunk_entries]
 
         # §6 — VLA encoder. batch path 가 있으면 한 번에, 없으면 frame 별 loop.
+        # encode_batch 시그니처는 두 가지 — wrapper (2-arg, auto zero state) vs
+        # raw _TorchVLAExtractor (3-arg, states 필수). 둘 다 호환.
         if use_batch and len(observations) > 1:
-            e_vla_batch = encoder.encode_batch(observations, instructions)   # (B, D_vla)
+            try:
+                e_vla_batch = encoder.encode_batch(observations, instructions)   # wrapper
+            except TypeError:
+                # raw encoder — proprio 도 전달
+                states_b = [np.asarray(e.proprioception, dtype=np.float64).reshape(-1)
+                            for e in chunk_entries]
+                e_vla_batch = encoder.encode_batch(observations, instructions, states_b)
         else:
-            e_vla_batch = np.stack([
-                encoder.encode(o, i) for o, i in zip(observations, instructions)
-            ])
+            try:
+                e_vla_batch = np.stack([
+                    encoder.encode(o, i) for o, i in zip(observations, instructions)
+                ])
+            except TypeError:
+                # raw encoder — proprio 도 전달 (3-arg)
+                e_vla_batch = np.stack([
+                    encoder.encode(o, i, np.asarray(e.proprioception, dtype=np.float64).reshape(-1))
+                    for o, i, e in zip(observations, instructions, chunk_entries)
+                ])
 
         # frame 단위 post-processing (CPU). DCT + state concat + db.append.
         for j, (idx, entry) in enumerate(zip(chunk_indices, chunk_entries)):

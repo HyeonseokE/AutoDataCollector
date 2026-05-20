@@ -70,9 +70,15 @@ def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfi
         return indices
     hf = ds.hf_dataset
     ee_key = getattr(raw_dataset, "_proprio_key", None) or "observation.ee_pos.robot_xyzrpy"
-    sg_key = "subtask.target_position"
-    if ee_key not in hf.features or sg_key not in hf.features:
-        print(f"[reembed] subgoal-filter unavailable (missing {ee_key} or {sg_key}) — full re-embed")
+    # subgoal: 우선 *frame-by-frame 변동* 컬럼 (skill.goal_position.robot_xyzrpy
+    # 가 진짜 dynamic goal — subtask.target_position 은 placeholder 인 경우 많음).
+    sg_candidates = (
+        "skill.goal_position.robot_xyzrpy",   # 우선순위 1 — frame-by-frame
+        "subtask.target_position",            # fallback (placeholder 일 수 있음)
+    )
+    sg_key = next((k for k in sg_candidates if k in hf.features), None)
+    if ee_key not in hf.features or sg_key is None:
+        print(f"[reembed] subgoal-filter unavailable (missing {ee_key} or all of {sg_candidates}) — full re-embed")
         return indices
     # bulk column read — lazy column access (no video decode)
     ee_all = np.asarray(hf[ee_key], dtype=np.float64)[:, :3]   # (N_full, 3)
@@ -98,7 +104,7 @@ def _apply_subgoal_filter(raw_dataset, indices: list[int], cfg: ReembeddingConfi
         mask = min_dist < radius
     kept = [i for i, k in zip(indices, mask.tolist()) if k]
     print(f"[reembed] subgoal-filter (bulk-pooled): {len(indices)} → {len(kept)} frames "
-          f"(R={radius:.3f}m, |sg_unique|={len(sg_unique)}, "
+          f"(R={radius:.3f}m, sg_key={sg_key}, |sg_unique|={len(sg_unique)}, "
           f"min_dist∈[{min_dist.min():.3f}, {min_dist.max():.3f}], median={np.median(min_dist):.3f})")
     return kept
 

@@ -300,15 +300,19 @@ export HOST="$SERVER_HOST"
 export PORT="$REMOTE_PORT"
 export RECORDING_CONFIG="$SERVER_RECORDING_CONFIG"
 export URDF="$SERVER_URDF"
+# conda command 를 PATH 에 명시. ~/.bashrc 의 conda init 이 non-interactive
+# / non-login shell 에서 source 되지 않는 환경이 흔하므로, miniconda/anaconda
+# 의 bin/ 를 prepend 해서 ``command -v conda`` 가 통과되게 한다. 그러면
+# setup_h100_server.sh 의 preflight + run_h100_server.sh 의 conda info / activate
+# 모두 정상 동작.
+CONDA_PATH_PREFIX='for d in \$HOME/miniconda3 \$HOME/anaconda3 /opt/conda /opt/miniconda3; do [ -d "\$d/bin" ] && export PATH="\$d/bin:\$PATH" && break; done'
+
 if command -v tmux >/dev/null 2>&1; then
-  # bash -lc 로 *login shell* 사용 — ~/.bashrc 의 conda init 등이 적용돼야
-  # setup/run_server.sh 가 conda 를 찾을 수 있다. non-login 으로 띄우면
-  # "conda not found on PATH" 로 즉시 죽음.
   tmux new-session -d -s '$TMUX_SESSION' \
-    "bash -lc 'bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log'"
+    "bash -c '$CONDA_PATH_PREFIX; bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log'"
   echo "  remote: tmux session started"
 else
-  nohup bash -lc 'bash grpc_server/run_server.sh' > /tmp/phase2_server.log 2>&1 &
+  nohup bash -c "$CONDA_PATH_PREFIX; bash grpc_server/run_server.sh" > /tmp/phase2_server.log 2>&1 &
   echo "  remote: tmux not available — using nohup (pid=\$!)"
 fi
 REMOTE_CMD

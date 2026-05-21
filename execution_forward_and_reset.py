@@ -316,6 +316,30 @@ class ForwardAndResetPipeline(BasePipeline):
 
         self._skills = LeRobotSkills(**kwargs)
 
+        # Retro-attach — _skills 가 lazy 생성이라 transport / phase2 setup
+        # 시점에는 None 이었을 수 있다. setup 가 이미 끝난 state 면 새 _skills
+        # 에 client + rng + selector hook 를 *다시* 부착해야 plan_batch 가 swap.
+        _adapter = getattr(self, "_skill_planner_client", None)
+        if _adapter is not None:
+            _n = int(getattr(self, "_skill_planner_n_candidates", 4))
+            try:
+                self._skills.set_skill_planner_client(_adapter, n_candidates=_n)
+                print(f"[Skill Perturbation] re-attached planner client to fresh _skills (K={_n})")
+            except Exception as e:
+                print(f"[Skill Perturbation] re-attach planner client failed: {e}")
+        _pending = getattr(self, "_pending_perturbation_seed", None)
+        if _pending is not None:
+            try:
+                self._skills.set_perturbation_rng(_pending)
+                print(f"[Skill Perturbation] re-attached perturbation RNG to fresh _skills")
+            except Exception as e:
+                print(f"[Skill Perturbation] re-attach perturbation RNG failed: {e}")
+        if getattr(self, "_phase2_selector", None) is not None:
+            try:
+                self._attach_phase2_skill_hook()
+            except Exception as e:
+                print(f"[Method3 phase2] re-attach skill hook failed: {e}")
+
         # 공유 카메라 주입 (detect_objects에서 사용)
         if self.camera:
             self._skills.camera = self.camera
@@ -1734,6 +1758,9 @@ class ForwardAndResetPipeline(BasePipeline):
 
         self._skill_planner_grpc_client = client
         self._skill_planner_client = adapter
+        # _create_skills lazy 호출 대비 — n_candidates 저장 후 새 _skills 가
+        # 만들어질 때 retro-attach 가능.
+        self._skill_planner_n_candidates = int(n_cand)
         if hasattr(self, "_skills") and self._skills is not None:
             self._skills.set_skill_planner_client(adapter, n_candidates=n_cand)
             self._skills.set_skill_candidate_selector(None)  # server picks

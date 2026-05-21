@@ -1753,8 +1753,21 @@ class ForwardAndResetPipeline(BasePipeline):
             )
 
         adapter = GrpcPlannerClient(client=client, context_provider=self)
-        n_cand = int(((full_cfg.get("perturbation") or {}).get("skill") or {}).get(
-            "n_candidates", 4))
+        # phase2_config.yaml.skill_perturbation (신규 통합 위치) 우선 —
+        # recording_config 의 옛 perturbation.skill path 는 fallback.
+        _ph2_skill: dict = {}
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _P
+            _ph2_path = _P(__file__).resolve().parent / "pipeline_config" / "phase2_config.yaml"
+            if _ph2_path.exists():
+                _ph2_skill = (_yaml.safe_load(open(_ph2_path)) or {}).get("skill_perturbation") or {}
+        except Exception:
+            _ph2_skill = {}
+        _legacy_skill = (full_cfg.get("perturbation") or {}).get("skill") or {}
+        n_cand = int(_ph2_skill.get("n_candidates", _legacy_skill.get("n_candidates", 4)))
+        print(f"[skill_planner_transport] n_candidates = {n_cand} "
+              f"(source={'phase2_config.skill_perturbation' if _ph2_skill else 'recording.perturbation.skill' if _legacy_skill else 'default-4'})")
 
         self._skill_planner_grpc_client = client
         self._skill_planner_client = adapter

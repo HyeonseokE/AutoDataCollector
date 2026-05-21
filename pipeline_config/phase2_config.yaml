@@ -50,9 +50,9 @@ readiness:
 mi_selection:
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율
-  k_min: 3                     # §9.1 covered window 최소 neighbor 수
+  k_min: 2                     # §9.1 covered window 최소 neighbor 수 (3→2 — covered 늘림)
   radius_k: 5                  # §16 ρ_m 계산용 kNN k
-  radius_quantile: 0.7         # §16 ρ_m quantile
+  radius_quantile: 0.9         # §16 ρ_m quantile (0.7→0.9 — radius 키워 covered 늘림)
   s_min_a: 0.001               # §9.3 local support scale floor
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중

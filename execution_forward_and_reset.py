@@ -1256,6 +1256,22 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"[Method3 phase2] selector failed: {e} — RNG fallback")
                 return None
 
+            # Verbose log — client 측에서도 paradigm 의 실 작동 확인 가능.
+            try:
+                eligible = list(getattr(result, "eligible_indices", []) or [])
+                u_vla = getattr(result, "u_vla_chosen", None)
+                rep = result.reports[result.chosen_index] if result.reports else None
+                _r = (f"ΔH_A={rep.delta_h_a:.3f}, ΔH_A|S={rep.delta_h_a_given_s:.3f}, "
+                      f"M̃_MI={rep.q2_norm:+.2f}, U_VLA={rep.u_vla:.3f}"
+                      if rep is not None else "no report")
+                print(
+                    f"[Phase2-Selection] cands={len(p2_cands)} eligible={len(eligible)} "
+                    f"chosen=#{result.chosen_index} accepted={result.accepted} "
+                    f"u_vla_chosen={u_vla} | {_r}"
+                )
+            except Exception as e:
+                print(f"[Phase2-Selection] verbose log failed: {e}")
+
             # §14 flush — accepted 면 즉시 phase2 vector DB 에 window 별 entry append.
             # ref/meta 는 episode/skill 정보 (호출자가 self 에 set 해두면 그대로 사용).
             if result.accepted and self._phase2_selector is not None:

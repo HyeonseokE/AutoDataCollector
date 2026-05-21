@@ -2292,11 +2292,17 @@ class LeRobotSkills:
         # asks the planner for N candidate paths. A selector hook (Method 3)
         # may pick the index; otherwise RNG fallback. Falls back to the
         # cartesian-line trajectory on any error or empty batch.
+        # Diagnostic: 어떤 조건이 false 라 plan_batch 가 skip 되는지 명시.
+        _diag = (
+            f"transit={is_transit}, client={self._skill_planner_client is not None}, "
+            f"rng={self._perturbation_rng is not None}, ik={trajectory.ik_converged}"
+        )
         if (is_transit
                 and self._skill_planner_client is not None
                 and self._perturbation_rng is not None
                 and trajectory.ik_converged):
             seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
+            self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates})")
             try:
                 cands = self._skill_planner_client.plan_batch(
                     start_qpos=np.asarray(current_joints, dtype=float),
@@ -2304,9 +2310,13 @@ class LeRobotSkills:
                     n=self._skill_planner_n_candidates,
                     seed=seed,
                 )
+                self._log(f"  [Skill Perturbation] plan_batch DONE — {len(cands)} candidates received")
             except Exception as e:
                 cands = []
                 self._log(f"  [Skill Perturbation] planner error, fallback to cartesian: {e}")
+        else:
+            cands = []
+            self._log(f"  [Skill Perturbation] SKIP plan_batch ({_diag}) — cartesian fallback")
 
             if cands:
                 # Candidate selection. Default: RNG uniform over batch.

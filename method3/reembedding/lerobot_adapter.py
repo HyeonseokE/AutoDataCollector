@@ -44,8 +44,10 @@ if str(_LEROBOT_PATH) not in sys.path:
 
 
 _PROPRIO_KEYS = (
-    "observation.ee_pos.robot_xyzrpy",  # 우선순위 1
-    "observation.state",                 # fallback (so101 7-dim joint state 등)
+    # observation.state — VLA 가 학습한 그 분포 (so101 6-dim servo positions, norm~85).
+    # DB / candidate / encoder 의 모든 state-space 가 *이 분포* 로 통일되어야 한다.
+    "observation.state",                 # 우선순위 1
+    "observation.ee_pos.robot_xyzrpy",   # legacy fallback — 학습 일관성 없으므로 권장 X
 )
 _OBSERVATION_KEYS = (
     "observation.images.top",            # 우선순위 1

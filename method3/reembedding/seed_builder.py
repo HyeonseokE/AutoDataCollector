@@ -94,7 +94,9 @@ def _apply_subgoal_filter(
         print("[reembed] subgoal-filter unavailable (no hf_dataset) — full re-embed")
         return indices
     hf = ds.hf_dataset
-    ee_key = getattr(raw_dataset, "_proprio_key", None) or "observation.ee_pos.robot_xyzrpy"
+    # 주의: subgoal filter 는 *EE xyz 좌표* 기반 (spatial 거리). _proprio_key 가
+    # observation.state (servo positions) 이어도 여기서는 EE pose 필요.
+    ee_key = "observation.ee_pos.robot_xyzrpy"
     if ee_key not in hf.features:
         print(f"[reembed] subgoal-filter unavailable (missing {ee_key}) — full re-embed")
         return indices

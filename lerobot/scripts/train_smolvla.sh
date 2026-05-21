@@ -148,7 +148,6 @@ cat <<EOF
  lerobot : $REPO_DIR/src (PYTHONPATH)
  policy  : type=$POLICY_TYPE  path=${POLICY_PATH:-<scratch>}  hub=${POLICY_REPO_ID:-off}
  dataset : $DATASET_REPO_ID @ $DATASET_REVISION
- dct-mode: ${SKILL_DCT_PARQUET:-off}
  output  : $OUTPUT_DIR
  train   : steps=$STEPS  epochs=$EPOCHS  batch=$BATCH_SIZE (global=$EFFECTIVE_BS)  workers=$NUM_WORKERS
  device  : $DEVICE  gpus=$NUM_GPUS  precision=$MIXED_PRECISION
@@ -178,7 +177,6 @@ TRAIN_ARGS=(
     --wandb.project="$WANDB_PROJECT"
 )
 [ -n "$POLICY_RENAME_MAP" ] && TRAIN_ARGS+=(--rename_map="$POLICY_RENAME_MAP")
-[ -n "$SKILL_DCT_PARQUET" ] && TRAIN_ARGS+=(--dataset.skill_dct_parquet="$SKILL_DCT_PARQUET")
 
 # 이미지 augmentation: 켜진 transform 만 JSON dict 로 조립해서 한 번에 전달.
 if [ "$IMG_AUG" = "true" ]; then

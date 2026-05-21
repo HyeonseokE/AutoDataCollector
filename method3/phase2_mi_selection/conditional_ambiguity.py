@@ -104,10 +104,14 @@ def conditional_ambiguity(
     n_windows = int(np.asarray(candidate_keys).shape[0])
 
     covered = covered_windows(candidate_keys, db_state_keys, radius, k_min)
+    # use_dct_target=True 면 cand_z 가 *skill-atomic single window* (1, D_z) —
+    # 모든 τ 에 동일 row broadcast. legacy frame-level path 면 cand_z.shape[0]==T.
+    _cand_n = cand_z.shape[0]
     deltas: list[float] = []
     for tau, neighbors in covered:
         support = db_z[neighbors]                          # §9.2 A_{e_τ}
-        d_min = min_distance(cand_z[tau], support)         # §9.3 d_min^a
+        _cz_row = cand_z[tau if tau < _cand_n else 0]
+        d_min = min_distance(_cz_row, support)             # §9.3 d_min^a
         # covered → |support| >= k_min >= 2 이므로 d̄_NN 계산 가능.
         s_a = max(mean_nn_distance(support), s_min)        # §9.3 s_a
         if d_min <= 0.0:

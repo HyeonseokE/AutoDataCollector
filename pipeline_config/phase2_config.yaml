@@ -147,11 +147,30 @@ policy:
   autocast_dtype: bfloat16              # bfloat16 | float16 | float32
   state_weight: 1.0                     # state concat 의 weight
 
-# --- action chunk re-sampling horizon ---
-# server 가 TrajectoryCandidate.waypoints 를 Phase2Candidate.action_chunks
-# 로 변환할 때의 chunk_size (DCT descriptor 입력 길이와 동기화).
+# --- action chunk horizon (H) + 평가 시점 cost cap ---
+# spec §7.3:
+#   ξ = {(S_τ, A_{τ:τ+H-1})}_{τ=1}^T,  A_{τ:τ+H-1} ∈ ℝ^{H × action_dim}
+# 의미:
+#   T = candidate trajectory ξ 의 *시간 길이* (= waypoint 개수 N).
+#       yaml 에서 정하는 값이 아니라 curobo plan 결과로 자동 결정.
+#   H = 한 시점 τ 에서 미리 보는 action prediction horizon (예: smolvla chunk_size).
+#       각 시점 τ ∈ [1, T] 에서 action descriptor z_τ^a = ψ(A_{τ:τ+H-1}) 가 계산됨.
+#       stride=1 sliding window. trajectory 끝부분 (τ+H-1 > T) 은 끝점 hold pad.
+#
+# - H=50 은 spec §7.3 line 741 (A ∈ ℝ^{50×6}) + smolvla policy chunk_size 와 일치.
+#   H 를 바꾸면 P_phase1 vector DB 도 같은 H 로 *다시 build* 해야 한다 (key consistency).
+# - ``selector.action_horizon`` 은 Phase1 re-embed (LeRobotPhase1RawAdapter) 와 Phase2
+#   candidate gen (curobo_candidate_gen) *둘 다* 의 SoT.  method3/config.py 가 이 값을
+#   reembedding 단계로 propagate.
+# - ``max_T_eval`` (옵션): T = N 이 너무 클 때의 sub-sample cost cap. None = spec 직역
+#   (모든 시점 평가). int 면 균일 간격으로 max_T_eval 개 시점만 평가. U_VLA enabled +
+#   긴 trajectory 환경에서 평가 비용 폭주 방지용.
+# - 옛 키 ``selector.chunk_size`` / ``selector.n_windows`` 는 deprecated. server 가
+#   chunk_size → action_horizon 매핑은 backward-compat 유지, n_windows 는 무시됨.
 selector:
-  chunk_size: 50
+  action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
+  max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
+                                  # int 로 두면 trajectory 가 길 때 sub-sample.
 
 # --- server-local SkillVectorDB 영속화 ---
 # server 가 boot/restart 사이에도 buffer 를 유지하기 위한 sidecar npz.

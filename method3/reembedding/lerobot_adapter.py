@@ -73,7 +73,7 @@ class LeRobotPhase1RawAdapter:
         self,
         repo_id_or_path: str | Path,
         *,
-        action_horizon: int = 12,
+        action_horizon: int = 50,
         proprio_key: str | None = None,
         observation_key: str | None = None,
         skill_id_default: str = "move",

@@ -57,6 +57,13 @@ class ReembeddingConfig:
                                  # 1 = 순차 (legacy). >1 = ThreadPoolExecutor.
                                  # I/O bound 라 thread 가 GIL 영향 거의 없음.
                                  # H100 server (64+ cores) 권장: 16. RTX 3050: 4.
+    action_horizon: int = 50     # H — action_chunk window 길이 (spec §7.3, smolvla
+                                 # chunk_size 와 일치). LeRobotPhase1RawAdapter 가
+                                 # 이 값으로 episode 안 sliding window 를 자른다.
+                                 # Phase2 candidate gen (curobo_candidate_gen) 의
+                                 # action_horizon 과 *반드시* 동일해야 P_phase1 의
+                                 # action descriptor 가 Phase2 candidate descriptor
+                                 # 와 같은 metric space 에 놓인다.
 
 
 def _apply_subgoal_filter(

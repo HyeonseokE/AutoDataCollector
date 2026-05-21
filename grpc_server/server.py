@@ -124,8 +124,8 @@ class PreselectiveAcquirerServicer(
         recording_fps: int = 10,
         chunk_size: int = 50,
         debug_verbose: bool = False,
-        action_horizon: int = 12,
-        n_windows: int = 3,
+        action_horizon: int = 50,
+        max_T_eval: int | None = None,
     ) -> None:
         self.stack = stack
         self.selector = stack.selector
@@ -139,9 +139,10 @@ class PreselectiveAcquirerServicer(
         self.debug_verbose = debug_verbose
 
         # Phase2Candidate (T, H) chunking 파라미터 — curobo_candidate_gen 의 input.
+        # T 는 trajectory 길이 N 에서 자동 계산 (stride=1). max_T_eval 은 cost cap.
         self._candidate_cfg = CurobogenConfig(
-            n_windows=int(n_windows),
             action_horizon=int(action_horizon),
+            max_T_eval=(None if max_T_eval is None else int(max_T_eval)),
         )
 
         # Selection cache — selection_id → (Phase2Candidate, Phase2Selection)
@@ -435,12 +436,33 @@ def serve(args: argparse.Namespace) -> None:
 
     psf_cfg = recording_cfg.get("preselective_filter") or {}
     sel_cfg = psf_cfg.get("selector") or {}
+    # phase2_config.yaml.selector 가 *진짜* SoT (recording_config 의 옛 selector 는
+    # legacy). 있으면 우선.
+    if phase2_yaml_path.exists():
+        try:
+            with phase2_yaml_path.open("r", encoding="utf-8") as _f:
+                _ph2 = yaml.safe_load(_f) or {}
+            sel_cfg = _ph2.get("selector") or sel_cfg
+        except Exception:
+            pass
+    # action_horizon: 신 키. chunk_size 는 deprecated alias (spec mismatch 였던
+    # 옛 yaml 호환). 둘 다 없으면 spec §7.3 의 50 으로 default.
+    # T 는 trajectory 길이의 함수로 자동 (stride=1). max_T_eval 은 *옵션* cost cap.
+    _action_horizon = int(sel_cfg.get("action_horizon", sel_cfg.get("chunk_size", 50)))
+    _max_T_eval = sel_cfg.get("max_T_eval")
+    _max_T_eval = None if _max_T_eval is None else int(_max_T_eval)
     servicer = PreselectiveAcquirerServicer(
         stack=stack,
         curobo_backend=curobo,
         recording_fps=int(recording_cfg.get("recording_fps", 10)),
         chunk_size=int(sel_cfg.get("chunk_size", 50)),
         debug_verbose=bool(psf_cfg.get("debug_verbose", False)),
+        action_horizon=_action_horizon,
+        max_T_eval=_max_T_eval,
+    )
+    print(
+        f"[server] selector: action_horizon (H)={_action_horizon}, "
+        f"max_T_eval={_max_T_eval} (None=evaluate all T=N points)"
     )
 
     server = grpc.server(

@@ -6,16 +6,22 @@ mi_selector 가 이해하는 ``list[Phase2Candidate]`` 로 변환하는 thin ada
 
 각 ``TrajectoryCandidate`` 의 ``waypoints (N, dof)`` 를 다음처럼 매핑한다::
 
-    proprios[τ]     = waypoints[τ · H]                          (T, dof)
-    action_chunks[τ] = waypoints[τ · H : τ · H + H]              (T, H, dof)
-    state_keys[τ]   = [φ_VLA(o_τ, I); proprios[τ]]               (T, D_e)
-                       — o_τ 는 *현재* observation 을 모든 τ 에 공유 (no forward
-                       dynamics 환경의 근사).
-    observations    = caller-provided LeRobot batch dict 또는 raw current_obs.
-    instruction     = task instruction (skill 의 자연어).
-    seed_subgoal    = G_seed^{(m)} 에서 정한 anchor g (caller).
+    ξ 의 시간 길이 T = candidate trajectory 의 step 수 (= N).
+    H 는 한 시점에서 미리 보는 action prediction horizon (spec §7.3, H=50).
 
-T·H > N 이면 마지막 waypoint 로 pad. ``T``, ``H`` 는 caller 가 결정.
+    각 시점 τ ∈ [1, T] 에 대해::
+        proprios[τ]      = waypoints[τ]                              (T, dof)
+        action_chunks[τ] = waypoints[τ : τ + H]                       (T, H, dof)
+        state_keys[τ]    = [φ_VLA(o_τ, I); proprios[τ]]               (T, D_e)
+                          — o_τ 는 *현재* observation 을 모든 τ 에 공유
+                          (no forward dynamics 환경의 근사).
+
+Boundary 처리::
+    N < H  : 마지막 waypoint 로 *waypoints* 자체를 length-H 까지 pad → T = 1
+             (단일 시점, action_chunk 는 hold-last).
+    N ≥ H  : stride=1 sliding window. 끝부분의 action chunk 가 trajectory 끝을
+             넘으면 *그 시점의 action chunk 만* 마지막 waypoint 로 pad.
+             T = N (모든 시점 평가, spec §7.3 의 τ=1..T 직역).
 
 본 모듈은 curobo / skills_lerobot 의존성을 import 하지 않는다 (TrajectoryCandidate
 와 동일한 ``waypoints/algo/seed`` 만 duck-typing 으로 쓰기 때문에 mock 도 가능).
@@ -33,36 +39,76 @@ from method3.reembedding.vla_encoder import VLAStateEncoder
 
 @dataclass
 class CurobogenConfig:
-    """waypoints → (T, H) chunking 파라미터."""
+    """waypoints → (T, H) chunking 파라미터.
 
-    n_windows: int = 3      # T
-    action_horizon: int = 12  # H
+    spec §7.3:
+      ξ = {(S_τ, A_{τ:τ+H-1})}_{τ=1}^{T} — T 는 trajectory 의 시간 길이,
+      H 는 한 시점의 action prediction horizon.
+    """
+
+    action_horizon: int = 50  # H — spec §7.3: A_{τ:τ+H-1} ∈ ℝ^{H×6}, H=50
+                              # (smolvla chunk_size 와 일치).
     fail_safe_min_waypoints: int = 2  # waypoints 가 이보다 작으면 skip
+    max_T_eval: int | None = None     # T cost cap (운영용, spec 외).
+                                       # None=비활성 (spec 직역, 모든 시점 평가).
+                                       # int 면 T_raw > max_T_eval 일 때 균일 간격
+                                       # sub-sample 해서 max_T_eval 개 시점만 평가.
 
 
 def _chunk_waypoints(
     waypoints: np.ndarray,
-    n_windows: int,
     action_horizon: int,
+    max_T_eval: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """``waypoints (N, dof)`` → ``(proprios (T, dof), action_chunks (T, H, dof))``.
 
-    부족분은 마지막 waypoint 로 pad. step stride = H (no overlap).
+    stride=1 sliding window. T 는 N 으로부터 자동 계산.
+
+    Boundary 처리 (stride=1 sliding, 모든 시점 평가):
+      - T = N (= waypoints 의 길이). N < H 이든 N ≥ H 이든 *모든 시점 τ ∈ [0, N)*
+        에 대해 length-H action chunk 를 만든다.
+      - 각 시점의 action chunk 가 trajectory 끝을 넘으면 (τ + H − 1 > N − 1) *그
+        chunk 만* 끝점 hold pad (= "부족하면 pad"). trajectory 자체를 줄이거나
+        늘리지 않는다.
+
+      예시:
+        N=10, H=50  →  T=10, action_chunks=(10, 50, 6).
+                       각 τ ∈ [0,10): wp[τ:τ+50] 인데 N=10 이라 모든 chunk 가
+                       앞 (10−τ) 개 실제 waypoint + 뒤 (40+τ) 개 끝점 hold.
+        N=60, H=50  →  T=60, action_chunks=(60, 50, 6).
+                       τ ≤ 9: 실제 waypoint 만으로 chunk 채워짐.
+                       τ ≥ 10: 끝부분 hold pad 가 일부 섞임.
+
+    Args:
+        waypoints: (N, dof) — candidate trajectory.
+        action_horizon: H — action prediction horizon.
+        max_T_eval: T cost cap. None 이면 비활성 (T=N 모두 평가). int 면 sub-sample.
     """
     wp = np.asarray(waypoints, dtype=np.float64)
     if wp.ndim != 2:
         raise ValueError(f"waypoints must be (N, dof); got {wp.shape}")
     N, dof = wp.shape
-    needed = n_windows * action_horizon
-    if N < needed:
-        pad = np.tile(wp[-1:, :], (needed - N, 1))
-        wp = np.concatenate([wp, pad], axis=0)
-    # window stride H — non-overlapping.
-    action_chunks = np.stack([
-        wp[tau * action_horizon : tau * action_horizon + action_horizon]
-        for tau in range(n_windows)
-    ])  # (T, H, dof)
-    proprios = action_chunks[:, 0, :].copy()  # (T, dof) — window 시작 joint state
+    H = int(action_horizon)
+    if H < 1:
+        raise ValueError(f"action_horizon must be >= 1; got {H}")
+    if N < 1:
+        raise ValueError("waypoints must have at least 1 row")
+
+    # stride=1 sliding 으로 모든 N 시점 평가. 부족분은 끝점 hold pad.
+    # wp_ext: trajectory 끝에 H−1 개 끝점 복제 → N<H 이든 N≥H 이든 모든 시점
+    # τ ∈ [0, N) 에서 length-H chunk 추출 가능. T = N 일관.
+    tail_pad = np.tile(wp[-1:, :], (H - 1, 1))
+    wp_ext = np.concatenate([wp, tail_pad], axis=0)        # (N+H−1, dof)
+
+    T_raw = N
+    # T cost cap — sub-sample 시점 (운영 옵션, spec 외).
+    if max_T_eval is not None and T_raw > int(max_T_eval):
+        taus = np.linspace(0, T_raw - 1, int(max_T_eval), dtype=np.int64)
+    else:
+        taus = np.arange(T_raw, dtype=np.int64)
+
+    proprios = wp[taus].copy()                              # (T, dof)
+    action_chunks = np.stack([wp_ext[t:t + H] for t in taus])  # (T, H, dof)
     return proprios, action_chunks
 
 
@@ -111,7 +157,8 @@ def candidates_from_trajectory_list(
             continue
 
         proprios, action_chunks = _chunk_waypoints(
-            wp_arr, cfg.n_windows, cfg.action_horizon)
+            wp_arr, cfg.action_horizon, cfg.max_T_eval)
+        T = proprios.shape[0]
 
         # state_keys = [φ_VLA(o_τ, I); p_τ]. o_τ 는 모든 τ 에서 current_obs 공유.
         if encoder is not None and current_observation is not None:
@@ -122,7 +169,7 @@ def candidates_from_trajectory_list(
                 ).reshape(-1)
                 state_keys = np.stack([
                     np.concatenate([e_vla, proprios[tau]])
-                    for tau in range(cfg.n_windows)
+                    for tau in range(T)
                 ])
             except Exception:
                 # encoder 실패 시 proprio 만으로 state_keys (degraded).

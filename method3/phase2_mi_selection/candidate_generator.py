@@ -81,15 +81,20 @@ class MockCandidateGenerator:
         *,
         rng: np.random.Generator | None = None,
         action_dim: int = 6,
-        action_horizon: int = 12,
-        n_windows: int = 3,
+        action_horizon: int = 50,
+        n_steps: int = 3,
         proprio_dim: int = 7,
         obs_shape: tuple[int, ...] = (3, 4),
+        n_windows: int | None = None,  # deprecated alias for n_steps
     ) -> None:
+        # n_windows 는 옛 이름. 의미가 *T = trajectory 시간 길이* 로 갱신되어
+        # n_steps 로 rename — backward compat 위해 옛 키 받으면 fallback.
+        if n_windows is not None:
+            n_steps = n_windows
         self._rng = rng if rng is not None else np.random.default_rng(0)
         self._action_dim = int(action_dim)
         self._H = int(action_horizon)
-        self._T = int(n_windows)
+        self._T = int(n_steps)
         self._proprio_dim = int(proprio_dim)
         self._obs_shape = obs_shape
 

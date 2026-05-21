@@ -93,6 +93,12 @@ def load_phase2_config(
         debug_verbose=bool(mi.get("debug_verbose", False)),
     )
 
+    # selector.action_horizon 은 Phase1 re-embed (lerobot_adapter) 와 Phase2 candidate
+    # gen (curobo_candidate_gen) 의 *공통* H — yaml 의 단일 SoT (spec §7.3: H=50).
+    # 옛 키 ``selector.chunk_size`` 는 deprecated alias.
+    sel = raw.get("selector") or {}
+    action_horizon = int(sel.get("action_horizon", sel.get("chunk_size", 50)))
+
     re = raw.get("reembedding") or {}
     _sg_r = re.get("subgoal_filter_radius_m")
     reembedding = ReembeddingConfig(
@@ -104,6 +110,7 @@ def load_phase2_config(
         subgoal_filter_radius_m=(None if _sg_r is None else float(_sg_r)),
         subgoal_filter_min_keep=int(re.get("subgoal_filter_min_keep", 30)),
         decode_workers=int(re.get("decode_workers", 1)),
+        action_horizon=action_horizon,
     )
 
     return Method3AcquisitionConfig(

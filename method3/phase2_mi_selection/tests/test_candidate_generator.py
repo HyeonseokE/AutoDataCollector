@@ -43,7 +43,7 @@ class TestPhase2CandidateGenerator:
 
     def test_action_chunks_shape(self):
         gen = MockCandidateGenerator(
-            rng=np.random.default_rng(0), action_dim=6, action_horizon=12, n_windows=3)
+            rng=np.random.default_rng(0), action_dim=6, action_horizon=12, n_steps=3)
         enc = MeanPoolStateEncoder(out_dim=8)
         cands = gen.generate(np.zeros(3), "move", {"instruction": ""}, enc, K=2)
         for c in cands:

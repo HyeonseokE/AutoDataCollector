@@ -83,13 +83,31 @@ def build_or_load_phase1_vector_db(
     # raw_dataset / encoder / loader 우선순위: 직접 주입 > 경로 인자.
     own_encoder = False
     try:
+        # reembedding_config 자동 로드를 *raw_dataset 생성 전* 에 옮긴다 — 그래야
+        # yaml.selector.action_horizon (H) 을 LeRobotPhase1RawAdapter 의 sliding
+        # window 길이로 전달할 수 있다. Phase2 candidate gen 과 같은 H 사용.
+        if reembedding_config is None:
+            try:
+                from method3.config import load_phase2_config
+                from pathlib import Path as _P
+                _yaml = _P(__file__).resolve().parents[2] / "pipeline_config" / "phase2_config.yaml"
+                if _yaml.exists():
+                    _acq = load_phase2_config(_yaml, phase1_raw_dir="", phase2_raw_dir="")
+                    reembedding_config = _acq.reembedding
+                    print(f"[reembed] reembedding_config ← {_yaml} "
+                          f"(H={reembedding_config.action_horizon}, "
+                          f"subgoal_filter_radius_m={reembedding_config.subgoal_filter_radius_m})")
+            except Exception as _e:
+                print(f"[reembed] yaml fallback failed ({_e}); using defaults")
+
         if raw_dataset is None:
             if phase1_dataset_path is None:
                 raise ValueError(
                     "phase1_dataset_path is required when no cached vector DB "
                     "exists and raw_dataset is not supplied")
             from method3.reembedding.lerobot_adapter import LeRobotPhase1RawAdapter
-            raw_dataset = LeRobotPhase1RawAdapter(phase1_dataset_path)
+            _H = reembedding_config.action_horizon if reembedding_config else 50
+            raw_dataset = LeRobotPhase1RawAdapter(phase1_dataset_path, action_horizon=_H)
 
         if encoder is None:
             if phase1_trained_vla_path is None:
@@ -110,21 +128,6 @@ def build_or_load_phase1_vector_db(
                     "observation_loader is required (raw_dataset has no "
                     "`load_observation` method to fall back on)")
 
-        # reembedding_config 가 caller 에서 명시 안 됐으면 phase2_config.yaml 의
-        # reembedding 섹션을 *자동* 로드 (subgoal_filter_radius_m 같은 옵션이
-        # 어떤 caller 든 자동 적용되도록).
-        if reembedding_config is None:
-            try:
-                from method3.config import load_phase2_config
-                from pathlib import Path as _P
-                _yaml = _P(__file__).resolve().parents[2] / "pipeline_config" / "phase2_config.yaml"
-                if _yaml.exists():
-                    _acq = load_phase2_config(_yaml, phase1_raw_dir="", phase2_raw_dir="")
-                    reembedding_config = _acq.reembedding
-                    print(f"[reembed] reembedding_config ← {_yaml} "
-                          f"(subgoal_filter_radius_m={reembedding_config.subgoal_filter_radius_m})")
-            except Exception as _e:
-                print(f"[reembed] yaml fallback failed ({_e}); using defaults")
         # G_seed buffer 로드 — Phase1 누적 subgoal anchor (subgoal_filter 의 진짜
         # 기준). session_dir / subgoal_buffer.npz 가 있고 entries 가 있으면 사용,
         # 없으면 build_phase1_vector_db 가 dataset column fallback.

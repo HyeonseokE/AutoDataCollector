@@ -24,7 +24,7 @@ phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260521_155241/chec
 # 2026-05-20: ws3 의 100 episode 확장에 맞춰 100용 dataset 으로 통일.
 # (30/50/100 dataset 모두 동일 30 episode base 에서 출발하므로 P_phase1 빌드
 # 시점에 어떤 dataset 이든 같은 결과지만, recording 과 동일 repo 를 가리키도록 일치시킴.)
-phase1_dataset_path: "CoRL2026-CSI/pnp_ours_100_table2"
+phase1_dataset_path: "CoRL2026-CSI/pnp_phase1_30_table2"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
@@ -217,5 +217,14 @@ remote:
   tmux_session: "phase2_server"          # 재시작 시 reuse
 
   # [선택] 동작 옵션
-  git_pull_before_start: false
+  git_pull_before_start: true
   ready_timeout_s: 360                   # smolvla 부팅 1~2분, pi05_base 2~5분 → 여유 360s
+
+  # NVIDIA driver kernel/user-space mismatch workaround.
+  # 빈 문자열 또는 미지정 → skip (system lib 사용).
+  # 명시 시 (디렉토리 내에 usr/bin/nvidia-smi + usr/lib/x86_64-linux-gnu/libnvidia-ml.so*
+  # 포함) → tmux 안 server 의 PATH/LD_LIBRARY_PATH 가 그 backport 우선 prepend.
+  # 사용 case: system 이 NVIDIA driver user-space 만 패치하고 kernel module
+  # reload 가 안 된 상태 ("Failed to initialize NVML: Driver/library version
+  # mismatch") 우회.
+  nvidia_backport_path: "/home/csiwoo/robobridge/nvidia_580_126_09"

@@ -130,6 +130,7 @@ emit("SERVER_GPU_ID",    r.get("gpu_id", 0))
 emit("TMUX_SESSION",     r.get("tmux_session") or "phase2_server")
 emit("REMOTE_GIT_PULL",  1 if r.get("git_pull_before_start", False) else 0)
 emit("SETTLE_S",         r.get("ready_timeout_s", 30))
+emit("NVIDIA_BACKPORT_PATH", r.get("nvidia_backport_path") or "")
 
 addr = (t.get("address") or "127.0.0.1:50061").strip()
 m = re.match(r"^(?:[^:]+:)?(\d+)$", addr)
@@ -407,6 +408,18 @@ fi
 export PATH="\$CONDA_BIN:\$PATH"
 echo "  remote: conda PATH = \$CONDA_BIN"
 
+# NVIDIA driver kernel/user-space mismatch workaround.
+# yaml.remote.nvidia_backport_path 가 비어있지 않으면 PATH + LD_LIBRARY_PATH
+# 앞에 prepend → server child process 가 backport NVML lib 우선 사용.
+NVIDIA_BACKPORT_PATH_REMOTE="$NVIDIA_BACKPORT_PATH"
+if [ -n "\$NVIDIA_BACKPORT_PATH_REMOTE" ] && [ -d "\$NVIDIA_BACKPORT_PATH_REMOTE" ]; then
+    export PATH="\$NVIDIA_BACKPORT_PATH_REMOTE/usr/bin:\$PATH"
+    export LD_LIBRARY_PATH="\$NVIDIA_BACKPORT_PATH_REMOTE/usr/lib/x86_64-linux-gnu:\${LD_LIBRARY_PATH:-}"
+    echo "  remote: NVIDIA backport ACTIVE = \$NVIDIA_BACKPORT_PATH_REMOTE"
+else
+    echo "  remote: NVIDIA backport not set (using system NVML)"
+fi
+
 export ENV_NAME="$SERVER_ENV_NAME"
 export GPU_ID="$SERVER_GPU_ID"
 export HOST="$SERVER_HOST"
@@ -417,13 +430,13 @@ export URDF="$SERVER_URDF"
 if command -v tmux >/dev/null 2>&1; then
   # tmux server 의 기존 환경(이전 옛 ENV_NAME 등)이 child 에 상속될 수 있어
   # 우리가 export 한 변수만으로는 *tmux child shell* 에 전달이 보장되지 않음.
-  # 따라서 PATH/ENV_NAME/GPU_ID/HOST/PORT/RECORDING_CONFIG/URDF *모두* 를
-  # tmux 명령 인자에 literal 로 박아 child shell 의 첫 줄에서 명시 export.
+  # 따라서 PATH/LD_LIBRARY_PATH/ENV_NAME/... *모두* 를 tmux 명령 인자에
+  # literal 로 박아 child shell 의 첫 줄에서 명시 export.
   tmux new-session -d -s '$TMUX_SESSION' \
-      "PATH='\$PATH' ENV_NAME='\$ENV_NAME' GPU_ID='\$GPU_ID' HOST='\$HOST' PORT='\$PORT' RECORDING_CONFIG='\$RECORDING_CONFIG' URDF='\$URDF' bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log"
+      "PATH='\$PATH' LD_LIBRARY_PATH='\${LD_LIBRARY_PATH:-}' ENV_NAME='\$ENV_NAME' GPU_ID='\$GPU_ID' HOST='\$HOST' PORT='\$PORT' RECORDING_CONFIG='\$RECORDING_CONFIG' URDF='\$URDF' bash grpc_server/run_server.sh 2>&1 | tee /tmp/phase2_server.log"
   echo "  remote: tmux session started (ENV_NAME=\$ENV_NAME, GPU_ID=\$GPU_ID)"
 else
-  nohup env PATH="\$PATH" ENV_NAME="\$ENV_NAME" GPU_ID="\$GPU_ID" \
+  nohup env PATH="\$PATH" LD_LIBRARY_PATH="\${LD_LIBRARY_PATH:-}" ENV_NAME="\$ENV_NAME" GPU_ID="\$GPU_ID" \
       HOST="\$HOST" PORT="\$PORT" RECORDING_CONFIG="\$RECORDING_CONFIG" URDF="\$URDF" \
       bash grpc_server/run_server.sh > /tmp/phase2_server.log 2>&1 &
   echo "  remote: tmux not available — using nohup (pid=\$!)"

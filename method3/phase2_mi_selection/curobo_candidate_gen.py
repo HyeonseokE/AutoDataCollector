@@ -57,6 +57,12 @@ class CurobogenConfig:
     # method3 DCT paradigm — candidate 의 skill 단위 DCT feature 차원.
     # smolvla chunk_size 와 일치하도록 50 default.
     dct_L0: int = 50
+    # candidate waypoints 가 *arm-only* (예: curobo so101 = 5 arm joints) 인데
+    # DB action_descriptor 가 *full action (5 arm + 1 gripper = 6)* 으로 빌드
+    # 됐다면 dim mismatch (250 vs 300). 이 값으로 *target full dof* 명시,
+    # waypoints 의 dof 가 부족하면 constant (마지막 값) padding 으로 채워서
+    # DCT 변환 → DB 와 같은 (L0 × full_dof) z-space.
+    dct_target_dof: int = 6
 
 
 def _chunk_waypoints(
@@ -165,7 +171,15 @@ def candidates_from_trajectory_list(
         T = proprios.shape[0]
         # skill 단위 DCT feature — candidate 의 전체 waypoints 를 한 skill 로
         # 보고 (L0, dof) DCT 로 변환 (paradigm step [3]).
-        dct_target = traj_to_dct(wp_arr, L0=cfg.dct_L0)
+        # waypoints dof 가 target dof 보다 작으면 constant (last value) padding
+        # — curobo arm-only (5) vs full action (6) mismatch 보정.
+        _wp_full = wp_arr
+        if cfg.dct_target_dof and wp_arr.shape[1] < cfg.dct_target_dof:
+            _pad = np.tile(wp_arr[:, -1:], (1, cfg.dct_target_dof - wp_arr.shape[1]))
+            _wp_full = np.concatenate([wp_arr, _pad], axis=1)
+        elif cfg.dct_target_dof and wp_arr.shape[1] > cfg.dct_target_dof:
+            _wp_full = wp_arr[:, : cfg.dct_target_dof]
+        dct_target = traj_to_dct(_wp_full, L0=cfg.dct_L0)
 
         # state_keys = [φ_VLA(o_τ, I); p_τ]. o_τ 는 모든 τ 에서 current_obs 공유.
         if encoder is not None and current_observation is not None:

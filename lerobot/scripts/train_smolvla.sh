@@ -25,8 +25,11 @@ conda activate "$CONDA_ENV"
 export PYTHONNOUSERSITE=1   # ~/.local (user-site) 차단
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# -------- PYTHONPATH: AutoDataCollector lerobot 사용 --------
-export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+# -------- PYTHONPATH: AutoDataCollector lerobot + project root --------
+# project root (= REPO_DIR/..) 도 PYTHONPATH 에 추가해야 lerobot trainer 에서
+# method3.dct.skill_dct_dataset (SkillDCTDataset wrapper) 등을 import 가능.
+PROJECT_ROOT="$(cd "$REPO_DIR/.." && pwd)"
+export PYTHONPATH="$REPO_DIR/src:$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # -------- 학습 설정 --------
 POLICY_TYPE="${POLICY_TYPE:-smolvla}"
@@ -53,23 +56,37 @@ MASTER_PORT="${MASTER_PORT:-0}"            # 0 = auto
 EFFECTIVE_BS=$(( BATCH_SIZE * NUM_GPUS ))
 
 # -------- STEPS 자동계산 (EPOCHS → STEPS) --------
-# STEPS 가 직접 주어지면 그대로 사용. 아니면 dataset.total_frames 를 조회.
+# STEPS 가 직접 주어지면 그대로 사용. 아니면:
+#   * SKILL_DCT_PARQUET 설정 시: sidecar parquet 의 segment 수가 학습 sample 수.
+#     paradigm 의 "skill 단위 한 sample" 정합. 한 epoch = segments / batch.
+#   * 그 외: 기존대로 dataset.total_frames (frame 단위) 기반.
 if [ -z "${STEPS:-}" ]; then
-    echo "[INFO] Querying $DATASET_REPO_ID (revision=$DATASET_REVISION) for total_frames..."
-    DATASET_TOTAL_FRAMES=$(python - <<PY
+    if [ -n "$SKILL_DCT_PARQUET" ]; then
+        echo "[INFO] DCT mode — counting skill segments in $SKILL_DCT_PARQUET..."
+        SAMPLE_COUNT=$(python - <<PY
+import pyarrow.parquet as pq
+print(pq.read_metadata("$SKILL_DCT_PARQUET").num_rows)
+PY
+)
+        _SOURCE="skill_segments"
+    else
+        echo "[INFO] Querying $DATASET_REPO_ID (revision=$DATASET_REVISION) for total_frames..."
+        SAMPLE_COUNT=$(python - <<PY
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
 meta = LeRobotDatasetMetadata("$DATASET_REPO_ID", revision="$DATASET_REVISION")
 print(meta.total_frames)
 PY
 )
-    if ! [[ "$DATASET_TOTAL_FRAMES" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: Failed to fetch total_frames from $DATASET_REPO_ID @ $DATASET_REVISION" >&2
-        echo "       got: $DATASET_TOTAL_FRAMES" >&2
+        _SOURCE="total_frames"
+    fi
+    if ! [[ "$SAMPLE_COUNT" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Failed to fetch sample count ($_SOURCE)" >&2
+        echo "       got: $SAMPLE_COUNT" >&2
         exit 1
     fi
-    STEPS_PER_EPOCH=$(( (DATASET_TOTAL_FRAMES + EFFECTIVE_BS - 1) / EFFECTIVE_BS ))  # ceil
+    STEPS_PER_EPOCH=$(( (SAMPLE_COUNT + EFFECTIVE_BS - 1) / EFFECTIVE_BS ))  # ceil
     STEPS=$(( STEPS_PER_EPOCH * EPOCHS ))
-    echo "[INFO] total_frames=$DATASET_TOTAL_FRAMES  global_batch=$EFFECTIVE_BS  steps/epoch=$STEPS_PER_EPOCH  epochs=$EPOCHS  -> STEPS=$STEPS"
+    echo "[INFO] $_SOURCE=$SAMPLE_COUNT  global_batch=$EFFECTIVE_BS  steps/epoch=$STEPS_PER_EPOCH  epochs=$EPOCHS  -> STEPS=$STEPS"
 fi
 
 SAVE_FREQ="${SAVE_FREQ:-50000}"

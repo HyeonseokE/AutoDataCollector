@@ -184,11 +184,12 @@ cleanup_tunnels() {
 trap cleanup_tunnels EXIT
 
 # ============================================================
-# Remote server VRAM 자동 해제 — Ctrl+C / 종료 시 launch_remote_server.sh stop
-# 자동 호출 (server tmux + curobo CUDA graph + smolvla GPU memory release).
-# STOP_REMOTE_ON_EXIT=0 으로 disable (다음 session 재사용 위해 server keep).
+# Remote server VRAM 자동 해제 — default *keep* (server 재사용으로 90초 boot
+# 비용 회피). 사용자가 명시적으로 STOP_REMOTE_ON_EXIT=1 일 때만 Ctrl+C 시
+# launch_remote_server.sh stop 자동 호출. 영구 정리는 manual:
+#   bash grpc_server/launch_remote_server.sh stop
 # ============================================================
-STOP_REMOTE_ON_EXIT="${STOP_REMOTE_ON_EXIT:-1}"
+STOP_REMOTE_ON_EXIT="${STOP_REMOTE_ON_EXIT:-0}"
 _stop_remote_server() {
     if [ "$STOP_REMOTE_ON_EXIT" != "1" ]; then
         echo "[trap] STOP_REMOTE_ON_EXIT=0 — remote server keep alive"

@@ -130,4 +130,11 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
+    # method3 DCT paradigm wrap — sidecar parquet 이 주어지면 (episode, skill)
+    # 단위 학습 sample 로 노출. action 자리는 DCT_50 target 으로 교체된다.
+    if cfg.dataset.skill_dct_parquet:
+        from method3.dct.skill_dct_dataset import SkillDCTDataset
+
+        dataset = SkillDCTDataset(dataset, cfg.dataset.skill_dct_parquet)
+
     return dataset

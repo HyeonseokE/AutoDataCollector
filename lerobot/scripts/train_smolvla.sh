@@ -34,6 +34,9 @@ POLICY_PATH="${POLICY_PATH:-lerobot/smolvla_base}"   # "" 이면 from scratch
 POLICY_REPO_ID="${POLICY_REPO_ID:-}"                 # 값 있으면 push_to_hub=true
 DATASET_REPO_ID="${DATASET_REPO_ID:-CoRL2026-CSI/distribute_phase1_20_table1}"
 DATASET_REVISION="${DATASET_REVISION:-v3.0}"         # HF tag/branch/commit
+# method3 DCT paradigm — sidecar parquet 경로 지정 시 skill-unit DCT 학습 모드.
+# build_skill_dct.py 의 출력. 비어있으면 표준 frame-level 학습.
+SKILL_DCT_PARQUET="${SKILL_DCT_PARQUET:-}"
 JOB_NAME="${JOB_NAME:-smolvla_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/outputs/train/$JOB_NAME}"
 
@@ -145,6 +148,7 @@ cat <<EOF
  lerobot : $REPO_DIR/src (PYTHONPATH)
  policy  : type=$POLICY_TYPE  path=${POLICY_PATH:-<scratch>}  hub=${POLICY_REPO_ID:-off}
  dataset : $DATASET_REPO_ID @ $DATASET_REVISION
+ dct-mode: ${SKILL_DCT_PARQUET:-off}
  output  : $OUTPUT_DIR
  train   : steps=$STEPS  epochs=$EPOCHS  batch=$BATCH_SIZE (global=$EFFECTIVE_BS)  workers=$NUM_WORKERS
  device  : $DEVICE  gpus=$NUM_GPUS  precision=$MIXED_PRECISION
@@ -174,6 +178,7 @@ TRAIN_ARGS=(
     --wandb.project="$WANDB_PROJECT"
 )
 [ -n "$POLICY_RENAME_MAP" ] && TRAIN_ARGS+=(--rename_map="$POLICY_RENAME_MAP")
+[ -n "$SKILL_DCT_PARQUET" ] && TRAIN_ARGS+=(--dataset.skill_dct_parquet="$SKILL_DCT_PARQUET")
 
 # 이미지 augmentation: 켜진 transform 만 JSON dict 로 조립해서 한 번에 전달.
 if [ "$IMG_AUG" = "true" ]; then

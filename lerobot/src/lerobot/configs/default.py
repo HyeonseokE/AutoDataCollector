@@ -35,6 +35,11 @@ class DatasetConfig:
     use_imagenet_stats: bool = True
     video_backend: str = field(default_factory=get_safe_default_codec)
     streaming: bool = False
+    # method3 DCT paradigm — sidecar parquet 경로가 주어지면 base
+    # LeRobotDataset 을 SkillDCTDataset 으로 wrap 하여 (episode, skill) 단위
+    # 학습 sample 을 노출하고 action 자리에 DCT_50 target 을 흘려보낸다.
+    # path 가 None 이면 표준 frame-level 학습.
+    skill_dct_parquet: str | None = None
 
 
 @dataclass

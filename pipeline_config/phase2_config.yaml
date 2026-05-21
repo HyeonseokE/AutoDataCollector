@@ -18,13 +18,10 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260521_155241/checkpoints/003750/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260522_072528/checkpoints/001150/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
-# 2026-05-20: ws3 의 100 episode 확장에 맞춰 100용 dataset 으로 통일.
-# (30/50/100 dataset 모두 동일 30 episode base 에서 출발하므로 P_phase1 빌드
-# 시점에 어떤 dataset 이든 같은 결과지만, recording 과 동일 repo 를 가리키도록 일치시킴.)
-phase1_dataset_path: "CoRL2026-CSI/pnp_phase1_30_table2"
+phase1_dataset_path: "CoRL2026-CSI/pnp_ours_100_table1"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
@@ -180,7 +177,7 @@ selector:
                                   # candidate.dct_target (skill-atomic (L0, dof)) 을
                                   # z-space 로 사용. vla_informativeness.scorer_type=dct
                                   # + phase1_trained_vla_path=DCT-tuned ckpt 와 함께.
-  skill_dct_parquet: "results/skill_dct/pnp_phase1_30_table2.parquet"  # P_phase1 build 의 sidecar (repo-relative)
+  skill_dct_parquet: "results/skill_dct/pnp_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
                                   # null + use_dct_target=true 면 build_or_load 가 에러.
 

@@ -91,9 +91,22 @@ class GrpcPlannerClient:
         except Exception:
             images = {}
 
+        # 현재 RecordingContext.skill_type 을 server 의 DB lookup key 로 사용.
+        # 미설정 시 self._skill_id (default "move_to") — 다만 DB 에 'move_to'
+        # 가 없으면 server-side score_one 가 cold-start path 로 빠져 모든 후보
+        # 가 under_covered=True + 모든 score 가 0 으로 줄어든다. P_phase1 의
+        # 실제 skill_id (gripper_close/open/move/move_and_*/move_free/move_initial)
+        # 와 일치시켜야 paradigm 정상 작동.
+        try:
+            from record_dataset.context import RecordingContext as _RC
+            _runtime_skill = _RC._current_skill_type or ""
+        except Exception:
+            _runtime_skill = ""
+        effective_skill_id = _runtime_skill or self._skill_id
+
         try:
             resp = self._client.plan_and_select(
-                skill_id=self._skill_id,
+                skill_id=effective_skill_id,
                 start_qpos=np.asarray(start_qpos, dtype=np.float32),
                 goal_qpos=np.asarray(goal_qpos, dtype=np.float32),
                 state=np.asarray(start_qpos, dtype=np.float32),
@@ -113,7 +126,7 @@ class GrpcPlannerClient:
             chosen_index=resp.get("chosen_index", -1),
         )
         _label = "used_fallback" if resp.get("used_fallback", False) else "accepted"
-        print(f"\033[91m[Phase2-Selection] {_label} | {_summary}\033[0m", flush=True)
+        print(f"\033[91m[Phase2-Selection] skill={effective_skill_id} {_label} | {_summary}\033[0m", flush=True)
 
         if resp.get("used_fallback", False):
             return []

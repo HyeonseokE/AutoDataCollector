@@ -166,36 +166,47 @@ def candidates_from_trajectory_list(
         if wp_arr.ndim != 2 or wp_arr.shape[0] < cfg.fail_safe_min_waypoints:
             continue
 
-        proprios, action_chunks = _chunk_waypoints(
-            wp_arr, cfg.action_horizon, cfg.max_T_eval)
-        T = proprios.shape[0]
-        # skill 단위 DCT feature — candidate 의 전체 waypoints 를 한 skill 로
-        # 보고 (L0, dof) DCT 로 변환 (paradigm step [3]).
         # waypoints dof 가 target dof 보다 작으면 constant (last value) padding
         # — curobo arm-only (5) vs full action (6) mismatch 보정.
+        # *chunking 전* 에 pad — proprios / action_chunks / dct_target / state_keys
+        # 모두 full dof 로 일관되게 만들어 DB 와 차원 정합.
         _wp_full = wp_arr
         if cfg.dct_target_dof and wp_arr.shape[1] < cfg.dct_target_dof:
             _pad = np.tile(wp_arr[:, -1:], (1, cfg.dct_target_dof - wp_arr.shape[1]))
             _wp_full = np.concatenate([wp_arr, _pad], axis=1)
         elif cfg.dct_target_dof and wp_arr.shape[1] > cfg.dct_target_dof:
             _wp_full = wp_arr[:, : cfg.dct_target_dof]
+
+        proprios, action_chunks = _chunk_waypoints(
+            _wp_full, cfg.action_horizon, cfg.max_T_eval)
+        T = proprios.shape[0]
+        # skill 단위 DCT feature — candidate 의 전체 waypoints 를 한 skill 로
+        # 보고 (L0, dof) DCT 로 변환 (paradigm step [3]).
         dct_target = traj_to_dct(_wp_full, L0=cfg.dct_L0)
 
-        # state_keys = [φ_VLA(o_τ, I); p_τ]. o_τ 는 모든 τ 에서 current_obs 공유.
+        # state_keys = φ_VLA(o_τ, I, p_τ) — VLAKeyExtractor.encode 는 3-arg
+        # signature 이며 *이미 state 를 fused/concat 한 full FAISS key* 반환.
+        # 따라서 여기서 다시 proprio 를 concat 하면 차원 mismatch 가 생긴다.
+        # encoder 반환을 그대로 state_keys[τ] 로 사용한다.
+        # o_τ 는 모든 τ 에서 current_obs 공유 (no forward dynamics).
+        state_keys = None
         if encoder is not None and current_observation is not None:
             try:
-                e_vla = np.asarray(
-                    encoder.encode(current_observation, instruction),
-                    dtype=np.float64,
-                ).reshape(-1)
-                state_keys = np.stack([
-                    np.concatenate([e_vla, proprios[tau]])
-                    for tau in range(T)
-                ])
-            except Exception:
+                _keys = []
+                for tau in range(T):
+                    k = np.asarray(
+                        encoder.encode(current_observation, instruction, proprios[tau]),
+                        dtype=np.float64,
+                    ).reshape(-1)
+                    _keys.append(k)
+                state_keys = np.stack(_keys)
+            except Exception as _e:
                 # encoder 실패 시 proprio 만으로 state_keys (degraded).
+                import traceback as _tb
+                print(f"  [curobo_candidate_gen] encoder.encode failed: {type(_e).__name__}: {_e}", flush=True)
+                _tb.print_exc()
                 state_keys = proprios.copy()
-        else:
+        if state_keys is None:
             state_keys = proprios.copy()
 
         out.append(Phase2Candidate(

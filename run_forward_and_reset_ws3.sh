@@ -30,12 +30,17 @@ ROBOT_IDS=(4)
 #   phase1 — Phase1 buffer-aware subgoal seeding (default).
 #   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
 # ============================================================
-PHASE="phase1"
+PHASE="phase2"
 
 ### ==================== [single arm task] ==================
 ## pick and place
-INSTRUCTION="pick up the red block and place it on the blue dish"
+# INSTRUCTION="pick up the red block and place it on the blue dish"
+# RESET_INSTRUCTION=""
+
+## stack
+INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
 RESET_INSTRUCTION=""
+
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=100  # 30→100 확장 (2026-05-20 마이그레이션). 기존 30 episode 는 seed 당 10 slot 의 0..2 위치로 재배치됨 — scripts/migrate_session_episodes_per_seed.py 참고
@@ -63,7 +68,7 @@ RECORD_DATASET=true
 
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
 # RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_100"
-RESUME_SESSION="./results/session_20260521_083952_50"
+RESUME_SESSION="./results/pnp_phase1_30_table2_ours"
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정
@@ -177,6 +182,24 @@ cleanup_tunnels() {
     done
 }
 trap cleanup_tunnels EXIT
+
+# ============================================================
+# Remote server VRAM 자동 해제 — Ctrl+C / 종료 시 launch_remote_server.sh stop
+# 자동 호출 (server tmux + curobo CUDA graph + smolvla GPU memory release).
+# STOP_REMOTE_ON_EXIT=0 으로 disable (다음 session 재사용 위해 server keep).
+# ============================================================
+STOP_REMOTE_ON_EXIT="${STOP_REMOTE_ON_EXIT:-1}"
+_stop_remote_server() {
+    if [ "$STOP_REMOTE_ON_EXIT" != "1" ]; then
+        echo "[trap] STOP_REMOTE_ON_EXIT=0 — remote server keep alive"
+        return 0
+    fi
+    if [ -x "$SCRIPT_DIR/grpc_server/launch_remote_server.sh" ]; then
+        echo "[trap] stopping remote server (VRAM release) ..."
+        bash "$SCRIPT_DIR/grpc_server/launch_remote_server.sh" stop 2>&1 | sed 's/^/  /'
+    fi
+}
+trap _stop_remote_server INT TERM
 
 if [ "$USE_SERVER" = true ]; then
     echo "[Server] Setting up vLLM server connections..."

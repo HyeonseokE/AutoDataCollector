@@ -220,13 +220,33 @@ class PreselectiveAcquirerServicer(
                     config=self._candidate_cfg,
                 )
                 if not p2_cands:
+                    try:
+                        _wp0 = getattr(cands[0], "waypoints", None)
+                        _wp0_shape = tuple(_wp0.shape) if _wp0 is not None else None
+                        _wp_lens = [getattr(getattr(c, "waypoints", None), "shape", (None,))[0]
+                                    for c in cands[:5]]
+                    except Exception:
+                        _wp0_shape = None
+                        _wp_lens = []
+                    print(f"[server] Phase2Candidate 변환 후 0개 — "
+                          f"orig cands={len(cands)}, first wp shape={_wp0_shape}, "
+                          f"wp_lens(head)={_wp_lens}, encoder={'set' if self.encoder is not None else 'None'}, "
+                          f"action_horizon(H)={self._candidate_cfg.action_horizon}, "
+                          f"fail_safe_min_waypoints={self._candidate_cfg.fail_safe_min_waypoints} "
+                          f"→ used_fallback=True", flush=True)
                     return preselective_pb2.PlanResponse(used_fallback=True)
                 # 4. Useful-OOD selection (§13.2): argmax U_VLA s.t. M̃_MI ≥ τ_MI.
                 #    vla_scorer 가 None 이면 argmax M_MI fallback.
                 selection = self.selector.select(p2_cands, vla_scorer=self.vla_scorer)
+                print(f"[server] Phase2 select: cands={len(p2_cands)} eligible={len(selection.eligible_indices)} "
+                      f"chosen=#{selection.chosen_index} accepted={selection.accepted} "
+                      f"u_vla={selection.u_vla_chosen}", flush=True)
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"phase2 candidate/select failed: {e}")
+            import traceback as _tb
+            print(f"[server] phase2 candidate/select EXCEPTION: {e!r}", flush=True)
+            _tb.print_exc()
             return preselective_pb2.PlanResponse()
 
         chosen_p2 = selection.chosen_candidate

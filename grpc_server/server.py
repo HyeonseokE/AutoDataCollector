@@ -238,9 +238,30 @@ class PreselectiveAcquirerServicer(
                 # 4. Useful-OOD selection (§13.2): argmax U_VLA s.t. M̃_MI ≥ τ_MI.
                 #    vla_scorer 가 None 이면 argmax M_MI fallback.
                 selection = self.selector.select(p2_cands, vla_scorer=self.vla_scorer)
-                print(f"[server] Phase2 select: cands={len(p2_cands)} eligible={len(selection.eligible_indices)} "
-                      f"chosen=#{selection.chosen_index} accepted={selection.accepted} "
-                      f"u_vla={selection.u_vla_chosen}", flush=True)
+                _reports = selection.reports or []
+                _under = sum(1 for r in _reports if r.under_covered)
+                _mn = [r.q2_norm for r in _reports]
+                _m = [r.q2 for r in _reports]
+                _dha = [r.delta_h_a for r in _reports]
+                _dhas = [r.delta_h_a_given_s for r in _reports]
+                _uvla = [r.u_vla for r in _reports]
+                def _stats(xs):
+                    if not xs: return (0.0, 0.0, 0.0)
+                    n = len(xs); s = sum(xs); mn = min(xs); mx = max(xs)
+                    return (mn, mx, s/n)
+                print(
+                    f"[server] Phase2 select: cands={len(p2_cands)} "
+                    f"under_covered={_under}/{len(p2_cands)} "
+                    f"eligible={len(selection.eligible_indices)} chosen=#{selection.chosen_index} "
+                    f"accepted={selection.accepted} u_vla={selection.u_vla_chosen} "
+                    f"tau_MI={self.selector.cfg.tau_MI} "
+                    f"| M̃_MI[min,max,mean]={_stats(_mn)} "
+                    f"M_MI[min,max,mean]={_stats(_m)} "
+                    f"ΔH_A[min,max,mean]={_stats(_dha)} "
+                    f"ΔH_A|S[min,max,mean]={_stats(_dhas)} "
+                    f"U_VLA[min,max,mean]={_stats(_uvla)}",
+                    flush=True,
+                )
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"phase2 candidate/select failed: {e}")

@@ -106,6 +106,7 @@ def iter_skill_segments(
     dataset_path: str | Path,
     *,
     L0: int = 50,
+    episode_range: tuple[int, int] | None = None,
 ) -> Iterator[SkillSegment]:
     """LeRobot v3 dataset → (episode, skill) 단위 iteration (parquet 직접 access).
 
@@ -116,6 +117,9 @@ def iter_skill_segments(
         dataset_path: LeRobot dataset repo_id (HF_LEROBOT_HOME 기준 resolve)
             또는 절대 경로 (meta/, data/ 가 있는 디렉토리).
         L0: DCT 출력 차원 (default 50).
+        episode_range: 0-based ``[start, end)`` episode_index 필터.
+            ``(30, 100)`` 이면 episode_index ∈ [30, 100) 만 yield (= 1-based
+            31~100). None 이면 전체.
 
     Yields:
         ``SkillSegment``.
@@ -171,6 +175,8 @@ def iter_skill_segments(
     # 4. episode 별 skill boundary → DCT target.
     for ep in episodes:
         ei = int(ep["episode_index"])
+        if episode_range is not None and not (episode_range[0] <= ei < episode_range[1]):
+            continue
         f0 = int(ep["dataset_from_index"])
         f1 = int(ep["dataset_to_index"])
         episode_id = f"episode_{ei + 1:02d}"
@@ -207,6 +213,7 @@ def build_dct_targets(
     output_path: str | Path,
     *,
     L0: int = 50,
+    episode_range: tuple[int, int] | None = None,
 ) -> int:
     """모든 skill segment → DCT target sidecar parquet 저장.
 
@@ -214,6 +221,7 @@ def build_dct_targets(
         dataset_path: LeRobot dataset repo_id 또는 절대 경로.
         output_path: 출력 parquet 파일 경로.
         L0: DCT 출력 차원.
+        episode_range: 0-based [start, end) ep_index 필터. None=전체.
 
     Returns:
         저장된 record 수.
@@ -222,7 +230,7 @@ def build_dct_targets(
     import pyarrow.parquet as pq
 
     records = []
-    for seg in iter_skill_segments(dataset_path, L0=L0):
+    for seg in iter_skill_segments(dataset_path, L0=L0, episode_range=episode_range):
         records.append({
             "episode_id": seg.episode_id,
             "skill_index": seg.skill_index,

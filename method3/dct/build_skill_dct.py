@@ -24,11 +24,23 @@ def main() -> int:
                    help="출력 parquet 파일 경로")
     p.add_argument("--L0", type=int, default=50,
                    help="DCT 출력 차원 (default 50)")
+    p.add_argument("--episode-start", type=int, default=None,
+                   help="0-based episode_index 시작 (inclusive)")
+    p.add_argument("--episode-end", type=int, default=None,
+                   help="0-based episode_index 끝 (exclusive)")
     args = p.parse_args()
 
+    episode_range = None
+    if args.episode_start is not None or args.episode_end is not None:
+        episode_range = (
+            args.episode_start if args.episode_start is not None else 0,
+            args.episode_end if args.episode_end is not None else 10 ** 9,
+        )
+
     out = Path(args.output)
-    n = build_dct_targets(args.dataset, out, L0=args.L0)
-    print(f"[build_skill_dct] saved {n} skill segments → {out}")
+    n = build_dct_targets(args.dataset, out, L0=args.L0, episode_range=episode_range)
+    print(f"[build_skill_dct] saved {n} skill segments → {out}"
+          + (f" (episode_range={episode_range})" if episode_range else ""))
     return 0
 
 

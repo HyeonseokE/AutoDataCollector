@@ -140,10 +140,11 @@ def test_frame_mode_length_equals_total_frames(sidecar_parquet):
     assert len(ds) == 45
 
 
-def test_frame_mode_default_is_true(sidecar_parquet):
+def test_default_is_segment_mode(sidecar_parquet):
+    # paradigm 정합: default frame_mode=False — 한 sample = 한 skill segment.
     path, _, _ = sidecar_parquet
     ds = SkillDCTDataset(_FakeBaseDataset(), path)  # default
-    assert len(ds) == 45  # frame_mode=True default
+    assert len(ds) == 2  # 두 segment
 
 
 def test_frame_mode_target_shared_within_segment(sidecar_parquet):

@@ -35,13 +35,20 @@ class SkillDCTDataset:
     train script 측에서 dataset factory 분기 필요.
 
     두 sample 단위 mode:
-      * ``frame_mode=False`` — 한 sample = 한 skill segment. obs 는 segment
-        시작 frame 1개. 학습 sample 수 = segment 수 (~297 for 30 episode).
-      * ``frame_mode=True`` (default) — 한 sample = 한 frame. obs 는 그
-        frame 의 raw obs, target 은 그 frame 이 속한 skill 의 DCT_50.
-        학습 sample 수 = 전체 frame 수 (~8700 for 30 episode). 같은 target
-        을 progress 가 다른 obs 에서 학습 → 자연스러운 progress-conditioned
-        augmentation 효과.
+      * ``frame_mode=False`` (default, paradigm 정합) — 한 sample = 한
+        skill segment. obs 는 segment 시작 frame 1개. 함수 의미:
+        ``f(obs_at_skill_start, lang, skill_type) → skill 전체 DCT``.
+        후보 traj 평가 (acquisition runtime) 도 skill 시작 obs 에서
+        후보의 dct_target 을 비교하므로 학습 / 추론 함수 정합.
+        sample 수 = segment 수 (~297 for 30 episode).
+      * ``frame_mode=True`` — 한 sample = 한 frame. 같은 segment 의 모든
+        frame 이 *동일한* (skill 전체) DCT target 을 공유. 의도가
+        progress-conditioned augmentation 이지만, VLA 가 학습하는 함수가
+        *time-invariant* (= 어느 progress 에서든 skill 전체 DCT 예측)
+        가 되어 paradigm 의 "skill 시작점 → skill 전체 DCT" 의도와
+        어긋난다 (skill 중간 obs → 그 skill 전체 DCT 라는 spec 외 mapping
+        까지 같이 학습됨). 데이터 부족 보완용 trick 이며 paradigm 자연
+        해석 아님.
     """
 
     def __init__(
@@ -53,7 +60,7 @@ class SkillDCTDataset:
         task_key: str = "task",
         actions_pad_key: str = "actions_id_pad",
         skill_type_prefix_format: str = "{skill_type}: {instruction}",
-        frame_mode: bool = True,
+        frame_mode: bool = False,
     ) -> None:
         """
         Args:

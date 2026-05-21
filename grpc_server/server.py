@@ -178,12 +178,19 @@ class PreselectiveAcquirerServicer(
                 n=int(request.n_candidates),
                 seed=int(request.seed) if request.seed != 0 else None,
             )
+            print(f"[server] plan_batch req n={request.n_candidates} seed={request.seed} "
+                  f"is_transit={request.is_transit} skill_id={request.skill_id!r} "
+                  f"→ curobo returned {len(cands)} cands", flush=True)
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"curobo plan_batch failed: {e}")
+            print(f"[server] plan_batch EXCEPTION: {e}", flush=True)
             return preselective_pb2.PlanResponse()
 
         if not cands:
+            print(f"[server] plan_batch returned 0 valid candidates "
+                  f"(start={np.round(start_qpos, 3).tolist()}, "
+                  f"goal={np.round(goal_qpos, 3).tolist()}) — sending used_fallback=True", flush=True)
             return preselective_pb2.PlanResponse(used_fallback=True)
 
         # 2. TrajectoryCandidate → Phase2Candidate.

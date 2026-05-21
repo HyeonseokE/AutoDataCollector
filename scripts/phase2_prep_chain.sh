@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# phase2_prep_chain.sh — Phase1 종료 후 Phase2 사전 준비 3-step chain
+# phase2_prep_chain.sh — Phase1 종료 후 Phase2 사전 준비 chain (Step 0-4)
 #
 # Phase1 early termination 이 발생하면 execution_forward_and_reset.py 의
 # main() 끝에서 prompt 후 본 스크립트를 호출한다. 수동 호출도 가능:
@@ -9,13 +9,21 @@
 #       --dataset CoRL2026-CSI/pnp_ours_100_table1 \
 #       --session-dir results/session_20260522_044832
 #
+# Step 0  session 폴더 reorg (episode_* → phase1/, phase2/ mkdir)
+# Step 1  skill segment DCT parquet build
+# Step 2  DCT-tuned VLA 학습 (--skip-train 으로 생략 가능)
+# Step 3  P_phase1 vector DB rebuild
+# Step 4  artifact 배치 — DB → grpc_server/buffer/ cp + phase2_config.yaml
+#         3-key (ckpt/dataset/skill_dct_parquet) 자동 edit
+#
 # 옵션:
 #   --skip-train      : Step 2 (VLA 학습) 건너뛰기. --vla-ckpt 명시 필요.
 #   --vla-ckpt PATH   : Step 2 skip 시 Step 3 의 vla checkpoint 지정.
 #   --train-job NAME  : Step 2 JOB_NAME override (default smolvla_dct_<ts>).
 #   --steps N         : Step 2 STEPS override (default = train script 의 epoch 환산).
 #
-# 각 step exit code 검증 — fail 시 chain 즉시 중단.
+# 각 step exit code 검증 — fail 시 chain 즉시 중단. chain 종료 후 manual
+# next-steps (git commit+push → launch_remote_server.sh → PHASE 변경+run) 출력.
 # ============================================================
 
 set -euo pipefail
@@ -48,7 +56,7 @@ while [ $# -gt 0 ]; do
         --train-job)       TRAIN_JOB="$2"; shift 2 ;;
         --steps)           STEPS_OVERRIDE="$2"; shift 2 ;;
         -h|--help)
-            sed -n '3,20p' "$0" | sed 's/^# \?//'
+            sed -n '3,27p' "$0" | sed 's/^# \?//'
             exit 0 ;;
         *) err "unknown arg: $1"; exit 2 ;;
     esac
@@ -77,7 +85,7 @@ info "skill DCT parquet : $SKILL_DCT_PARQUET"
 # chain 진입 = Phase1 종료 → Phase2 준비. 기존 flat 한 episode_*/ 를
 # phase1/ 하위로 옮기고 phase2/ 빈 폴더 생성. 이후 Phase2 cycle 의
 # episode 는 phase2/ 하위에 쌓인다. idempotent (이미 reorg 됐으면 0 moved).
-bold "Step 0/3 — session 폴더 reorg (episode_* → phase1/)"
+bold "Step 0/4 — session 폴더 reorg (episode_* → phase1/)"
 python - "$SESSION_DIR" <<'PY'
 import sys, shutil
 from pathlib import Path
@@ -100,7 +108,7 @@ PY
 # ============================================================
 # Step 1 — skill segment DCT parquet (VLA 학습용 preprocessed dataset)
 # ============================================================
-bold "Step 1/3 — build skill segment DCT parquet"
+bold "Step 1/4 — build skill segment DCT parquet"
 
 mkdir -p "$(dirname "$SKILL_DCT_PARQUET")"
 
@@ -122,7 +130,7 @@ fi
 # Step 2 — DCT-tuned VLA training (optional)
 # ============================================================
 if [ "$SKIP_TRAIN" -eq 1 ]; then
-    bold "Step 2/3 — VLA training SKIPPED (--skip-train)"
+    bold "Step 2/4 — VLA training SKIPPED (--skip-train)"
     if [ -z "$VLA_CKPT" ]; then
         err "--skip-train requires --vla-ckpt PATH"; exit 2
     fi
@@ -131,7 +139,7 @@ if [ "$SKIP_TRAIN" -eq 1 ]; then
     fi
     info "using existing ckpt: $VLA_CKPT"
 else
-    bold "Step 2/3 — DCT-tuned VLA training"
+    bold "Step 2/4 — DCT-tuned VLA training"
     if [ -z "$TRAIN_JOB" ]; then
         TRAIN_JOB="smolvla_dct_$(date +%Y%m%d_%H%M%S)"
     fi
@@ -172,7 +180,7 @@ fi
 # ============================================================
 # Step 3 — P_phase1 vector DB rebuild
 # ============================================================
-bold "Step 3/3 — P_phase1 DB rebuild"
+bold "Step 3/4 — P_phase1 DB rebuild"
 
 if python -m method3.dct.rebuild_p_phase1 \
         --session "$SESSION_DIR" \
@@ -186,14 +194,62 @@ else
     exit 1
 fi
 
+# ============================================================
+# Step 4 — artifact 자동 배치 (DB cp + phase2_config.yaml 3-key edit)
+# ============================================================
+# 수동 cp / edit 의 누락·오타를 없애고, "yaml 을 서버로 보내는" 경로를
+# 명확히 한다. yaml 은 git-tracked → git commit+push 후 launch_remote_server.sh
+# 의 git pull 로 서버 도착. (sync_artifacts.sh 는 ckpt/DB/parquet 만 rsync —
+# yaml 은 sync 대상 아님. 그래서 git push 가 *반드시* server restart 전.)
+bold "Step 4/4 — artifact 배치 (DB cp + yaml edit)"
+
+PHASE2_YAML="$PROJ_ROOT/pipeline_config/phase2_config.yaml"
+DB_SRC="$SESSION_DIR/dct/skill_wise_vector_db.npz"
+DB_DST="$PROJ_ROOT/grpc_server/buffer/server_skill_wise_vector_db.npz"
+
+# (a) DB → grpc_server/buffer/ (sync_artifacts.sh 의 rsync source 위치)
+mkdir -p "$(dirname "$DB_DST")"
+cp "$DB_SRC" "$DB_DST"
+info "DB copied  : $DB_SRC → $DB_DST"
+
+# (b) phase2_config.yaml 3-key value-line 교체. repo-relative path 로 저장
+#     (local/remote portable — server.py 가 repo root 기준 resolve).
+_ckpt_rel="${VLA_CKPT#"$PROJ_ROOT/"}"
+_parq_rel="${SKILL_DCT_PARQUET#"$PROJ_ROOT/"}"
+python - "$PHASE2_YAML" "$_ckpt_rel" "$DATASET" "$_parq_rel" <<'PY'
+import re, sys
+yaml_path, ckpt, dataset, parquet = sys.argv[1:5]
+lines = open(yaml_path, encoding="utf-8").read().splitlines(keepends=True)
+def _patch(lines, key, value, indent=""):
+    pat = re.compile(rf'^{re.escape(indent)}{re.escape(key)}:\s*"[^"]*"(.*)$')
+    for i, ln in enumerate(lines):
+        m = pat.match(ln)
+        if m:
+            lines[i] = f'{indent}{key}: "{value}"{m.group(1)}\n'
+            return True
+    return False
+ok1 = _patch(lines, "phase1_trained_vla_path", ckpt)
+ok2 = _patch(lines, "phase1_dataset_path", dataset)
+ok3 = _patch(lines, "skill_dct_parquet", parquet, indent="  ")
+open(yaml_path, "w", encoding="utf-8").writelines(lines)
+print(f"  yaml patched: vla={ok1} dataset={ok2} skill_dct_parquet={ok3}")
+PY
+green "Step 4 done — DB 배치 + yaml 3-key 갱신 완료"
+
 bold "Phase2 prep chain DONE"
-green "next steps (manual):"
-green "  1. cp $SESSION_DIR/dct/skill_wise_vector_db.npz grpc_server/buffer/server_skill_wise_vector_db.npz"
-green "  2. edit pipeline_config/phase2_config.yaml:"
-green "       phase1_trained_vla_path: $VLA_CKPT"
-green "       phase1_dataset_path:     $DATASET"
-green "       selector.skill_dct_parquet: $SKILL_DCT_PARQUET"
-green "  3. restart server: bash grpc_server/launch_remote_server.sh"
-green "  4. run_forward_and_reset_ws3.sh 의 PHASE 변경: PHASE=\"phase1\" → PHASE=\"phase2\""
-green "     그 후 bash run_forward_and_reset_ws3.sh 실행 → Phase2 cycle 의 새 episode 는"
-green "     session/phase2/ 하위에 저장됨."
+green "=== 산출물 (절대경로) ==="
+green "  skill DCT parquet : $SKILL_DCT_PARQUET"
+green "  VLA checkpoint    : $VLA_CKPT"
+green "  P_phase1 DB       : $DB_SRC"
+green "  → server buffer   : $DB_DST"
+green "  session/phase1/   : $SESSION_DIR/phase1/"
+green "  session/phase2/   : $SESSION_DIR/phase2/  (Phase2 cycle episode 저장 위치)"
+green ""
+green "=== manual next-steps (순서 고정 — yaml 은 git 으로만 서버 도달) ==="
+green "  (1) git add pipeline_config/phase2_config.yaml && git commit -m '...' && git push"
+green "      → origin 갱신. *이게 없으면* 다음 step 의 git pull 이 예전 yaml 받음."
+green "  (2) bash grpc_server/launch_remote_server.sh"
+green "      → 서버 git pull (origin→server, 최신 yaml) + sync_artifacts (ckpt/DB/parquet"
+green "        rsync) + server restart. (1) 을 건너뛰면 서버가 예전 ckpt load."
+green "  (3) run_forward_and_reset_ws3.sh 의 PHASE: \"phase1\" → \"phase2\" 후 실행."
+green "      → Phase2 cycle 의 새 episode 는 session/phase2/ 하위에 저장."

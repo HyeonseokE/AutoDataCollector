@@ -35,7 +35,6 @@ from method3.phase2_mi_selection import (
     Phase2MISelector,
     SkillVectorDB,
 )
-from method3.phase2_mi_selection.vla_dct_uncertainty import DCTDenoiseUncertainty
 from method3.config import load_phase2_config
 
 
@@ -227,27 +226,23 @@ def setup_method3_phase2_server(
     ph2_raw = _load_phase2_yaml(recording_cfg, phase2_yaml)
     vla_cfg = ph2_raw.get("vla_informativeness") or {}
     if vla_cfg.get("enabled", False):
-        scorer_type = str(vla_cfg.get("scorer_type", "default")).lower()
+        scorer_mode = str(vla_cfg.get("scorer_type", "default")).lower()
         try:
-            if scorer_type == "dct":
-                # paradigm step [4] — single-step DCT-space denoise.
-                # encoder.policy 는 yaml.phase1_trained_vla_path 의 DCT-tuned ckpt
-                # 에서 로드되어야 의미가 있다 (DCT target 학습된 weight 가정).
-                _sigma = vla_cfg.get("sigma")
-                vla_scorer = DCTDenoiseUncertainty(
-                    policy=encoder.policy,
-                    sigma=None if _sigma is None else float(_sigma),
-                )
-                print(f"[method3_setup] U_VLA scorer ENABLED (type=dct, R=1, "
-                      f"sigma={vla_scorer.sigma})")
-            else:
-                vla_scorer = LeRobotVLAInformativenessScorer(
-                    policy=encoder.policy,
-                    R=int(vla_cfg.get("R", 8)),
-                    agg=str(vla_cfg.get("agg", "mean")),
-                )
-                print(f"[method3_setup] U_VLA scorer ENABLED (type=default, "
-                      f"R={vla_scorer.R})")
+            _sigma = vla_cfg.get("sigma")
+            # mode="dct" 는 R=1 single-step, candidate.dct_target inject.
+            # mode="default" 는 기존 R-stochastic frame-level chunk denoise.
+            vla_scorer = LeRobotVLAInformativenessScorer(
+                policy=encoder.policy,
+                R=int(vla_cfg.get("R", 8)),
+                agg=str(vla_cfg.get("agg", "mean")),
+                mode=scorer_mode,
+                sigma=None if _sigma is None else float(_sigma),
+            )
+            print(
+                f"[method3_setup] U_VLA scorer ENABLED (mode={scorer_mode}, "
+                f"R={'1' if scorer_mode == 'dct' else vla_scorer.R}, "
+                f"sigma={vla_scorer.sigma})"
+            )
         except Exception as e:
             print(f"[method3_setup] U_VLA setup failed ({e}); selection falls back to argmax M_MI")
             vla_scorer = None

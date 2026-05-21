@@ -99,6 +99,15 @@ class LeRobotVLAInformativenessScorer:
     pi0 / pi05 / smolvla 의 통일 인터페이스
     ``policy.forward(batch, reduction="mean") -> (loss_tensor, info)`` 를 호출한다.
 
+    두 mode:
+      * ``mode="default"`` — caller 가 batch_builder 로 만든 batch 그대로 forward.
+        R-stochastic (noise/time random sample 매번 새로 일어남) → 평균/최대 loss.
+      * ``mode="dct"`` — method3 DCT paradigm. candidate.dct_target 을 batch["action"]
+        자리에 inject 후 single-step (R=1 강제) denoise loss. ``sigma`` 명시 시
+        forward 의 ``time`` 인자로 전달 (deterministic), None 이면 policy 내부 schedule
+        에서 random sample. policy 가 DCT-target 으로 학습됐다는 가정 (paradigm step
+        [1][2]) — 그 가정이 안 맞으면 loss 의미 없음.
+
     Args:
         policy: ``forward(batch, reduction)`` 를 노출하는 LeRobot policy 인스턴스
             (freeze 상태로 전달되어야 한다 — 본 모듈은 grad 를 끄기만 한다).
@@ -106,16 +115,19 @@ class LeRobotVLAInformativenessScorer:
             None 이면 ``candidate.observations`` 를 그대로 batch 로 사용 (caller 가
             family-aware 로 미리 채워 넣는 패턴). family-별 transform 이 필요하면
             explicit builder 를 등록.
-        R: §12.1 stochastic denoise eval 횟수. flow-matching/diffusion policy 의
-            noise·timestep sampling 이 forward 안에서 매번 새로 일어나므로 R>1 이
-            의미가 있다.
+        R: §12.1 stochastic denoise eval 횟수. mode="dct" 에선 항상 1 (override).
         agg: ``mean`` 또는 ``max`` — R 번 loss 의 trajectory-level aggregator.
+        mode: ``"default"`` | ``"dct"`` — 위 두 mode 참조.
+        sigma: mode="dct" 전용. None=policy 내부 schedule sample, float=forward 의
+            ``time`` 인자로 명시 전달 → score 가 sigma 에 대해 deterministic.
     """
 
     policy: object
     batch_builder: BatchBuilder | None = None
     R: int = 8
     agg: str = "mean"
+    mode: str = "default"
+    sigma: float | None = None
 
     def score(self, candidate: Phase2Candidate) -> float:
         try:
@@ -132,6 +144,35 @@ class LeRobotVLAInformativenessScorer:
             raise ValueError(
                 "batch_builder returned None — candidate may be missing observations/proprio."
             )
+        if not isinstance(batch, dict):
+            batch = dict(batch)
+
+        forward_kwargs: dict = {}
+        effective_R = int(max(1, self.R))
+
+        if self.mode == "dct":
+            # paradigm step [4]: action 자리에 candidate.dct_target 을 inject.
+            if candidate.dct_target is None:
+                raise ValueError(
+                    "mode='dct' requires candidate.dct_target — "
+                    "use curobo_candidate_gen.candidates_from_trajectory_list."
+                )
+            z_cand = np.asarray(candidate.dct_target, dtype=np.float32)
+            action_tensor = torch.from_numpy(z_cand).unsqueeze(0)  # (1, L0, dof)
+            try:
+                from lerobot.constants import ACTION  # type: ignore
+
+                batch[ACTION] = action_tensor
+            except Exception:
+                batch["action"] = action_tensor
+            # single-step force.
+            effective_R = 1
+            if self.sigma is not None:
+                forward_kwargs["time"] = torch.tensor(
+                    [float(self.sigma)], dtype=torch.float32
+                )
+        elif self.mode != "default":
+            raise ValueError(f"unknown mode={self.mode!r} (expected 'default' or 'dct')")
 
         losses: list[float] = []
         was_training = getattr(self.policy, "training", False)
@@ -139,9 +180,9 @@ class LeRobotVLAInformativenessScorer:
             if hasattr(self.policy, "eval"):
                 self.policy.eval()
             with torch.no_grad():
-                for _ in range(int(max(1, self.R))):
+                for _ in range(effective_R):
                     # forward(batch, reduction="mean") → (loss_tensor, info_dict)
-                    out = self.policy.forward(batch, reduction="mean")
+                    out = self.policy.forward(batch, reduction="mean", **forward_kwargs)
                     loss_t = out[0] if isinstance(out, tuple) else out
                     losses.append(float(loss_t.detach().cpu().item()))
         finally:

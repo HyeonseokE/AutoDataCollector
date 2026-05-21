@@ -237,6 +237,26 @@ class Phase2MISelector:
         radius = state_neighborhood_radius(
             db_keys, cfg.radius_k, cfg.radius_quantile)
 
+        # 진단 — index==0 일 때 한 번만 출력. why under_covered? 거리 분포 + radius.
+        if index == 0:
+            try:
+                _ck = np.asarray(candidate.state_keys, dtype=np.float64)
+                _q = _ck[0:1]
+                _d2db = np.linalg.norm(db_keys - _q, axis=1)
+                _ck_norm = np.linalg.norm(_ck, axis=1)
+                _db_norm = np.linalg.norm(db_keys, axis=1)
+                print(f"[diagnose] skill={candidate.skill_id} cand#0 "
+                      f"state_keys={_ck.shape} (norm μ={_ck_norm.mean():.3f}) "
+                      f"db_keys={db_keys.shape} (norm μ={_db_norm.mean():.3f}) "
+                      f"dist_cand0_to_db[min,p50,p70,max]=({_d2db.min():.4f},"
+                      f"{np.quantile(_d2db,0.5):.4f},"
+                      f"{np.quantile(_d2db,0.7):.4f},{_d2db.max():.4f}) "
+                      f"radius={radius:.4f} "
+                      f"→ covered_iff: ∃ db within radius ({(_d2db<=radius).sum()}/{len(_d2db)})",
+                      flush=True)
+            except Exception as _e:
+                print(f"[diagnose] failed: {_e}", flush=True)
+
         # §9 — conditional ambiguity increase ΔH_A|S (covered window 만).
         amb = conditional_ambiguity(
             candidate.state_keys, cand_z, db_keys, db_z,

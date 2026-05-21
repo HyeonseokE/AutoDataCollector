@@ -23,6 +23,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -126,6 +127,7 @@ class PreselectiveAcquirerServicer(
         debug_verbose: bool = False,
         action_horizon: int = 50,
         max_T_eval: int | None = None,
+        servo_calibration_file: str | None = None,
     ) -> None:
         self.stack = stack
         self.selector = stack.selector
@@ -143,7 +145,13 @@ class PreselectiveAcquirerServicer(
         self._candidate_cfg = CurobogenConfig(
             action_horizon=int(action_horizon),
             max_T_eval=(None if max_T_eval is None else int(max_T_eval)),
+            servo_calibration_file=servo_calibration_file,
         )
+        if servo_calibration_file:
+            print(f"[server] joint→servo calibration enabled ← {servo_calibration_file}", flush=True)
+        else:
+            print(f"[server] joint→servo calibration DISABLED (candidate is in radians, "
+                  f"DB is in servo — action_descriptor unit mismatch).", flush=True)
 
         # Selection cache — selection_id → (Phase2Candidate, Phase2Selection)
         # CommitToBuffer 의 retro 호환 — 새 spec 에선 accept 가 inline 이라 unused.
@@ -510,6 +518,20 @@ def serve(args: argparse.Namespace) -> None:
     _action_horizon = int(sel_cfg.get("action_horizon", sel_cfg.get("chunk_size", 50)))
     _max_T_eval = sel_cfg.get("max_T_eval")
     _max_T_eval = None if _max_T_eval is None else int(_max_T_eval)
+    # A.3 — joint→servo calibration JSON path. yaml > env > default.
+    _servo_calib = (
+        sel_cfg.get("servo_calibration_file")
+        or os.environ.get("PHASE2_SERVO_CALIB")
+        or "robot_configs/motor_calibration/so101/robot4_calibration.json"
+    )
+    # resolve relative path to repo root (server.py 의 working dir 가 repo root).
+    if _servo_calib and not Path(_servo_calib).is_absolute():
+        _abs = Path(__file__).resolve().parent.parent / _servo_calib
+        _servo_calib = str(_abs) if _abs.exists() else _servo_calib
+    if not Path(_servo_calib).exists():
+        print(f"[server] WARN: servo calibration file not found at {_servo_calib} "
+              f"— joint→servo conversion disabled")
+        _servo_calib = None
     servicer = PreselectiveAcquirerServicer(
         stack=stack,
         curobo_backend=curobo,
@@ -518,6 +540,7 @@ def serve(args: argparse.Namespace) -> None:
         debug_verbose=bool(psf_cfg.get("debug_verbose", False)),
         action_horizon=_action_horizon,
         max_T_eval=_max_T_eval,
+        servo_calibration_file=_servo_calib,
     )
     print(
         f"[server] selector: action_horizon (H)={_action_horizon}, "

@@ -35,7 +35,27 @@ import numpy as np
 
 from method3.dct.transform import traj_to_dct
 from method3.phase2_mi_selection.mi_selector import Phase2Candidate
+from method3.phase2_mi_selection.joint_servo_conversion import JointServoConverter
 from method3.reembedding.vla_encoder import VLAStateEncoder
+
+
+# Module-level cache — calibration JSON parse 는 once per process.
+_CACHED_CONVERTER: dict[str, JointServoConverter] = {}
+
+
+def _get_converter(path: str | None) -> JointServoConverter | None:
+    """Lazy load + cache JointServoConverter. path None 이면 None 반환."""
+    if not path:
+        return None
+    if path in _CACHED_CONVERTER:
+        return _CACHED_CONVERTER[path]
+    try:
+        conv = JointServoConverter.from_calibration(path)
+        _CACHED_CONVERTER[path] = conv
+        return conv
+    except Exception as e:
+        print(f"  [curobo_candidate_gen] failed to load calibration {path!r}: {e}", flush=True)
+        return None
 
 
 @dataclass
@@ -62,6 +82,10 @@ class CurobogenConfig:
     # arm dof 만큼 slice 한다 (Phase2MIConfig.arm_dof / full_dof).
     # 5 이외의 값을 주면 dof 가 그 이상이면 truncate, 미만이면 last-value padding.
     dct_target_dof: int = 5
+    # A.3 paradigm — curobo joint radians → lerobot servo positions (±100)
+    # 변환. None 이면 변환 비활성 (legacy: candidate 는 radians space, DB 는
+    # servo space → unit mismatch). path 가 주어지면 first-use 시 lazy load.
+    servo_calibration_file: str | None = None
 
 
 def _chunk_waypoints(
@@ -195,6 +219,17 @@ def candidates_from_trajectory_list(
             _wp_full = np.concatenate([wp_arr, _pad], axis=1)
         elif cfg.dct_target_dof and wp_arr.shape[1] > cfg.dct_target_dof:
             _wp_full = wp_arr[:, : cfg.dct_target_dof]
+
+        # A.3 paradigm — curobo joint radians → lerobot servo positions (±100).
+        # 이 변환이 있어야 candidate.dct_target / proprios / action_chunks 가
+        # DB (servo space) 와 같은 unit. converter 없으면 *radians 그대로* (unit
+        # mismatch, action descriptor ΔH_A 의미 약화).
+        _converter = _get_converter(cfg.servo_calibration_file)
+        if _converter is not None:
+            try:
+                _wp_full = _converter.radians_to_normalized(_wp_full)
+            except Exception as e:
+                print(f"  [curobo_candidate_gen] joint→servo conversion failed: {e}", flush=True)
 
         proprios, action_chunks = _chunk_waypoints(
             _wp_full, cfg.action_horizon, cfg.max_T_eval)

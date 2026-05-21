@@ -97,6 +97,10 @@ class Phase2MIConfig:
     amb_agg: str = "mean"         # §9.4 covered aggregation: "mean" | "max"
     min_covered_windows: int = 1  # §9.1 T_min — 미만이면 under-covered
     debug_verbose: bool = False
+    # method3 DCT paradigm — True 면 action_descriptors 가 candidate.dct_target
+    # (skill-unit (L0, dof) DCT) 을 그대로 z-space 로 사용. 기본 False 는
+    # 기존 frame-level chunk → truncated DCT descriptor 경로 (backward compat).
+    use_dct_target: bool = False
 
     def __post_init__(self) -> None:
         # 기존 yaml 들이 accept_threshold 만 지정하던 호환 경로를 보존.
@@ -165,7 +169,24 @@ class Phase2MISelector:
             print(f"[Phase2-MI][debug] {msg}")
 
     def action_descriptors(self, candidate: Phase2Candidate) -> np.ndarray:
-        """후보 window 별 DCT action descriptor ``z_τ^a`` (T, K·action_dim)."""
+        """후보의 action descriptor.
+
+        paradigm step [6] — ``cfg.use_dct_target=True`` 면 candidate 의 skill
+        단위 DCT feature ``dct_target (L0, dof)`` 를 flatten 한 (1, L0·dof)
+        를 single-window z 로 사용 (skill-atomic representation).
+
+        Backward compat — False (default) 면 frame-level action_chunk 의
+        truncated DCT descriptor (T, K·action_dim) 반환.
+        """
+        if self.cfg.use_dct_target:
+            z = candidate.dct_target
+            if z is None:
+                raise ValueError(
+                    "use_dct_target=True 인데 candidate.dct_target 이 None — "
+                    "curobo_candidate_gen 의 dct_target 필드 채움이 필요합니다."
+                )
+            arr = np.asarray(z, dtype=np.float64).reshape(1, -1)
+            return arr
         return np.stack([
             dct_action_descriptor(a, self.cfg.dct_coeffs)
             for a in np.asarray(candidate.action_chunks, dtype=np.float64)

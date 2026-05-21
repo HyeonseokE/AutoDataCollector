@@ -19,7 +19,7 @@ subgoal:
   # --- 후보 생성 (§4.2) ---
   # mode 는 항상 buffer_aware (자동). robot_origin 은 (0,0,0) 고정,
   # max_resample 은 200 고정 — 모두 노출 제거 (이전 키들은 무시됨).
-  n_candidates: 32             # K — subgoal 후보 수
+  n_candidates: 64             # K — subgoal 후보 수
   sigma: 0.05                  # 후보 분포 폭 (m)
   clip_factor: 1.0             # 후보 최대 반경 = clip_factor * sigma
   candidate_dist: hemisphere   # uniform_ball | gaussian | hemisphere
@@ -32,7 +32,7 @@ subgoal:
   #   것을 방지. 글로벌(현재 5cm) 보다 의미 있게 좁음.
   per_skill:
     move_initial:
-      sigma: 0.02
+      sigma: 0.05
       clip_factor: 1.0
 
   # --- scoring (§5.3-5.4) ---
@@ -64,8 +64,8 @@ subgoal:
 # 종료 규칙 (§15.3):
 #   stop ⇔ (ep ≥ B₁_min ∧ R_ready > τ_ready)  ∨  (ep ≥ B₁_max)
 readiness:
-  enabled: false               # opt-in. true 로 바꿔야 hook 활성.
-  phase1_min: 30              # B₁_min — 이 미만에선 측정 skip
+  enabled: true               # opt-in. true 로 바꿔야 hook 활성.
+  phase1_min: 40              # B₁_min — 이 미만에선 측정 skip
   phase1_max: 60              # B₁_max — 도달 시 readiness 무관 강제 종료
 
   # ── 1차 조건: state support 가 충분한가 ────────────────────────────────

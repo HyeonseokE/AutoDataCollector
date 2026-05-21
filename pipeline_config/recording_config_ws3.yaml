@@ -3,7 +3,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026-CSI/pnp_ours_100_table2"  # 30→100 확장 (2026-05-20). 30 episode base 는 pnp_phase1_30_table2 에서 복사된 상태. HF Hub repo_id 또는 로컬 경로
+dataset_repo_id: "CoRL2026-CSI/pnp_ours_100_table1"  # 30→100 확장 (2026-05-20). 30 episode base 는 pnp_phase1_30_table2 에서 복사된 상태. HF Hub repo_id 또는 로컬 경로
 recording_fps: 10
 robot_type: "so101"
 vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv

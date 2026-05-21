@@ -30,21 +30,21 @@ ROBOT_IDS=(4)
 #   phase1 — Phase1 buffer-aware subgoal seeding (default).
 #   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
 # ============================================================
-PHASE="phase2"
+PHASE="phase1"
 
 ### ==================== [single arm task] ==================
 ## pick and place
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# RESET_INSTRUCTION=""
+INSTRUCTION="pick up the red block and place it on the blue dish"
+RESET_INSTRUCTION=""
 
 ## stack
-INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
-RESET_INSTRUCTION=""
+# INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
+# RESET_INSTRUCTION=""
 
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=100  # 30→100 확장 (2026-05-20 마이그레이션). 기존 30 episode 는 seed 당 10 slot 의 0..2 위치로 재배치됨 — scripts/migrate_session_episodes_per_seed.py 참고
-NUM_RANDOM_SEEDS=10  # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_RANDOM_SEEDS=20  # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
@@ -67,8 +67,8 @@ EXECUTE_RESET=true # Reset 실행 여부
 RECORD_DATASET=true
 
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-# RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_100"
-RESUME_SESSION="./results/pnp_phase1_30_table2_ours"
+RESUME_SESSION=""
+# RESUME_SESSION="./results/pnp_phase1_30_table2_ours"
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

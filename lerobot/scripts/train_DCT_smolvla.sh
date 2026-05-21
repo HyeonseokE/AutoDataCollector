@@ -169,6 +169,7 @@ TRAIN_ARGS=(
     --policy.device="$DEVICE"
     --dataset.repo_id="$DATASET_REPO_ID"
     --dataset.revision="$DATASET_REVISION"
+    --dataset.video_backend="${VIDEO_BACKEND:-pyav}"
     --dataset.skill_dct_parquet="$SKILL_DCT_PARQUET"
     --output_dir="$OUTPUT_DIR"
     --job_name="$JOB_NAME"

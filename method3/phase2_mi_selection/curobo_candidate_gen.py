@@ -33,6 +33,7 @@ from typing import Any, Iterable, Optional
 
 import numpy as np
 
+from method3.dct.transform import traj_to_dct
 from method3.phase2_mi_selection.mi_selector import Phase2Candidate
 from method3.reembedding.vla_encoder import VLAStateEncoder
 
@@ -53,6 +54,9 @@ class CurobogenConfig:
                                        # None=비활성 (spec 직역, 모든 시점 평가).
                                        # int 면 T_raw > max_T_eval 일 때 균일 간격
                                        # sub-sample 해서 max_T_eval 개 시점만 평가.
+    # method3 DCT paradigm — candidate 의 skill 단위 DCT feature 차원.
+    # smolvla chunk_size 와 일치하도록 50 default.
+    dct_L0: int = 50
 
 
 def _chunk_waypoints(
@@ -159,6 +163,9 @@ def candidates_from_trajectory_list(
         proprios, action_chunks = _chunk_waypoints(
             wp_arr, cfg.action_horizon, cfg.max_T_eval)
         T = proprios.shape[0]
+        # skill 단위 DCT feature — candidate 의 전체 waypoints 를 한 skill 로
+        # 보고 (L0, dof) DCT 로 변환 (paradigm step [3]).
+        dct_target = traj_to_dct(wp_arr, L0=cfg.dct_L0)
 
         # state_keys = [φ_VLA(o_τ, I); p_τ]. o_τ 는 모든 τ 에서 current_obs 공유.
         if encoder is not None and current_observation is not None:
@@ -186,5 +193,6 @@ def candidates_from_trajectory_list(
             observations=batch_observations if batch_observations is not None else current_observation,
             instruction=str(instruction),
             proprios=proprios,
+            dct_target=dct_target,
         ))
     return out

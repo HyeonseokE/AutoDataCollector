@@ -25,6 +25,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
+from method3.dct.transform import traj_to_dct
 from method3.phase2_mi_selection.mi_selector import Phase2Candidate
 from method3.reembedding.vla_encoder import VLAStateEncoder
 
@@ -121,10 +122,14 @@ class MockCandidateGenerator:
             chunks = self._rng.normal(
                 loc=float(c) * 0.1, scale=1.0,
                 size=(self._T, self._H, self._action_dim))
+            # skill 단위 DCT target — paradigm step [3]. mock 에서는 첫 시점
+            # action chunk 를 skill traj 로 간주 (T_skill = H, action_dim).
+            dct_target = traj_to_dct(chunks[0], L0=self._H)
             out.append(Phase2Candidate(
                 skill_id=str(skill_id),
                 state_keys=np.stack(state_keys),
                 action_chunks=chunks,
                 seed_subgoal=seed,
+                dct_target=dct_target,
             ))
         return out

@@ -73,6 +73,9 @@ class Phase2Candidate:
     observations: object | None = None
     instruction: str | None = None
     proprios: np.ndarray | None = None  # (T, P) — window 별 proprio
+    # method3 DCT paradigm — skill 단위 후보 trajectory 의 DCT_50 feature.
+    # (L0, action_dim). vla_dct_uncertainty.DCTDenoiseUncertainty 가 사용.
+    dct_target: np.ndarray | None = None
 
 
 @dataclass

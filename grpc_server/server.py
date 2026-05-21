@@ -301,7 +301,7 @@ class PreselectiveAcquirerServicer(
         client 측이 judge-FALSE 면 IngestEpisode 를 *호출 안 함* 으로써 자연 보존.
         호환을 위해 RPC 는 살아남지만 no-op + DB save 만 수행.
         """
-        totals = {sid: len(self.db.entries(sid)) for sid in self.db.skill_ids()}
+        totals = {sid: self.db.size(sid) for sid in self.db.skill_ids()}
         # PlanAndSelect 가 inline append 한 결과를 디스크로 flush — judge-TRUE 시 점만 save.
         if request.judge_true:
             try:
@@ -367,7 +367,7 @@ class PreselectiveAcquirerServicer(
             context.set_details(f"IngestEpisode failed after {n} frames: {e}")
             return preselective_pb2.IngestResponse(frames_ingested=n)
 
-        totals = {sid: len(self.db.entries(sid)) for sid in self.db.skill_ids()}
+        totals = {sid: self.db.size(sid) for sid in self.db.skill_ids()}
         if self.debug_verbose:
             elapsed = time.perf_counter() - t0
             print(
@@ -380,7 +380,7 @@ class PreselectiveAcquirerServicer(
 
     # ----------------------------------------------------------------
     def Ready(self, request, context):
-        totals = {sid: len(self.db.entries(sid)) for sid in self.db.skill_ids()}
+        totals = {sid: self.db.size(sid) for sid in self.db.skill_ids()}
         emb_dim = getattr(self.encoder, "embedding_dim", None)
         return preselective_pb2.ServerInfo(
             smolvla_checkpoint="<frozen VLA encoder>",

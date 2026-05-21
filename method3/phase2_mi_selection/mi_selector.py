@@ -101,6 +101,15 @@ class Phase2MIConfig:
     # (skill-unit (L0, dof) DCT) 을 그대로 z-space 로 사용. 기본 False 는
     # 기존 frame-level chunk → truncated DCT descriptor 경로 (backward compat).
     use_dct_target: bool = False
+    # Arm-only 비교 — DB 는 (arm + gripper = full_dof) 로 빌드되지만 candidate
+    # (curobo arm-only) 와의 비교에서 gripper 축을 제외한다.
+    # arm_dof < full_dof 면:
+    #   - db_z: (N, L0*full_dof) → (N, L0, full_dof) → [:,:,:arm_dof] → (N, L0*arm_dof)
+    #   - db_keys: (N, D_vl + full_dof) → [:, :-(full_dof-arm_dof)]  (proprio 끝 축 제거)
+    # arm_dof == full_dof 또는 둘 중 하나 None 이면 slicing 비활성.
+    arm_dof: Optional[int] = 5
+    full_dof: Optional[int] = 6
+    dct_L0: int = 50  # DB 빌드 시 L0 — db_z reshape 용
 
     def __post_init__(self) -> None:
         # 기존 yaml 들이 accept_threshold 만 지정하던 호환 경로를 보존.
@@ -198,6 +207,19 @@ class Phase2MISelector:
         cand_z = self.action_descriptors(candidate)
         db_keys = self.db.state_keys(candidate.skill_id)
         db_z = self.db.action_descriptors(candidate.skill_id)
+        # Arm-only 비교 — DB 는 full_dof (arm+gripper) 로 저장, candidate 는
+        # arm_dof 만. 비교 시점에 DB 의 gripper 축 제거.
+        if (cfg.use_dct_target and cfg.arm_dof and cfg.full_dof
+                and cfg.arm_dof < cfg.full_dof):
+            L0 = cfg.dct_L0
+            full = cfg.full_dof
+            arm = cfg.arm_dof
+            # db_z: (N, L0*full) → reshape (N, L0, full) → arm slice → (N, L0*arm)
+            if db_z.ndim == 2 and db_z.shape[1] == L0 * full:
+                db_z = db_z.reshape(-1, L0, full)[:, :, :arm].reshape(db_z.shape[0], -1)
+            # db_keys: (N, D_vl + full) → drop last (full-arm) cols (proprio 끝 축).
+            if db_keys.ndim == 2 and db_keys.shape[1] > (full - arm):
+                db_keys = db_keys[:, :-(full - arm)]
         n_windows = cand_z.shape[0]
 
         # Cold-start — buffer 가 2개 미만이면 d̄_NN/radius 를 계산할 수 없다.

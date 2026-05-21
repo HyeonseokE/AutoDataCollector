@@ -57,12 +57,11 @@ class CurobogenConfig:
     # method3 DCT paradigm — candidate 의 skill 단위 DCT feature 차원.
     # smolvla chunk_size 와 일치하도록 50 default.
     dct_L0: int = 50
-    # candidate waypoints 가 *arm-only* (예: curobo so101 = 5 arm joints) 인데
-    # DB action_descriptor 가 *full action (5 arm + 1 gripper = 6)* 으로 빌드
-    # 됐다면 dim mismatch (250 vs 300). 이 값으로 *target full dof* 명시,
-    # waypoints 의 dof 가 부족하면 constant (마지막 값) padding 으로 채워서
-    # DCT 변환 → DB 와 같은 (L0 × full_dof) z-space.
-    dct_target_dof: int = 6
+    # candidate waypoints 는 *arm-only* (curobo so101 = 5 arm joints). gripper
+    # 는 비교에서 제외 — DB action descriptor / state_key 는 mi_selector 에서
+    # arm dof 만큼 slice 한다 (Phase2MIConfig.arm_dof / full_dof).
+    # 5 이외의 값을 주면 dof 가 그 이상이면 truncate, 미만이면 last-value padding.
+    dct_target_dof: int = 5
 
 
 def _chunk_waypoints(
@@ -162,10 +161,10 @@ def candidates_from_trajectory_list(
     _shared_e_vla: np.ndarray | None = None
     if encoder is not None and current_observation is not None:
         try:
-            # zero_state 로 backbone forward 1회. DB build 와 동일한 pattern
-            # (server.py:396): VLAKeyExtractor.encode 가 _fuses_state=True 면
-            # state arg 무시; False 면 zero state 가 padding 역할.
-            _zero_state = np.zeros(cfg.dct_target_dof or 6, dtype=np.float64)
+            # zero_state — DB build 와 동일 dim (full proprio = arm+gripper = 6).
+            # encoder 가 _fuses_state=False 면 state arg 가 key 에 concat 되므로
+            # DB 와 *반드시 같은 dim* 이어야 한다.
+            _zero_state = np.zeros(6, dtype=np.float64)
             _shared_e_vla = np.asarray(
                 encoder.encode(current_observation, instruction, _zero_state),
                 dtype=np.float64,

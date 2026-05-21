@@ -72,6 +72,32 @@ info "session dir  : $SESSION_DIR"
 info "skill DCT parquet : $SKILL_DCT_PARQUET"
 
 # ============================================================
+# Step 0 — session 폴더 reorg (phase1/ phase2/ 구조)
+# ============================================================
+# chain 진입 = Phase1 종료 → Phase2 준비. 기존 flat 한 episode_*/ 를
+# phase1/ 하위로 옮기고 phase2/ 빈 폴더 생성. 이후 Phase2 cycle 의
+# episode 는 phase2/ 하위에 쌓인다. idempotent (이미 reorg 됐으면 0 moved).
+bold "Step 0/3 — session 폴더 reorg (episode_* → phase1/)"
+python - "$SESSION_DIR" <<'PY'
+import sys, shutil
+from pathlib import Path
+sd = Path(sys.argv[1])
+phase1 = sd / "phase1"; phase1.mkdir(exist_ok=True)
+moved = 0
+for ep in sorted(sd.glob("episode_*")):
+    if not ep.is_dir():
+        continue
+    dst = phase1 / ep.name
+    if dst.exists():
+        print(f"  skip (dest exists): {dst}")
+        continue
+    shutil.move(str(ep), str(dst))
+    moved += 1
+(sd / "phase2").mkdir(exist_ok=True)
+print(f"  moved {moved} episode_* → {phase1}/  (phase2/ ready)")
+PY
+
+# ============================================================
 # Step 1 — skill segment DCT parquet (VLA 학습용 preprocessed dataset)
 # ============================================================
 bold "Step 1/3 — build skill segment DCT parquet"
@@ -168,4 +194,6 @@ green "       phase1_trained_vla_path: $VLA_CKPT"
 green "       phase1_dataset_path:     $DATASET"
 green "       selector.skill_dct_parquet: $SKILL_DCT_PARQUET"
 green "  3. restart server: bash grpc_server/launch_remote_server.sh"
-green "  4. set PHASE=phase2 in run_forward_and_reset_ws3.sh, run."
+green "  4. run_forward_and_reset_ws3.sh 의 PHASE 변경: PHASE=\"phase1\" → PHASE=\"phase2\""
+green "     그 후 bash run_forward_and_reset_ws3.sh 실행 → Phase2 cycle 의 새 episode 는"
+green "     session/phase2/ 하위에 저장됨."

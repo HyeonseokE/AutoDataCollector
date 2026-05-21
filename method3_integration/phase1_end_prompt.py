@@ -16,12 +16,9 @@ mv. chain 산출물 절대경로 출력 — skill DCT parquet / VLA ckpt / P_pha
 """
 from __future__ import annotations
 
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 RED = "\033[1;31m"
 GREEN = "\033[1;32m"
@@ -41,83 +38,6 @@ def _read_int(prompt: str, *, min_value: int = 1) -> int | None:
         return n if n >= min_value else None
     except (EOFError, KeyboardInterrupt, ValueError):
         return None
-
-
-def _move_episodes_to_phase1(session_dir: Path) -> int:
-    """session/episode_* → session/phase1/episode_*.
-
-    이미 phase1/ 하위에 있는 episode 는 건드리지 않음 (idempotent).
-    Return count of moved dirs.
-    """
-    phase1_dir = session_dir / "phase1"
-    phase1_dir.mkdir(exist_ok=True)
-    moved = 0
-    for ep in sorted(session_dir.glob("episode_*")):
-        if not ep.is_dir():
-            continue
-        dst = phase1_dir / ep.name
-        if dst.exists():
-            # safety — 충돌 시 skip
-            print(f"  [reorg] skip (dest exists): {dst}", flush=True)
-            continue
-        shutil.move(str(ep), str(dst))
-        moved += 1
-    if moved:
-        print(f"  [reorg] moved {moved} episode_* → {phase1_dir}/", flush=True)
-    # phase2 dir 도 미리 생성 (앞으로 Phase2 cycle 의 episode 저장 위치)
-    (session_dir / "phase2").mkdir(exist_ok=True)
-    return moved
-
-
-def _print_absolute_paths(
-    session_dir: Path,
-    dataset_repo_id: str,
-) -> None:
-    """chain 완료 후 산출물 절대경로 출력."""
-    proj_root = Path(__file__).resolve().parent.parent
-    sd_abs = session_dir.resolve()
-    ds_basename = dataset_repo_id.split("/")[-1]
-
-    skill_dct_parquet = (proj_root / "results" / "skill_dct" / f"{ds_basename}.parquet").resolve()
-    db_path = (sd_abs / "dct" / "skill_wise_vector_db.npz").resolve()
-    phase1_dir = (sd_abs / "phase1").resolve()
-    phase2_dir = (sd_abs / "phase2").resolve()
-
-    # latest train output — mtime desc 의 first checkpoints/.../pretrained_model
-    train_dir = proj_root / "lerobot" / "outputs" / "train"
-    vla_ckpt = "<not found>"
-    if train_dir.exists():
-        cands = []
-        for d in train_dir.glob("smolvla_dct_*/checkpoints/*/pretrained_model"):
-            if d.is_dir():
-                try:
-                    cands.append((d.stat().st_mtime, d))
-                except OSError:
-                    continue
-        if cands:
-            cands.sort(reverse=True)
-            vla_ckpt = str(cands[0][1].resolve())
-
-    print()
-    print(GREEN + "=" * 70 + RESET)
-    print(GREEN + BOLD + "  Phase2 prep chain COMPLETE — artifact absolute paths:" + RESET)
-    print(GREEN + "=" * 70 + RESET)
-    print(f"  skill DCT parquet : {CYAN}{skill_dct_parquet}{RESET}")
-    print(f"  VLA checkpoint    : {CYAN}{vla_ckpt}{RESET}")
-    print(f"  P_phase1 DB       : {CYAN}{db_path}{RESET}")
-    print(f"  session/phase1/   : {CYAN}{phase1_dir}{RESET}")
-    print(f"  session/phase2/   : {CYAN}{phase2_dir}{RESET}  (Phase2 cycle 의 새 episode 저장 위치)")
-    print(GREEN + "=" * 70 + RESET)
-    print()
-    print("  Next manual steps:")
-    print(f"  1. cp {db_path} grpc_server/buffer/server_skill_wise_vector_db.npz")
-    print(f"  2. edit pipeline_config/phase2_config.yaml:")
-    print(f"       phase1_trained_vla_path: {vla_ckpt}")
-    print(f"       phase1_dataset_path:     {dataset_repo_id}")
-    print(f"       selector.skill_dct_parquet: {skill_dct_parquet}")
-    print(f"  3. restart server: bash grpc_server/launch_remote_server.sh")
-    print(f"  4. set PHASE=phase2 in run_forward_and_reset_ws3.sh, run.")
-    print()
 
 
 def _episode_counts(session_dir: Path) -> tuple[int, int]:
@@ -224,10 +144,9 @@ def run_prompt_loop(
             return
 
         if ans == "1":
-            # (1) chain: 폴더 reorg + chain + 절대경로 출력 + return (loop break)
-            print(f"  → reorganizing session/episode_* → session/phase1/ ...")
-            _move_episodes_to_phase1(session_dir)
-            print(f"  → launching {chain_script.name} ...")
+            # (1) chain: chain script 가 Step 0 에서 폴더 reorg 까지 담당
+            # (phase2_prep_chain.sh Step 0). 여기선 chain 호출만.
+            print(f"  → launching {chain_script.name} (Step 0 reorg + Step 1-3) ...")
             rc = subprocess.call([
                 "bash", str(chain_script),
                 "--dataset", dataset_repo_id,
@@ -236,7 +155,9 @@ def run_prompt_loop(
             if rc != 0:
                 print(f"  {RED}[prep chain] exit code {rc} — Phase2 prep INCOMPLETE{RESET}")
                 return
-            _print_absolute_paths(session_dir, dataset_repo_id)
+            # chain script 의 마지막 출력이 산출물 절대경로 + manual next-steps
+            # (DB upload / yaml edit / server restart / PHASE 변경) 를 모두 안내.
+            print(f"  {GREEN}[prep chain] DONE — 위 chain 출력의 artifact 경로 / next-steps 참고{RESET}")
             return
 
         if ans == "2":

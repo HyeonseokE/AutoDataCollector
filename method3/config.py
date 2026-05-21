@@ -126,6 +126,9 @@ def load_phase2_config(
         min_covered_windows=int(mi.get("min_covered_windows", 1)),
         debug_verbose=bool(mi.get("debug_verbose", False)),
         use_dct_target=use_dct_target,
+        arm_dof=mi.get("arm_dof", 5),
+        full_dof=mi.get("full_dof", 6),
+        dct_L0=int(mi.get("dct_L0", 50)),
     )
 
     re = raw.get("reembedding") or {}

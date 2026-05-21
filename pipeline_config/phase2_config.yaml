@@ -18,7 +18,7 @@ skill_planner_transport:
   mode: local                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "CoRL2026-CSI/smol_phase1_pnp_30" # local path | hf repo
+phase1_trained_vla_path: "/home/lerobot/AutoDataCollector/lerobot/outputs/train/smolvla_dct_20260521_155241/checkpoints/003750/pretrained_model"  # DCT-tuned ckpt
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
 # 2026-05-20: ws3 의 100 episode 확장에 맞춰 100용 dataset 으로 통일.
@@ -56,7 +56,7 @@ mi_selection:
   s_min_a: 0.001               # §9.3 local support scale floor
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
-  lambda: 1.0                  # §11 ΔH_A|S 가중
+  lambda: 3.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
   tau_MI: 0.0                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI (기본 0 = batch 평균 이상)
   # accept_threshold 는 tau_MI 의 deprecated alias (구 yaml 호환). tau_MI 가 우선이지만
   # accept_threshold 만 지정해도 자동 매핑된다.
@@ -68,14 +68,14 @@ mi_selection:
 # Phase1-trained VLA 의 R-stochastic denoising loss 로 model-side novelty 점수.
 # Useful-OOD rule (§13.2) 의 argmax 분기에서 우선순위를 결정한다.
 vla_informativeness:
-  enabled: false               # true 시 mi_selector.select() 에 scorer 주입
-  scorer_type: default         # "default" = LeRobotVLAInformativenessScorer (R-stochastic
+  enabled: true                # ← DCT paradigm 활성
+  scorer_type: dct             # ← "dct" — candidate.dct_target 으로 single-step denoise loss
                                # frame-level chunk denoise) | "dct" = DCT paradigm 의
                                # single-step DCT denoise (R=1). dct 모드는 phase1_trained_vla_path
                                # 가 DCT-tuned ckpt 여야 의미 있음 (method3/dct/skill_dct_dataset).
   R: 8                         # default 전용. §12.1 stochastic denoise eval 횟수.
   agg: mean                    # default 전용. trajectory-level aggregator: mean | max
-  sigma: null                  # dct 전용. null=policy 내부 schedule sample, float=명시 σ
+  sigma: 0.5                   # dct 전용. fixed σ → deterministic U_VLA (재현성). null=random.
   # 정책 체크포인트는 preselective_filter / re-embedding 의 phase1_trained_vla_path 와 공유.
 
 # =============================================================================
@@ -176,11 +176,11 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  use_dct_target: false           # method3 DCT paradigm — true 시 mi_selector 가
+  use_dct_target: true            # ← DCT paradigm — mi_selector 가
                                   # candidate.dct_target (skill-atomic (L0, dof)) 을
                                   # z-space 로 사용. vla_informativeness.scorer_type=dct
                                   # + phase1_trained_vla_path=DCT-tuned ckpt 와 함께.
-  skill_dct_parquet: null         # use_dct_target=true 시 P_phase1 build 의 sidecar
+  skill_dct_parquet: "/home/lerobot/AutoDataCollector/results/skill_dct/pnp_phase1_30_table2.parquet"  # P_phase1 build 의 sidecar
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
                                   # null + use_dct_target=true 면 build_or_load 가 에러.
 

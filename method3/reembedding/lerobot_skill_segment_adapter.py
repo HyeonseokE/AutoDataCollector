@@ -116,11 +116,16 @@ class LeRobotPhase1SkillSegmentAdapter:
         else:
             action = self._raw_actions[_fs2:_fe2].copy()
 
+        # instruction format SoT — 학습 / Phase2 inference 와 동일 분포.
+        from method3.dct.instruction_format import format_skill_instruction
+        _formatted_instr = format_skill_instruction(
+            str(seg.skill_type), str(seg.instruction),
+        )
         return RawDatasetEntry(
             episode_id=seg.episode_id,
             phase="phase1",
             skill_id=str(seg.skill_type),
-            instruction=str(seg.instruction),
+            instruction=_formatted_instr,
             subgoal=subgoal,
             time_index=int(seg.skill_index),
             observation_ref={

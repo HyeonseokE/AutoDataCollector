@@ -173,11 +173,16 @@ class LeRobotPhase1RawAdapter:
         instruction = self._extract_instruction(global_idx)
         subgoal = self._extract_subgoal(frame)
 
+        # instruction format SoT — 학습 / Phase2 inference 와 동일 분포.
+        from method3.dct.instruction_format import format_skill_instruction
+        _formatted_instr = format_skill_instruction(
+            str(skill_id), str(instruction),
+        )
         return RawDatasetEntry(
             episode_id=f"episode_{ep_idx + 1:02d}",
             phase="phase1",
             skill_id=str(skill_id),
-            instruction=str(instruction),
+            instruction=_formatted_instr,
             subgoal=subgoal,
             time_index=int(frame_in_ep),
             observation_ref={

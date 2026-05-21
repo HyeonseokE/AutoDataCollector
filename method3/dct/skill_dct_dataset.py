@@ -124,12 +124,13 @@ class SkillDCTDataset:
         item[self._action_key] = target
         # all-valid pad mask: DCT target 은 frame pad 없음.
         item[self._pad_key] = torch.zeros(target.shape[0], dtype=torch.bool)
-        # language 에 skill_type prefix.
+        # language 에 skill_type prefix — instruction_format helper SoT 통일.
+        from method3.dct.instruction_format import format_skill_instruction
         cur_task = item.get(self._task_key, "")
         if hasattr(cur_task, "item"):
             cur_task = cur_task.item()
-        item[self._task_key] = self._prefix_fmt.format(
-            skill_type=seg.skill_type, instruction=str(cur_task)
+        item[self._task_key] = format_skill_instruction(
+            seg.skill_type, str(cur_task), fmt=self._prefix_fmt,
         )
         # segment metadata (debug / sample logging 용).
         item["_skill_segment_meta"] = {

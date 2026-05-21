@@ -75,6 +75,7 @@ class GrpcPlannerClient:
         n: int,
         seed: int | None = None,
         rng: Any | None = None,  # accepted for signature parity; ignored
+        skill_id: str | None = None,  # ← caller 가 명시 전달 가능 (RecordingContext 의존 회피)
     ) -> list[_RemoteTrajectoryCandidate]:
         """Send context to server, receive ONE chosen trajectory.
 
@@ -91,18 +92,15 @@ class GrpcPlannerClient:
         except Exception:
             images = {}
 
-        # 현재 RecordingContext.skill_type 을 server 의 DB lookup key 로 사용.
-        # 미설정 시 self._skill_id (default "move_to") — 다만 DB 에 'move_to'
-        # 가 없으면 server-side score_one 가 cold-start path 로 빠져 모든 후보
-        # 가 under_covered=True + 모든 score 가 0 으로 줄어든다. P_phase1 의
-        # 실제 skill_id (gripper_close/open/move/move_and_*/move_free/move_initial)
-        # 와 일치시켜야 paradigm 정상 작동.
+        # skill_id 결정 — caller 명시 인자 > RecordingContext._current_skill_type
+        # > self._skill_id (default "move_to"). P_phase1 의 skill_id 와 일치해야
+        # cold-start 우회 (gripper_close/open/move/move_and_*/move_free/move_initial).
         try:
             from record_dataset.context import RecordingContext as _RC
             _runtime_skill = _RC._current_skill_type or ""
         except Exception:
             _runtime_skill = ""
-        effective_skill_id = _runtime_skill or self._skill_id
+        effective_skill_id = skill_id or _runtime_skill or self._skill_id
 
         try:
             resp = self._client.plan_and_select(

@@ -284,6 +284,7 @@ class CuroboBackend:
         n: int,
         seed: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
+        skill_id: Optional[str] = None,  # accepted for signature parity with GrpcPlannerClient; ignored locally
     ) -> list[TrajectoryCandidate]:
         """Plan N transit candidates. ``seed=int`` matches what skills_lerobot
         passes from production; tests may pass ``rng=`` directly.

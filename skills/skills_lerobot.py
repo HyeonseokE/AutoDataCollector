@@ -2302,13 +2302,14 @@ class LeRobotSkills:
                 and self._perturbation_rng is not None
                 and trajectory.ik_converged):
             seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
-            self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates})")
+            self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={skill_type_val})")
             try:
                 cands = self._skill_planner_client.plan_batch(
                     start_qpos=np.asarray(current_joints, dtype=float),
                     goal_qpos=np.asarray(goal_joint_rad, dtype=float),
                     n=self._skill_planner_n_candidates,
                     seed=seed,
+                    skill_id=skill_type_val,
                 )
                 self._log(f"  [Skill Perturbation] plan_batch DONE — {len(cands)} candidates received")
             except Exception as e:

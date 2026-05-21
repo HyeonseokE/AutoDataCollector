@@ -60,7 +60,11 @@ if [ ! -d "$SESSION_DIR" ]; then err "session dir not found: $SESSION_DIR"; exit
 
 # dataset basename (e.g., CoRL2026-CSI/pnp_ours_100_table1 → pnp_ours_100_table1)
 DATASET_BASENAME="$(echo "$DATASET" | awk -F/ '{print $NF}')"
-SKILL_DCT_PARQUET="results/skill_dct/${DATASET_BASENAME}.parquet"
+# absolute path — train_smolvla.sh 가 cwd 를 lerobot/ 로 변경하므로
+# relative path 는 resolve 실패. session-dir 도 동일.
+SKILL_DCT_PARQUET="$PROJ_ROOT/results/skill_dct/${DATASET_BASENAME}.parquet"
+SESSION_DIR_ABS="$(cd "$SESSION_DIR" && pwd)"
+SESSION_DIR="$SESSION_DIR_ABS"
 
 bold "Phase2 prep chain"
 info "dataset      : $DATASET"
@@ -118,12 +122,12 @@ else
         _train_envs+=("STEPS=$STEPS_OVERRIDE")
     fi
 
-    # exec via env so caller's env 와 분리. lerobot 의 train_smolvla.sh 가
+    # train_DCT_smolvla.sh — DCT paradigm 전용 (일반 train_smolvla.sh 와 분리됨).
     # 자체 conda activate 라 PYTHONPATH 등 다시 잡힘 — 안전.
-    if env "${_train_envs[@]}" bash lerobot/scripts/train_smolvla.sh; then
+    if env "${_train_envs[@]}" bash lerobot/scripts/train_DCT_smolvla.sh; then
         green "Step 2 done — training complete"
     else
-        err "Step 2 failed (train_smolvla)"
+        err "Step 2 failed (train_DCT_smolvla)"
         exit 1
     fi
 

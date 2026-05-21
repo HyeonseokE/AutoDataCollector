@@ -159,6 +159,14 @@ class LeRobotVLAInformativenessScorer:
                 )
             z_cand = np.asarray(candidate.dct_target, dtype=np.float32)
             action_tensor = torch.from_numpy(z_cand).unsqueeze(0)  # (1, L0, dof)
+            # policy 의 device 로 맞춤 — batch 의 다른 tensor 들과 일관성 유지.
+            # mock policy (parameters() 미보유) 는 silent skip.
+            try:
+                _param = next(self.policy.parameters(), None)
+                if _param is not None:
+                    action_tensor = action_tensor.to(_param.device)
+            except (AttributeError, TypeError, StopIteration):
+                pass
             try:
                 from lerobot.constants import ACTION  # type: ignore
 

@@ -585,7 +585,7 @@ class MultiArmSkills:
 
         # ── 3. Gripper interpolation setup ──
         if open_gripper_during_move:
-            GRIPPER_MAX_RATIO = 0.30
+            GRIPPER_MAX_RATIO = 0.35
             left_gripper_start = la.current_gripper_pos
             left_gripper_end = la.gripper_close_pos + (la.gripper_open_pos - la.gripper_close_pos) * GRIPPER_MAX_RATIO
             right_gripper_start = ra.current_gripper_pos

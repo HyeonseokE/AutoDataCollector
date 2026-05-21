@@ -2259,7 +2259,7 @@ class LeRobotSkills:
             skill_type_val = "move_and_close"
             default_suffix = "and close gripper"
         elif gripper_action == "open":
-            GRIPPER_MAX_RATIO = 0.30  # same as gripper_open()
+            GRIPPER_MAX_RATIO = 0.35  # same as gripper_open()
             clamped_ratio = min(gripper_open_ratio, GRIPPER_MAX_RATIO)
             target_g = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
             gripper_start_value = self.current_gripper_pos
@@ -2682,7 +2682,7 @@ class LeRobotSkills:
             duration: Movement duration in seconds (default: 1.5)
             ratio: Open ratio (0.0 = closed, 1.0 = fully open, default: 1.0)
         """
-        GRIPPER_MAX_RATIO = 0.30
+        GRIPPER_MAX_RATIO = 0.35
         clamped_ratio = min(ratio, GRIPPER_MAX_RATIO)
         target_pos = self.gripper_close_pos + (self.gripper_open_pos - self.gripper_close_pos) * clamped_ratio
         current_arm_norm, current_arm_rad, _ = self._get_current_state()

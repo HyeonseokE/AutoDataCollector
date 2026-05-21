@@ -231,16 +231,23 @@ class ResetWorkspace(BaseWorkspace):
                 if not is_in_quadrant(cu, cv, resetspace):
                     continue
 
-                # FOV: center 는 edge margin 안쪽, bbox 는 이미지 안쪽이면 OK
+                # ── FOV check — TOGGLE between two policies ────────────────────
                 img_w, img_h = 640, 480
                 edge_margin = 30
                 hw, hh = obj_w // 2, obj_h // 2
-                if not (edge_margin <= cu < img_w - edge_margin
-                        and edge_margin <= cv < img_h - edge_margin):
+
+                # [ACTIVE] Old policy (pre-917c757): bbox 전체가 edge_margin 안쪽 강제 → 부피 침범 금지
+                if (cu - hw < edge_margin or cu + hw >= img_w - edge_margin or
+                    cv - hh < edge_margin or cv + hh >= img_h - edge_margin):
                     continue
-                if (cu - hw < 0 or cu + hw >= img_w
-                        or cv - hh < 0 or cv + hh >= img_h):
-                    continue
+
+                # [DISABLED] New policy (917c757+): center 안쪽 + bbox 는 이미지 안쪽만 OK → 부피 침범 허용
+                # if not (edge_margin <= cu < img_w - edge_margin
+                #         and edge_margin <= cv < img_h - edge_margin):
+                #     continue
+                # if (cu - hw < 0 or cu + hw >= img_w
+                #         or cv - hh < 0 or cv + hh >= img_h):
+                #     continue
             elif resetspace is not None and resetspace != "all":
                 # pix2robot 없으면 quadrant 체크 불가 → 스킵
                 continue
@@ -489,7 +496,7 @@ def generate_random_positions(
                     pix2robot = None
 
     # 장애물 리스트 (픽셀 bbox 기반)
-    # allow_overlap: True → IoU ≤ 0.7 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
+    # allow_overlap: True → IoU ≤ 0.5 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
     occupied = []
 
     # 1) Non-grippable 객체 (고정 장애물, 겹침 불허 + margin)
@@ -508,7 +515,7 @@ def generate_random_positions(
             "allow_overlap": False,  # 겹침 불허
         })
 
-    # 2) Grippable 객체의 현재 위치 (IoU ≤ 0.7 허용)
+    # 2) Grippable 객체의 현재 위치 (IoU ≤ 0.5 허용)
     for name, info in grippable_objects.items():
         if info is None:
             continue
@@ -521,10 +528,10 @@ def generate_random_positions(
             "center_px": center_px,
             "bbox_w": bbox_px[0],
             "bbox_h": bbox_px[1],
-            "allow_overlap": True,  # IoU ≤ 0.7 허용
+            "allow_overlap": True,  # IoU ≤ 0.5 허용
         })
 
-    # 3) 초기 위치 + 과거 시드 위치 (IoU ≤ 0.7 허용)
+    # 3) 초기 위치 + 과거 시드 위치 (IoU ≤ 0.5 허용)
     for name, info in initial_positions.items():
         if info is None:
             continue
@@ -538,7 +545,7 @@ def generate_random_positions(
             "center_px": center_px,
             "bbox_w": bbox_px[0],
             "bbox_h": bbox_px[1],
-            "allow_overlap": True,  # IoU ≤ 0.7 허용
+            "allow_overlap": True,  # IoU ≤ 0.5 허용
         })
 
     # 4) 현재 위치의 물체 (고정 장애물, 겹침 불허 + margin)

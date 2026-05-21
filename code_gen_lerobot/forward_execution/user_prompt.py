@@ -170,7 +170,7 @@ def lerobot_code_gen_prompt(
        # PICK pattern (approach WHILE opening gripper, then descend to pick):
        pick_obj = positions["object_name"]
        pick_pos = pick_obj["position"]
-       approach_height = 0.10
+       approach_height = 0.12
 
        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach object_name and open gripper", verification_question="Is the gripper above object_name and open?")
        skills.execute_pick_object(pick_pos, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped by the gripper?")
@@ -282,7 +282,7 @@ def execute_task():
     skills.connect()
 
     try:
-        approach_height = 0.10  # 10cm above objects
+        approach_height = 0.12  # 12cm above objects
 
         skills.move_to_initial_state()
 
@@ -322,7 +322,7 @@ if __name__ == "__main__":
 2. **Guidelines for Implementation:**
    - Always start with `move_to_initial_state()`. DO NOT call `gripper_open()` or `gripper_close()` right after — gripper transitions happen inside `move_to_position(...)` via `gripper_action`.
    - Always end with `move_to_free_state()`
-   - Use `approach_height = 0.10` (10cm) for approach/lift movements
+   - Use `approach_height = 0.12` (12cm) for approach/lift movements
    - **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object (the functions handle grasp offset internally)
    - Use `is_table=True` when placing on table, `is_table=False` when placing on another object
    - **Stacking**: When placing on a stack, compute the accumulated stack height. For the place position, use the stack location's XY and set z = sum of all stacked objects' heights (from their original detected positions). Example: to place C on top of A→B stack, use `[A_pos[0], A_pos[1], A_pos[2] + B_pos[2]]`.
@@ -442,7 +442,7 @@ positions = {{
 # START — always first. NOTE: DO NOT call gripper_open()/gripper_close() right after
 # move_to_initial_state(). Gripper transitions are integrated into move_to_position
 # via gripper_action="open"/"close".
-approach_height = 0.10
+approach_height = 0.12
 skills.move_to_initial_state()
 
 # PICK — approach opens gripper during the motion (starts at 30% of motion)
@@ -518,12 +518,13 @@ if __name__ == "__main__":
 **Guidelines**:
 1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
    - **DO NOT** call `gripper_open()` / `gripper_close()` right after `move_to_initial_state()`. Gripper transitions are integrated into `move_to_position(..., gripper_action=...)`.
-2. `approach_height = 0.10` (10cm) for all approach/lift.
+2. `approach_height = 0.12` (12cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
    - **CRITICAL**: This is a SINGLE-ARM robot. Do NOT pass `arm=`, `left_arm=`, `right_arm=` to any skill function. All functions operate on the single connected arm automatically.
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
+   - **CRITICAL (identical objects → SINGLE subtask)**: When the task involves visually identical objects being moved to similar-pattern targets (e.g., distributing N chocolate pies to N plates, stacking M identical blocks), wrap **ALL of them in ONE subtask** (e.g., `set_subtask("distribute all chocolate pies to plates")` → pick-place pie_1 → pick-place pie_2 → … → `clear_subtask()`). Do NOT call `set_subtask`/`clear_subtask` between identical-object pick-places. Use the **INITIAL** detection positions for every iteration — do NOT re-detect between them (VLM cannot distinguish identical objects and will swap labels, picking the just-placed one again). The single-subtask rule applies only to *identical* objects; when objects are *distinct* (e.g., red block + blue cube + green sphere) each gets its own subtask with re-detection in between.
 6. **Re-detection (MANDATORY between subtasks)**: BEFORE entering each subtask after the first, re-detect THAT subtask's pick AND place targets to refresh their positions. The previous subtask may have changed the scene in ways that affect the next target — opening a lid uncovers contents, settling shifts an object, lighting/shadow shifts after arm motion. Pattern:
    ```python
    skills.move_to_initial_state()  # clear arm from camera view first
@@ -658,7 +659,7 @@ Generate executable Python code to complete the following task using the robot.
 
 ```python
 # START — always first
-approach_height = 0.10
+approach_height = 0.12
 skills.move_to_initial_state(skill_description="Move to initial position", verification_question="Is the robot at initial position?")
 
 # PICK — approach opens gripper in-motion (start at 30% of approach)
@@ -736,37 +737,59 @@ skills.execute_pick_object(c_pos, object_name="C", skill_description="Pick C", v
 skills.execute_place_object(b_pos, is_table=False, gripper_open_ratio=0.7, target_name="B", skill_description="Place C on B", verification_question="Is C on B?")
 skills.clear_subtask()
 
-# DISTRIBUTE PATTERN (place each object onto a different target — e.g., distribute pies to plates)
-# Re-detect Subtask N+1's pick + place targets between subtasks (defensive against scene shifts).
+# DISTRIBUTE PATTERN — identical objects → SINGLE subtask, NO re-detection between them.
+# Example: distribute 2 visually identical chocolate pies (pie_1, pie_2) onto 2 plates (plate_1, plate_2).
+# Both pies look the same → VLM cannot reliably tell pie_1 from pie_2 after one has moved →
+# wrap all pies in ONE subtask, use INITIAL positions for every pie.
+#
+# ── PER-PnP PATTERN (6 steps, repeated for every object) ──────────────────────
+#   1. APPROACH (pick)  : move_to_position([obj_xy, h], gripper_action="open")    — above object
+#   2. PICK             : execute_pick_object(obj_pos)                            — descend + grasp
+#   3. LIFT             : move_to_position([obj_xy, h])                           — vertical lift back to carry height
+#   4. APPROACH (place) : move_to_position([target_xy, h])                        — translate to above target
+#   5. PLACE            : execute_place_object(target_pos)                        — descend + release
+#   6. RETREAT          : move_to_position([target_xy, h], gripper_action="close")— retreat + gripper close
+# The two APPROACH steps (1 and 4) are BOTH required — one above pick object, one above place target.
+# Do not skip step 4 (don't rely on execute_place_object's internal xy_lead_descent for cross-table transit).
+# ───────────────────────────────────────────────────────────────────────────────
 
-# Subtask 1
-skills.set_subtask("place A on plate_1")
-a_pos = positions["A"]["position"]
-plate1_pos = positions["plate_1"]["position"]
-skills.move_to_position([a_pos[0], a_pos[1], approach_height], target_name="A", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach A and open gripper", verification_question="Is gripper above A and open?")
-skills.execute_pick_object(a_pos, object_name="A", skill_description="Pick A", verification_question="Is A grasped?")
-skills.move_to_position([a_pos[0], a_pos[1], approach_height], target_name="A", skill_description="Lift A", verification_question="Is A lifted?")
-skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", skill_description="Move A above plate_1", verification_question="Is A above plate_1?")
-skills.execute_place_object(plate1_pos, is_table=True, gripper_open_ratio=0.7, target_name="plate_1", skill_description="Place A on plate_1", verification_question="Is A on plate_1?")
-skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="plate_1", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from plate_1 and close gripper", verification_question="Is gripper clear and closed?")
-skills.clear_subtask()
+skills.set_subtask("distribute all chocolate pies to plates")
 
-# Re-detect Subtask 2's targets — pick=B, place=plate_2.
-# detect_objects() merges into `positions` in-place; failed detections keep prev value.
-skills.move_to_initial_state()
-skills.detect_objects(["B", "plate_2"])
-b_pos = positions["B"]["position"]
-plate2_pos = positions["plate_2"]["position"]
+# ─── PnP 1: pie_1 → plate_1 (use initial detection) ───────────────────────────
+pie1_pos = positions["chocolate_pie_1"]["position"]
+plate1_pos = positions["red_plate_1"]["position"]
+# 1. APPROACH (pick)
+skills.move_to_position([pie1_pos[0], pie1_pos[1], approach_height], target_name="chocolate_pie_1", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach chocolate_pie_1 and open gripper", verification_question="Is gripper above chocolate_pie_1 and open?")
+# 2. PICK
+skills.execute_pick_object(pie1_pos, object_name="chocolate_pie_1", skill_description="Pick chocolate_pie_1", verification_question="Is chocolate_pie_1 grasped?")
+# 3. LIFT
+skills.move_to_position([pie1_pos[0], pie1_pos[1], approach_height], target_name="chocolate_pie_1", skill_description="Lift chocolate_pie_1", verification_question="Is chocolate_pie_1 lifted?")
+# 4. APPROACH (place)
+skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="red_plate_1", skill_description="Move chocolate_pie_1 above red_plate_1", verification_question="Is chocolate_pie_1 above red_plate_1?")
+# 5. PLACE
+skills.execute_place_object(plate1_pos, is_table=True, gripper_open_ratio=0.7, target_name="red_plate_1", skill_description="Place chocolate_pie_1 on red_plate_1", verification_question="Is chocolate_pie_1 on red_plate_1?")
+# 6. RETREAT
+skills.move_to_position([plate1_pos[0], plate1_pos[1], approach_height], target_name="red_plate_1", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from red_plate_1 and close gripper", verification_question="Is gripper clear and closed?")
 
-# Subtask 2
-skills.set_subtask("place B on plate_2")
-skills.move_to_position([b_pos[0], b_pos[1], approach_height], target_name="B", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach B and open gripper", verification_question="Is gripper above B and open?")
-skills.execute_pick_object(b_pos, object_name="B", skill_description="Pick B", verification_question="Is B grasped?")
-skills.move_to_position([b_pos[0], b_pos[1], approach_height], target_name="B", skill_description="Lift B", verification_question="Is B lifted?")
-skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="plate_2", skill_description="Move B above plate_2", verification_question="Is B above plate_2?")
-skills.execute_place_object(plate2_pos, is_table=True, gripper_open_ratio=0.7, target_name="plate_2", skill_description="Place B on plate_2", verification_question="Is B on plate_2?")
-skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="plate_2", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from plate_2 and close gripper", verification_question="Is gripper clear and closed?")
-skills.clear_subtask()
+# ─── PnP 2: pie_2 → plate_2 ───────────────────────────────────────────────────
+# Stay inside the SAME subtask: NO clear_subtask, NO set_subtask, NO detect_objects.
+# Reuse INITIAL positions for pie_2 / plate_2 (no re-detection — VLM swaps identical labels).
+pie2_pos = positions["chocolate_pie_2"]["position"]
+plate2_pos = positions["red_plate_2"]["position"]
+# 1. APPROACH (pick)
+skills.move_to_position([pie2_pos[0], pie2_pos[1], approach_height], target_name="chocolate_pie_2", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach chocolate_pie_2 and open gripper", verification_question="Is gripper above chocolate_pie_2 and open?")
+# 2. PICK
+skills.execute_pick_object(pie2_pos, object_name="chocolate_pie_2", skill_description="Pick chocolate_pie_2", verification_question="Is chocolate_pie_2 grasped?")
+# 3. LIFT
+skills.move_to_position([pie2_pos[0], pie2_pos[1], approach_height], target_name="chocolate_pie_2", skill_description="Lift chocolate_pie_2", verification_question="Is chocolate_pie_2 lifted?")
+# 4. APPROACH (place)
+skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="red_plate_2", skill_description="Move chocolate_pie_2 above red_plate_2", verification_question="Is chocolate_pie_2 above red_plate_2?")
+# 5. PLACE
+skills.execute_place_object(plate2_pos, is_table=True, gripper_open_ratio=0.7, target_name="red_plate_2", skill_description="Place chocolate_pie_2 on red_plate_2", verification_question="Is chocolate_pie_2 on red_plate_2?")
+# 6. RETREAT
+skills.move_to_position([plate2_pos[0], plate2_pos[1], approach_height], target_name="red_plate_2", gripper_action="close", gripper_start_fraction=0.7, skill_description="Retreat from red_plate_2 and close gripper", verification_question="Is gripper clear and closed?")
+
+skills.clear_subtask()  # close the SINGLE distribute subtask AFTER all pies are placed.
 
 # END — always last
 skills.move_to_initial_state()
@@ -792,12 +815,13 @@ if __name__ == "__main__":
 **Guidelines**:
 1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
    - **DO NOT** call `gripper_open()` / `gripper_close()` right after `move_to_initial_state()`. Gripper transitions are integrated into `move_to_position(..., gripper_action=...)`.
-2. `approach_height = 0.10` (10cm) for all approach/lift.
+2. `approach_height = 0.12` (12cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
    - **CRITICAL**: This is a SINGLE-ARM robot. Do NOT pass `arm=`, `left_arm=`, `right_arm=` to any skill function. All functions operate on the single connected arm automatically.
 4. `is_table=True` on table, `is_table=False` on another object.
 5. **Subtask pattern**: Wrap each logical unit of work with `set_subtask()` before and `clear_subtask()` after.
    - CRITICAL: At both `set_subtask()` and `clear_subtask()`, ALL grippers must be empty (no object held). A subtask boundary is defined by the gripper-empty condition. If an arm is holding an object, the subtask is not yet complete — do NOT call `clear_subtask()` until all grippers have released.
+   - **CRITICAL (identical objects → SINGLE subtask)**: When the task involves visually identical objects being moved to similar-pattern targets (e.g., distributing N chocolate pies to N plates, stacking M identical blocks), wrap **ALL of them in ONE subtask** (e.g., `set_subtask("distribute all chocolate pies to plates")` → pick-place pie_1 → pick-place pie_2 → … → `clear_subtask()`). Do NOT call `set_subtask`/`clear_subtask` between identical-object pick-places. Use the **INITIAL** detection positions for every iteration — do NOT re-detect between them (VLM cannot distinguish identical objects and will swap labels, picking the just-placed one again). The single-subtask rule applies only to *identical* objects; when objects are *distinct* (e.g., red block + blue cube + green sphere) each gets its own subtask with re-detection in between.
 6. **Re-detection (MANDATORY between subtasks)**: BEFORE entering each subtask after the first, re-detect THAT subtask's pick AND place targets to refresh their positions. The previous subtask may have changed the scene in ways that affect the next target — opening a lid uncovers contents, settling shifts an object, lighting/shadow shifts after arm motion. Pattern:
    ```python
    skills.move_to_initial_state()  # clear arm from camera view first

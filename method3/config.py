@@ -72,6 +72,14 @@ def load_phase2_config(
         radius_quantile=float(rd.get("radius_quantile", 0.7)),
     )
 
+    # selector.action_horizon 은 Phase1 re-embed (lerobot_adapter) 와 Phase2 candidate
+    # gen (curobo_candidate_gen) 의 *공통* H — yaml 의 단일 SoT (spec §7.3: H=50).
+    # 옛 키 ``selector.chunk_size`` 는 deprecated alias.
+    # selector.use_dct_target 은 method3 DCT paradigm 의 z-space 전환 flag.
+    sel = raw.get("selector") or {}
+    action_horizon = int(sel.get("action_horizon", sel.get("chunk_size", 50)))
+    use_dct_target = bool(sel.get("use_dct_target", False))
+
     mi = raw.get("mi_selection") or {}
     phase2_mi = Phase2MIConfig(
         dct_coeffs=dct,
@@ -91,13 +99,8 @@ def load_phase2_config(
         amb_agg=str(mi.get("amb_agg", "mean")),
         min_covered_windows=int(mi.get("min_covered_windows", 1)),
         debug_verbose=bool(mi.get("debug_verbose", False)),
+        use_dct_target=use_dct_target,
     )
-
-    # selector.action_horizon 은 Phase1 re-embed (lerobot_adapter) 와 Phase2 candidate
-    # gen (curobo_candidate_gen) 의 *공통* H — yaml 의 단일 SoT (spec §7.3: H=50).
-    # 옛 키 ``selector.chunk_size`` 는 deprecated alias.
-    sel = raw.get("selector") or {}
-    action_horizon = int(sel.get("action_horizon", sel.get("chunk_size", 50)))
 
     re = raw.get("reembedding") or {}
     _sg_r = re.get("subgoal_filter_radius_m")

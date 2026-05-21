@@ -68,9 +68,14 @@ mi_selection:
 # Phase1-trained VLA 의 R-stochastic denoising loss 로 model-side novelty 점수.
 # Useful-OOD rule (§13.2) 의 argmax 분기에서 우선순위를 결정한다.
 vla_informativeness:
-  enabled: false               # true 시 mi_selector.select() 에 LeRobotVLAInformativenessScorer 주입
-  R: 8                         # §12.1 stochastic denoise eval 횟수
-  agg: mean                    # trajectory-level aggregator: mean | max
+  enabled: false               # true 시 mi_selector.select() 에 scorer 주입
+  scorer_type: default         # "default" = LeRobotVLAInformativenessScorer (R-stochastic
+                               # frame-level chunk denoise) | "dct" = DCT paradigm 의
+                               # single-step DCT denoise (R=1). dct 모드는 phase1_trained_vla_path
+                               # 가 DCT-tuned ckpt 여야 의미 있음 (method3/dct/skill_dct_dataset).
+  R: 8                         # default 전용. §12.1 stochastic denoise eval 횟수.
+  agg: mean                    # default 전용. trajectory-level aggregator: mean | max
+  sigma: null                  # dct 전용. null=policy 내부 schedule sample, float=명시 σ
   # 정책 체크포인트는 preselective_filter / re-embedding 의 phase1_trained_vla_path 와 공유.
 
 # =============================================================================
@@ -171,6 +176,10 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
+  use_dct_target: false           # method3 DCT paradigm — true 시 mi_selector 가
+                                  # candidate.dct_target (skill-atomic (L0, dof)) 을
+                                  # z-space 로 사용. vla_informativeness.scorer_type=dct
+                                  # + phase1_trained_vla_path=DCT-tuned ckpt 와 함께.
 
 # --- server-local SkillVectorDB 영속화 ---
 # server 가 boot/restart 사이에도 buffer 를 유지하기 위한 sidecar npz.

@@ -23,7 +23,7 @@ sidecar parquet schema:
 """
 from __future__ import annotations
 
-import sys
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -69,46 +69,37 @@ def _run_length_segments(skill_types: list[str]) -> list[tuple[int, int, str]]:
     return out
 
 
-def _load_lerobot_dataset(dataset_path: str | Path):
-    """vendored lerobot 경로 셋업 후 LeRobotDataset 로드."""
-    _LEROBOT_PATH = Path(__file__).resolve().parent.parent.parent / "lerobot" / "src"
-    if str(_LEROBOT_PATH) not in sys.path:
-        sys.path.insert(0, str(_LEROBOT_PATH))
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-    repo_path = Path(dataset_path)
-    if repo_path.is_absolute() and repo_path.exists():
-        return LeRobotDataset(
-            repo_id=str(repo_path), root=str(repo_path), video_backend="pyav"
-        )
-    return LeRobotDataset(repo_id=str(dataset_path), video_backend="pyav")
-
-
 _SKILL_TYPE_KEYS = ("skill.type", "subtask.skill_type")
 
 
-def _pick_skill_type_key(features) -> str:
-    for k in _SKILL_TYPE_KEYS:
-        if k in features:
-            return k
-    raise RuntimeError(
-        f"No skill.type column in dataset features; tried {_SKILL_TYPE_KEYS}"
+def _resolve_dataset_root(path_or_repo_id: str | Path) -> Path:
+    """absolute path 또는 HF_LEROBOT_HOME / repo_id 로 dataset root 찾기.
+
+    LeRobot v3 dataset 의 local cache root (``data/`` 와 ``meta/`` 가 있는
+    디렉토리) 를 반환한다. lerobot import 없이 raw parquet 만 access 하는
+    경로용.
+    """
+    p = Path(path_or_repo_id)
+    if p.is_absolute() and (p / "meta").exists():
+        return p
+    home = Path(os.environ.get("HF_LEROBOT_HOME",
+                                "~/.cache/huggingface/lerobot")).expanduser()
+    candidate = home / str(path_or_repo_id)
+    if (candidate / "meta").exists():
+        return candidate
+    raise FileNotFoundError(
+        f"Cannot resolve LeRobot dataset root for '{path_or_repo_id}'. "
+        f"Tried '{p}' and '{candidate}'."
     )
 
 
-def _episode_rows(ep_meta):
-    """LeRobot v3 meta.episodes 의 row iterator (pandas / datasets / list 모두 지원)."""
-    if hasattr(ep_meta, "iterrows"):
-        return (row for _, row in ep_meta.iterrows())
-    if hasattr(ep_meta, "to_pandas"):
-        return (row for _, row in ep_meta.to_pandas().iterrows())
-    return iter(ep_meta)
-
-
-def _scalar(v):
-    if hasattr(v, "item"):
-        return v.item()
-    return v
+def _pick_skill_type_column(data_columns) -> str:
+    for k in _SKILL_TYPE_KEYS:
+        if k in data_columns:
+            return k
+    raise RuntimeError(
+        f"No skill.type column in data parquet; tried {_SKILL_TYPE_KEYS}"
+    )
 
 
 def iter_skill_segments(
@@ -116,39 +107,90 @@ def iter_skill_segments(
     *,
     L0: int = 50,
 ) -> Iterator[SkillSegment]:
-    """LeRobot v3 dataset → (episode, skill) 단위 iteration.
+    """LeRobot v3 dataset → (episode, skill) 단위 iteration (parquet 직접 access).
 
-    skill boundary 는 ``skill.type`` column 의 run-length encoding 으로 결정.
-    각 segment 의 action sequence → ``traj_to_dct`` → (L0, action_dim).
+    raw ``data/chunk-*/file-*.parquet`` 에서 action / skill.type 만 읽어
+    video decode 우회. 10분 → 수초.
 
     Args:
-        dataset_path: LeRobot dataset repo_id 또는 절대 경로.
+        dataset_path: LeRobot dataset repo_id (HF_LEROBOT_HOME 기준 resolve)
+            또는 절대 경로 (meta/, data/ 가 있는 디렉토리).
         L0: DCT 출력 차원 (default 50).
 
     Yields:
         ``SkillSegment``.
     """
-    ds = _load_lerobot_dataset(dataset_path)
-    skill_key = _pick_skill_type_key(ds.features)
+    import pyarrow as pa
+    import pyarrow.parquet as pq
 
-    for row in _episode_rows(ds.meta.episodes):
-        ei = int(row["episode_index"])
-        f0 = int(row["dataset_from_index"])
-        f1 = int(row["dataset_to_index"])
+    root = _resolve_dataset_root(dataset_path)
+
+    # 1. 모든 data parquet 을 한 번에 읽어 action / skill.type / task_index /
+    #    index (global frame) column 만 추출. video 컬럼은 데이터 parquet 에
+    #    없으니 자동으로 skip.
+    data_files = sorted((root / "data").rglob("*.parquet"))
+    if not data_files:
+        raise FileNotFoundError(f"No data parquet under {root}/data/")
+    schema_cols = pq.read_schema(data_files[0]).names
+    skill_col = _pick_skill_type_column(schema_cols)
+    needed = ["action", skill_col, "task_index", "index"]
+    if "skill.natural_language" in schema_cols:
+        needed.append("skill.natural_language")
+    tbl = pa.concat_tables([pq.read_table(f, columns=needed) for f in data_files])
+    tbl = tbl.sort_by("index")
+    actions = np.array(tbl["action"].to_pylist(), dtype=np.float64)
+    skill_types_all = [str(v) if v else "move" for v in tbl[skill_col].to_pylist()]
+    task_indices = tbl["task_index"].to_pylist()
+    skill_nl = (
+        tbl["skill.natural_language"].to_pylist()
+        if "skill.natural_language" in needed else None
+    )
+
+    # 2. tasks lookup (task_index → instruction string).
+    tasks_table = pq.read_table(root / "meta" / "tasks.parquet")
+    task_lookup: dict[int, str] = {}
+    for row in tasks_table.to_pylist():
+        ti = int(row.get("task_index", 0))
+        # column 이름 호환: "task" 또는 "tasks" (단수/복수).
+        s = row.get("task") or row.get("tasks") or ""
+        if isinstance(s, list):
+            s = s[0] if s else ""
+        task_lookup[ti] = str(s)
+
+    # 3. episode meta — episode_index / dataset_from_index / dataset_to_index.
+    ep_meta_files = sorted((root / "meta" / "episodes").rglob("*.parquet"))
+    if not ep_meta_files:
+        raise FileNotFoundError(f"No episode meta parquet under {root}/meta/episodes/")
+    episodes: list[dict] = []
+    for f in ep_meta_files:
+        episodes.extend(pq.read_table(
+            f, columns=["episode_index", "dataset_from_index", "dataset_to_index"]
+        ).to_pylist())
+    episodes.sort(key=lambda r: int(r["episode_index"]))
+
+    # 4. episode 별 skill boundary → DCT target.
+    for ep in episodes:
+        ei = int(ep["episode_index"])
+        f0 = int(ep["dataset_from_index"])
+        f1 = int(ep["dataset_to_index"])
         episode_id = f"episode_{ei + 1:02d}"
 
-        # episode 내 frame 별 skill.type 수집.
-        skill_types: list[str] = []
-        for f in range(f0, f1):
-            v = _scalar(ds[f][skill_key])
-            skill_types.append(str(v) if v else "move")
+        ep_skill = skill_types_all[f0:f1]
+        ep_actions = actions[f0:f1]
 
-        segments = _run_length_segments(skill_types)
-
+        segments = _run_length_segments(ep_skill)
         for skill_idx, (s, e, sk) in enumerate(segments):
-            actions = _collect_actions(ds, f0 + s, f0 + e)
-            instruction = _get_instruction(ds, f0 + s)
-            dct_target = traj_to_dct(actions, L0=L0)
+            seg_actions = ep_actions[s:e]
+            # instruction: skill.natural_language 가 있으면 segment 시작값,
+            # 없으면 task_index → task_lookup.
+            if skill_nl is not None:
+                v = skill_nl[f0 + s]
+                instruction = str(v) if v else ""
+            else:
+                ti = int(task_indices[f0 + s])
+                instruction = task_lookup.get(ti, "")
+
+            dct_target = traj_to_dct(seg_actions, L0=L0)
             yield SkillSegment(
                 episode_id=episode_id,
                 skill_index=skill_idx,
@@ -158,26 +200,6 @@ def iter_skill_segments(
                 frame_end=f0 + e,
                 dct_target=dct_target,
             )
-
-
-def _collect_actions(ds, f0: int, f1: int) -> np.ndarray:
-    """frame [f0, f1) 의 action 을 (T, action_dim) 으로 collect."""
-    out = []
-    for f in range(f0, f1):
-        a = ds[f]["action"]
-        if hasattr(a, "numpy"):
-            a = a.numpy()
-        out.append(np.asarray(a, dtype=np.float64).reshape(-1))
-    return np.stack(out)
-
-
-def _get_instruction(ds, global_idx: int) -> str:
-    frame = ds[global_idx]
-    if "task" in frame:
-        return str(_scalar(frame["task"]))
-    if "skill.natural_language" in frame:
-        return str(_scalar(frame["skill.natural_language"]))
-    return ""
 
 
 def build_dct_targets(

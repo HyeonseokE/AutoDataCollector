@@ -32,7 +32,16 @@ class SkillDCTDataset:
 
     Standard ``torch.utils.data.Dataset`` 프로토콜 (``__len__`` /
     ``__getitem__``) 을 따른다. lerobot 의 ``LeRobotDataset`` 가 아니므로
-    train script 측에서 dataset factory 분기 필요 (Phase 3 trainer 통합).
+    train script 측에서 dataset factory 분기 필요.
+
+    두 sample 단위 mode:
+      * ``frame_mode=False`` — 한 sample = 한 skill segment. obs 는 segment
+        시작 frame 1개. 학습 sample 수 = segment 수 (~297 for 30 episode).
+      * ``frame_mode=True`` (default) — 한 sample = 한 frame. obs 는 그
+        frame 의 raw obs, target 은 그 frame 이 속한 skill 의 DCT_50.
+        학습 sample 수 = 전체 frame 수 (~8700 for 30 episode). 같은 target
+        을 progress 가 다른 obs 에서 학습 → 자연스러운 progress-conditioned
+        augmentation 효과.
     """
 
     def __init__(
@@ -44,6 +53,7 @@ class SkillDCTDataset:
         task_key: str = "task",
         actions_pad_key: str = "actions_id_pad",
         skill_type_prefix_format: str = "{skill_type}: {instruction}",
+        frame_mode: bool = True,
     ) -> None:
         """
         Args:
@@ -56,6 +66,8 @@ class SkillDCTDataset:
             skill_type_prefix_format: language 에 skill_type 을 noisy
                 prefix 로 inject 하는 format string. ``{skill_type}`` 과
                 ``{instruction}`` 를 키로 받는다.
+            frame_mode: True 면 frame 단위 sample (default), False 면
+                segment 단위 sample. 자세한 의미는 class docstring 참고.
         """
         self.base = base_dataset
         self.segments: list[SkillSegment] = load_dct_targets(skill_dct_parquet)
@@ -63,6 +75,18 @@ class SkillDCTDataset:
         self._task_key = task_key
         self._pad_key = actions_pad_key
         self._prefix_fmt = skill_type_prefix_format
+        self._frame_mode = bool(frame_mode)
+        # frame_mode=True 일 때 lookup table: idx → (frame_idx, seg_idx).
+        # segment.frame_start ≤ frame_idx < segment.frame_end.
+        self._frame_to_seg: list[tuple[int, int]] | None
+        if self._frame_mode:
+            self._frame_to_seg = [
+                (f, seg_idx)
+                for seg_idx, seg in enumerate(self.segments)
+                for f in range(seg.frame_start, seg.frame_end)
+            ]
+        else:
+            self._frame_to_seg = None
 
     # ─────────────────────────────────────────────
     # base attribute 위임 — features, meta, delta_timestamps 등
@@ -73,11 +97,20 @@ class SkillDCTDataset:
         return getattr(self.base, name)
 
     def __len__(self) -> int:
+        if self._frame_to_seg is not None:
+            return len(self._frame_to_seg)
         return len(self.segments)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        seg = self.segments[idx]
-        item = self.base[seg.frame_start]
+        # frame_mode 분기 — frame 단위 / segment 단위.
+        if self._frame_to_seg is not None:
+            frame_idx, seg_idx = self._frame_to_seg[idx]
+            seg = self.segments[seg_idx]
+        else:
+            seg = self.segments[idx]
+            frame_idx = seg.frame_start
+
+        item = self.base[frame_idx]
         # action 자리에 DCT target 으로 교체 — shape (L0, action_dim).
         target = torch.as_tensor(seg.dct_target, dtype=torch.float32)
         item = dict(item)  # shallow copy — original 보호
@@ -98,5 +131,6 @@ class SkillDCTDataset:
             "skill_type": seg.skill_type,
             "frame_start": seg.frame_start,
             "frame_end": seg.frame_end,
+            "frame_idx": frame_idx,
         }
         return item

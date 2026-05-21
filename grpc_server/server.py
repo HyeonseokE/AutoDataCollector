@@ -178,8 +178,15 @@ class PreselectiveAcquirerServicer(
                 n=int(request.n_candidates),
                 seed=int(request.seed) if request.seed != 0 else None,
             )
+            try:
+                _img_info = {k: tuple(np.asarray(v).shape) for k, v in (raw_imgs or {}).items()}
+            except Exception:
+                _img_info = "<unparseable>"
             print(f"[server] plan_batch req n={request.n_candidates} seed={request.seed} "
                   f"is_transit={request.is_transit} skill_id={request.skill_id!r} "
+                  f"instr={str(request.instruction)[:40]!r} "
+                  f"images_pickle_bytes={len(request.images_pickle)} "
+                  f"raw_imgs={_img_info} "
                   f"→ curobo returned {len(cands)} cands", flush=True)
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)

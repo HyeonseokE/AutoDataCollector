@@ -759,8 +759,8 @@ class ForwardAndResetPipeline(BasePipeline):
             # 의 사고 패턴) 를 시작 시점에 경고한다. 워크플로 호환성 유지를 위해
             # 일단 WARN 으로만 노출 — 강제 abort 는 별도 flag 로 옵트인.
             if session_dir:
-                _sd = Path(session_dir)
-                _folder_ids = {p.name for p in _sd.glob("episode_*") if p.is_dir()}
+                # phase1/ phase2/ legacy 모두 — chain reorg 후 episode 위치 인식.
+                _folder_ids = {p.name for p in _iter_episode_dirs(session_dir)}
                 _buf_ids = {
                     str(e.episode_id)
                     for entries in selector.buffer._skills.values()
@@ -4568,15 +4568,20 @@ class ForwardAndResetPipeline(BasePipeline):
         batch_attempted = [False] * self.num_random_seeds
         seed_positions: List[Optional[Dict]] = [None] * self.num_random_seeds
 
+        # episode dir 은 chain reorg 후 phase1/ 하위에 있을 수 있다 (Step 0).
+        # legacy(session 직속) + phase1/ + phase2/ 를 모두 인식하도록 통합 검색.
+        _all_eps = {p.name: p for p in _iter_episode_dirs(session_dir)}
+
         # 1. first_episode_positions 복원 (ep_01 execution_context)
-        ctx_path = Path(session_dir) / "episode_01" / "forward" / "execution_context.json"
-        if ctx_path.exists():
+        _ep01 = _all_eps.get("episode_01")
+        ctx_path = (_ep01 / "forward" / "execution_context.json") if _ep01 else None
+        if ctx_path is not None and ctx_path.exists():
             with open(ctx_path) as f:
                 ctx = json.load(f)
             self.first_episode_positions = ctx.get("object_positions", {})
             seed_positions[0] = copy.deepcopy(self.first_episode_positions)
             # forward_initial_image_path 복원 (시각화용)
-            initial_img = Path(session_dir) / "episode_01" / "forward" / "initial_state.jpg"
+            initial_img = _ep01 / "forward" / "initial_state.jpg"
             if initial_img.exists():
                 self.forward_initial_image_path = str(initial_img)
             print(f"  [Resume] first_episode_positions restored from {ctx_path}")
@@ -4591,7 +4596,8 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"  [Resume] seed_{i+1} restored from {sp_path}")
 
         # 3. batch_info.json 기반으로 slot별 성공 여부 파악
-        for ep_dir in sorted(Path(session_dir).glob("episode_*")):
+        #    phase1/ phase2/ legacy 모두 순회 (chain reorg 후 phase1/ 하위).
+        for ep_dir in sorted(_iter_episode_dirs(session_dir), key=lambda p: p.name):
             batch_info_path = ep_dir / "batch_info.json"
             if not batch_info_path.exists():
                 continue
@@ -4610,7 +4616,7 @@ class ForwardAndResetPipeline(BasePipeline):
                     batch_slots[batch_idx][slot] = True
 
         # 4. cached_reset_code 복원 (이전 세션의 reset 코드를 찾아서 캐시)
-        for ep_dir in sorted(Path(session_dir).glob("episode_*"), reverse=True):
+        for ep_dir in sorted(_iter_episode_dirs(session_dir), key=lambda p: p.name, reverse=True):
             reset_code_path = ep_dir / "reset" / "generated_code.py"
             if reset_code_path.exists():
                 code = reset_code_path.read_text().strip()
@@ -4621,7 +4627,7 @@ class ForwardAndResetPipeline(BasePipeline):
                     break
 
         # 5. cached_forward_code 복원 (이전 세션의 forward 코드를 찾아서 캐시)
-        for ep_dir in sorted(Path(session_dir).glob("episode_*"), reverse=True):
+        for ep_dir in sorted(_iter_episode_dirs(session_dir), key=lambda p: p.name, reverse=True):
             fwd_code_path = ep_dir / "forward" / "generated_code.py"
             judge_path = ep_dir / "forward" / "judge_result.json"
             if fwd_code_path.exists() and judge_path.exists():

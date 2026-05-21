@@ -66,9 +66,12 @@ EXECUTE_RESET=true # Reset 실행 여부
 # Dataset Recording 설정
 RECORD_DATASET=true
 
-# 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION=""
-# RESUME_SESSION="./results/pnp_phase1_30_table2_ours"
+# 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기.
+# Phase2 cycle (PHASE="phase2") 은 *반드시* Phase1 session 을 이어받아야 한다 —
+# Phase2 episode 가 session/phase2/ 하위에 phase1 에 이어 쌓이고 phase1 의
+# seed_*_setup 을 재사용한다 (chain 이 episode_* → phase1/ 로 reorg 한 상태).
+RESUME_SESSION="./results/session_20260522_044832"
+# RESUME_SESSION=""  # ← Phase1 새 cycle 시작 시엔 비움
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

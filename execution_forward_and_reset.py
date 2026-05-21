@@ -5802,7 +5802,7 @@ def main():
     # ========================================================
     # Phase1 boundary check 가 ready 로 인해 일찍 종료된 경우에만 trigger.
     # 사용자가 Enter → scripts/phase2_prep_chain.sh 호출:
-    #   Step 1: skill_dct sidecar 생성
+    #   Step 1: skill segment DCT parquet 생성 (VLA 학습용 preprocessed data)
     #   Step 2: DCT-tuned VLA 학습
     #   Step 3: P_phase1 vector DB rebuild
     # Ctrl+C 또는 'n' → skip (그대로 종료).
@@ -5826,7 +5826,7 @@ def main():
             try:
                 _ans = input(
                     "  Enter   = run Phase2 prep chain "
-                    "(Step1: sidecar / Step2: VLA train / Step3: DB rebuild)\n"
+                    "(Step1: skill DCT parquet / Step2: VLA train / Step3: DB rebuild)\n"
                     "  n+Enter = skip (just exit)\n"
                     "  > "
                 ).strip().lower()

@@ -1,4 +1,4 @@
-"""CLI: LeRobot v3 Phase1 dataset → skill-unit DCT sidecar parquet.
+"""CLI: LeRobot v3 Phase1 dataset → skill segment DCT parquet (VLA 학습용).
 
 사용자 명시 paradigm step [1] 의 dataset 준비 단계.
 

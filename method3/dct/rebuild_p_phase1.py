@@ -90,7 +90,7 @@ def main() -> int:
             skill_dct_parquet=str(args.skill_dct_parquet),
         )
         print(f"[rebuild_p_phase1] DCT paradigm — L0={args.L0}, "
-              f"sidecar={args.skill_dct_parquet}")
+              f"skill_dct_parquet={args.skill_dct_parquet}")
 
     db = build_or_load_phase1_vector_db(
         session_dir,

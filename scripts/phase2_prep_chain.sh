@@ -60,19 +60,19 @@ if [ ! -d "$SESSION_DIR" ]; then err "session dir not found: $SESSION_DIR"; exit
 
 # dataset basename (e.g., CoRL2026-CSI/pnp_ours_100_table1 → pnp_ours_100_table1)
 DATASET_BASENAME="$(echo "$DATASET" | awk -F/ '{print $NF}')"
-SIDECAR="results/skill_dct/${DATASET_BASENAME}.parquet"
+SKILL_DCT_PARQUET="results/skill_dct/${DATASET_BASENAME}.parquet"
 
 bold "Phase2 prep chain"
 info "dataset      : $DATASET"
 info "session dir  : $SESSION_DIR"
-info "sidecar path : $SIDECAR"
+info "skill DCT parquet : $SKILL_DCT_PARQUET"
 
 # ============================================================
-# Step 1 — skill_dct sidecar parquet
+# Step 1 — skill segment DCT parquet (VLA 학습용 preprocessed dataset)
 # ============================================================
-bold "Step 1/3 — build skill_dct sidecar"
+bold "Step 1/3 — build skill segment DCT parquet"
 
-mkdir -p "$(dirname "$SIDECAR")"
+mkdir -p "$(dirname "$SKILL_DCT_PARQUET")"
 
 # conda env (lerobot_cap) — train script 와 동일.
 CONDA_ENV="${CONDA_ENV:-lerobot_cap}"
@@ -81,8 +81,8 @@ conda activate "$CONDA_ENV"
 
 if python -m method3.dct.build_skill_dct \
         --dataset "$DATASET" \
-        --out "$SIDECAR"; then
-    green "Step 1 done — sidecar at $SIDECAR"
+        --out "$SKILL_DCT_PARQUET"; then
+    green "Step 1 done — skill DCT parquet at $SKILL_DCT_PARQUET"
 else
     err "Step 1 failed (build_skill_dct)"
     exit 1
@@ -110,7 +110,7 @@ else
 
     _train_envs=(
         "DATASET_REPO_ID=$DATASET"
-        "SKILL_DCT_PARQUET=$SIDECAR"
+        "SKILL_DCT_PARQUET=$SKILL_DCT_PARQUET"
         "JOB_NAME=$TRAIN_JOB"
         "CONDA_ENV=lerobot_cap"
     )
@@ -149,7 +149,7 @@ if python -m method3.dct.rebuild_p_phase1 \
         --subdir dct \
         --vla-ckpt "$VLA_CKPT" \
         --dataset "$DATASET" \
-        --skill-dct-parquet "$SIDECAR"; then
+        --skill-dct-parquet "$SKILL_DCT_PARQUET"; then
     green "Step 3 done — DB at $SESSION_DIR/dct/skill_wise_vector_db.npz"
 else
     err "Step 3 failed (rebuild_p_phase1)"
@@ -162,6 +162,6 @@ green "  1. cp $SESSION_DIR/dct/skill_wise_vector_db.npz grpc_server/buffer/serv
 green "  2. edit pipeline_config/phase2_config.yaml:"
 green "       phase1_trained_vla_path: $VLA_CKPT"
 green "       phase1_dataset_path:     $DATASET"
-green "       selector.skill_dct_parquet: $SIDECAR"
+green "       selector.skill_dct_parquet: $SKILL_DCT_PARQUET"
 green "  3. restart server: bash grpc_server/launch_remote_server.sh"
 green "  4. set PHASE=phase2 in run_forward_and_reset_ws3.sh, run."

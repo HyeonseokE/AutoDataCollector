@@ -79,6 +79,9 @@ def load_phase2_config(
     sel = raw.get("selector") or {}
     action_horizon = int(sel.get("action_horizon", sel.get("chunk_size", 50)))
     use_dct_target = bool(sel.get("use_dct_target", False))
+    skill_dct_parquet = sel.get("skill_dct_parquet")
+    if skill_dct_parquet is not None:
+        skill_dct_parquet = str(skill_dct_parquet)
 
     mi = raw.get("mi_selection") or {}
     phase2_mi = Phase2MIConfig(
@@ -114,6 +117,8 @@ def load_phase2_config(
         subgoal_filter_min_keep=int(re.get("subgoal_filter_min_keep", 30)),
         decode_workers=int(re.get("decode_workers", 1)),
         action_horizon=action_horizon,
+        use_dct_target=use_dct_target,
+        skill_dct_parquet=skill_dct_parquet,
     )
 
     return Method3AcquisitionConfig(

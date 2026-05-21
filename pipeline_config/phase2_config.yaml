@@ -180,6 +180,9 @@ selector:
                                   # candidate.dct_target (skill-atomic (L0, dof)) 을
                                   # z-space 로 사용. vla_informativeness.scorer_type=dct
                                   # + phase1_trained_vla_path=DCT-tuned ckpt 와 함께.
+  skill_dct_parquet: null         # use_dct_target=true 시 P_phase1 build 의 sidecar
+                                  # parquet 경로. method3.dct.build_skill_dct 의 산물.
+                                  # null + use_dct_target=true 면 build_or_load 가 에러.
 
 # --- server-local SkillVectorDB 영속화 ---
 # server 가 boot/restart 사이에도 buffer 를 유지하기 위한 sidecar npz.

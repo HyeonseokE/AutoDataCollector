@@ -102,12 +102,24 @@ class GrpcPlannerClient:
             _runtime_skill = ""
         effective_skill_id = skill_id or _runtime_skill or self._skill_id
 
+        # *current robot state* (servo position 6-dim, range ±100) — DB build
+        # proprio (observation.state) 와 같은 unit. provider 가 노출하면 사용,
+        # 아니면 start_qpos (joint angles radians) 로 fallback (legacy).
+        _rs = None
+        try:
+            _rs = self._provider._latest_robot_state()
+        except Exception:
+            _rs = None
+        _state_arg = np.asarray(
+            _rs if _rs is not None else start_qpos, dtype=np.float32,
+        )
+
         try:
             resp = self._client.plan_and_select(
                 skill_id=effective_skill_id,
                 start_qpos=np.asarray(start_qpos, dtype=np.float32),
                 goal_qpos=np.asarray(goal_qpos, dtype=np.float32),
-                state=np.asarray(start_qpos, dtype=np.float32),
+                state=_state_arg,
                 images=images,
                 instruction=instruction,
                 n_candidates=int(n),

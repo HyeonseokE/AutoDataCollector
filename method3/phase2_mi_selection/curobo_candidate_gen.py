@@ -131,6 +131,7 @@ def candidates_from_trajectory_list(
     encoder: Optional[VLAStateEncoder],
     config: CurobogenConfig | None = None,
     batch_observations: Any = None,
+    robot_state: np.ndarray | None = None,
 ) -> list[Phase2Candidate]:
     """TrajectoryCandidate-list 를 Phase2Candidate-list 로 변환.
 
@@ -202,13 +203,31 @@ def candidates_from_trajectory_list(
         # 보고 (L0, dof) DCT 로 변환 (paradigm step [3]).
         dct_target = traj_to_dct(_wp_full, L0=cfg.dct_L0)
 
-        # state_keys[τ] = [e_vla; proprio[τ]] — DB build pattern 과 동일.
-        # e_vla 는 *request 단위 shared* (loop 밖에서 1회 forward).
+        # state_keys[τ] = [e_vla; proprio_for_key].
+        # *proprio_for_key 정책*:
+        #   - robot_state 가 주어지면 (server PlanAndSelect 가 client 의 servo
+        #     position 을 흘려 보낸 경우) *그 값* 을 모든 τ 에 공유. 이유:
+        #     candidate.proprios 는 curobo joint angles (radians) 인 반면 DB 의
+        #     proprio 는 lerobot dataset 의 observation.state (servo position,
+        #     6-dim, range ±100). *다른 unit*. unit 통일을 위해 candidate state_key
+        #     의 proprio slot 은 *현재 robot state (servo 6-dim)* 로 채운다.
+        #     - 결과: candidate별 proprio variation 없음 (모두 동일 robot state).
+        #       state_key 차이는 e_vla 차이만으로 (현재 obs 가 candidate별 공유라 사실상 0).
+        #       ΔH_A|S 의 covered 판정은 *DB cluster 와의 거리* 만 평가.
+        #   - robot_state=None 이면 backward compat (candidate.proprios 사용 — unit mismatch 가능).
         if _shared_e_vla is not None:
-            state_keys = np.stack([
-                np.concatenate([_shared_e_vla, proprios[tau]])
-                for tau in range(T)
-            ])
+            if robot_state is not None:
+                _rs = np.asarray(robot_state, dtype=np.float64).reshape(-1)
+                # arm_dof 와 dim 맞춤 (mi_selector 의 db_keys slicing 과 정합).
+                if cfg.dct_target_dof and _rs.shape[0] > cfg.dct_target_dof:
+                    _rs = _rs[: cfg.dct_target_dof]
+                _key_one = np.concatenate([_shared_e_vla, _rs])
+                state_keys = np.tile(_key_one, (T, 1))
+            else:
+                state_keys = np.stack([
+                    np.concatenate([_shared_e_vla, proprios[tau]])
+                    for tau in range(T)
+                ])
         else:
             state_keys = proprios.copy()
 

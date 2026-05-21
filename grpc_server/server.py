@@ -225,6 +225,10 @@ class PreselectiveAcquirerServicer(
                     instruction=instruction,
                     encoder=self.encoder,
                     config=self._candidate_cfg,
+                    # client 가 보낸 *current robot state* (servo position 6-dim).
+                    # candidate state_keys 의 proprio slot 으로 사용해 DB build pattern
+                    # (proprio = observation.state) 과 unit 통일.
+                    robot_state=np.asarray(state, dtype=np.float64),
                 )
                 if not p2_cands:
                     try:

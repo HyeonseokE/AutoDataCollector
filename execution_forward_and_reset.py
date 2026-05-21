@@ -1807,6 +1807,24 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception:
             return {}
 
+    def _latest_robot_state(self) -> "np.ndarray | None":
+        """Return current robot proprio (servo positions, normalize=True) — 6-dim.
+
+        Same space as lerobot dataset `observation.state` (range ±100). Used by
+        the gRPC planner adapter so the server's candidate state_keys align
+        unit-wise with the DB build proprio (Phase2 paradigm consistency).
+        Falls back to None if robot is not connected.
+        """
+        import numpy as _np
+        try:
+            sk = getattr(self, "_skills", None)
+            if sk is None or not getattr(sk, "robot", None):
+                return None
+            pos = sk.robot.read_positions(normalize=True)
+            return _np.asarray(pos, dtype=_np.float32)
+        except Exception:
+            return None
+
     def _start_demo_ingest_async(self) -> None:
         """Kick off demo ingestion in the background.
 

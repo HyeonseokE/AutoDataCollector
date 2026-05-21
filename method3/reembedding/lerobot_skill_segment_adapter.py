@@ -100,12 +100,21 @@ class LeRobotPhase1SkillSegmentAdapter:
 
     def get(self, idx: int) -> RawDatasetEntry:
         seg = self.segments[idx]
-        # segment 시작 frame 의 lerobot frame.
-        frame = self._base._dataset[seg.frame_start]
+        # segment 시작 frame 의 lerobot frame. *exclusive end 가 last frame+1 인
+        # segment* 에 대비, 데이터셋 길이로 clamp.
+        _ds_len = len(self._base._dataset)
+        _fs = min(int(seg.frame_start), _ds_len - 1)
+        frame = self._base._dataset[_fs]
         proprio = self._base._extract_proprio(frame)
         subgoal = self._base._extract_subgoal(frame)
         # action sequence (T_skill, dof) — bulk-read array 에서 slice.
-        action = self._raw_actions[seg.frame_start: seg.frame_end].copy()
+        # empty segment 대비 — frame_start == frame_end 면 last available action 1-row.
+        _fs2 = min(int(seg.frame_start), len(self._raw_actions) - 1)
+        _fe2 = min(int(seg.frame_end), len(self._raw_actions))
+        if _fe2 <= _fs2:
+            action = self._raw_actions[_fs2: _fs2 + 1].copy()  # length-1 fallback
+        else:
+            action = self._raw_actions[_fs2:_fe2].copy()
 
         return RawDatasetEntry(
             episode_id=seg.episode_id,

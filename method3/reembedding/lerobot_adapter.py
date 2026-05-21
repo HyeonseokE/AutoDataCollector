@@ -165,7 +165,7 @@ class LeRobotPhase1RawAdapter:
     def get(self, idx: int) -> RawDatasetEntry:
         """idx 의 entry 를 §3.1 RawDatasetEntry 로 반환."""
         global_idx, ep_idx, frame_in_ep = self._index[idx]
-        frame = self._dataset[global_idx]
+        global_idx = min(global_idx, len(self._dataset) - 1); frame = self._dataset[global_idx]
 
         proprio = self._extract_proprio(frame)
         action_chunk = self._extract_action_chunk(global_idx)
@@ -213,7 +213,7 @@ class LeRobotPhase1RawAdapter:
         받는다. LeRobot 은 CHW float [0,1] 로 주므로 변환한다.
         """
         global_idx = int(observation_ref["global_idx"])
-        frame = self._dataset[global_idx]
+        global_idx = min(global_idx, len(self._dataset) - 1); frame = self._dataset[global_idx]
         # 모든 image feature 를 raw 형식으로 변환해 dict 로 묶는다.
         out: dict[str, np.ndarray] = {}
         for feat in self._dataset.features:
@@ -266,7 +266,7 @@ class LeRobotPhase1RawAdapter:
 
     def _extract_instruction(self, global_idx: int) -> str:
         # tasks 는 episode-level. dataset[idx]["task"] 또는 meta.tasks 에서 조회.
-        frame = self._dataset[global_idx]
+        global_idx = min(global_idx, len(self._dataset) - 1); frame = self._dataset[global_idx]
         if "task" in frame:
             t = frame["task"]
             return str(t.item() if hasattr(t, "item") else t)

@@ -157,6 +157,25 @@ def candidates_from_trajectory_list(
     cfg = config or CurobogenConfig()
     g = np.asarray(seed_subgoal, dtype=np.float64).reshape(3)
 
+    # Hoist VLA backbone call — all candidates share the same observation+instruction.
+    # 1 backbone forward per request (not per candidate × per tau).
+    _shared_e_vla: np.ndarray | None = None
+    if encoder is not None and current_observation is not None:
+        try:
+            # zero_state 로 backbone forward 1회. DB build 와 동일한 pattern
+            # (server.py:396): VLAKeyExtractor.encode 가 _fuses_state=True 면
+            # state arg 무시; False 면 zero state 가 padding 역할.
+            _zero_state = np.zeros(cfg.dct_target_dof or 6, dtype=np.float64)
+            _shared_e_vla = np.asarray(
+                encoder.encode(current_observation, instruction, _zero_state),
+                dtype=np.float64,
+            ).reshape(-1)
+        except Exception as _e:
+            import traceback as _tb
+            print(f"  [curobo_candidate_gen] shared encoder.encode failed: {type(_e).__name__}: {_e}", flush=True)
+            _tb.print_exc()
+            _shared_e_vla = None
+
     out: list[Phase2Candidate] = []
     for traj in trajectories:
         wp = getattr(traj, "waypoints", None)
@@ -184,29 +203,14 @@ def candidates_from_trajectory_list(
         # 보고 (L0, dof) DCT 로 변환 (paradigm step [3]).
         dct_target = traj_to_dct(_wp_full, L0=cfg.dct_L0)
 
-        # state_keys = φ_VLA(o_τ, I, p_τ) — VLAKeyExtractor.encode 는 3-arg
-        # signature 이며 *이미 state 를 fused/concat 한 full FAISS key* 반환.
-        # 따라서 여기서 다시 proprio 를 concat 하면 차원 mismatch 가 생긴다.
-        # encoder 반환을 그대로 state_keys[τ] 로 사용한다.
-        # o_τ 는 모든 τ 에서 current_obs 공유 (no forward dynamics).
-        state_keys = None
-        if encoder is not None and current_observation is not None:
-            try:
-                _keys = []
-                for tau in range(T):
-                    k = np.asarray(
-                        encoder.encode(current_observation, instruction, proprios[tau]),
-                        dtype=np.float64,
-                    ).reshape(-1)
-                    _keys.append(k)
-                state_keys = np.stack(_keys)
-            except Exception as _e:
-                # encoder 실패 시 proprio 만으로 state_keys (degraded).
-                import traceback as _tb
-                print(f"  [curobo_candidate_gen] encoder.encode failed: {type(_e).__name__}: {_e}", flush=True)
-                _tb.print_exc()
-                state_keys = proprios.copy()
-        if state_keys is None:
+        # state_keys[τ] = [e_vla; proprio[τ]] — DB build pattern 과 동일.
+        # e_vla 는 *request 단위 shared* (loop 밖에서 1회 forward).
+        if _shared_e_vla is not None:
+            state_keys = np.stack([
+                np.concatenate([_shared_e_vla, proprios[tau]])
+                for tau in range(T)
+            ])
+        else:
             state_keys = proprios.copy()
 
         out.append(Phase2Candidate(

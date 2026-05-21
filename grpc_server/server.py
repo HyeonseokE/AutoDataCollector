@@ -238,6 +238,14 @@ class PreselectiveAcquirerServicer(
                     # (proprio = observation.state) 과 unit 통일.
                     robot_state=np.asarray(state, dtype=np.float64),
                 )
+                if p2_cands:
+                    _c0 = p2_cands[0]
+                    print(f"[debug] cand#0 state_keys={_c0.state_keys.shape} "
+                          f"action_chunks={_c0.action_chunks.shape} "
+                          f"dct_target={_c0.dct_target.shape if _c0.dct_target is not None else None} "
+                          f"proprios={_c0.proprios.shape if _c0.proprios is not None else None} "
+                          f"wp[0]={getattr(cands[0],'waypoints',np.array([0])).shape} "
+                          f"robot_state(arg)={np.asarray(state).shape}", flush=True)
                 if not p2_cands:
                     try:
                         _wp0 = getattr(cands[0], "waypoints", None)

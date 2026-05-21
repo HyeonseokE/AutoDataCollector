@@ -14,9 +14,15 @@ from method3_integration.phase1_readiness_hook import (
     Phase1ReadinessHookConfig,
     measure_phase1_readiness_loo,
 )
+from method3_integration.phase2_gain_estimator import (
+    GainEstimatorConfig,
+    estimate_phase2_gain,
+)
 
 __all__ = [
     "Phase1ReadinessHook",
     "Phase1ReadinessHookConfig",
     "measure_phase1_readiness_loo",
+    "GainEstimatorConfig",
+    "estimate_phase2_gain",
 ]

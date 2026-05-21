@@ -130,9 +130,23 @@ class Phase1SubgoalSelector:
         # 판정 시에만 buffer 에 commit 된다 (flush_episode).
         self._pending: list[_PendingMove] = []
 
-    def _dbg(self, msg: str) -> None:
-        """debug_verbose 가 켜져 있으면 디버그 로그를 터미널에 출력."""
-        if self.cfg.debug_verbose:
+    # ANSI color — module-local literal to avoid NameError 위험. GREEN 으로
+    # 버퍼 카운트 변화 로그를 시각화 (사용자 요청).
+    _BUF_GREEN = "\033[92m"
+    _BUF_END = "\033[0m"
+
+    def _dbg(self, msg: str, *, buffer_event: bool = False) -> None:
+        """debug_verbose 가 켜져 있으면 디버그 로그를 터미널에 출력.
+
+        ``buffer_event=True`` 면 본문 전체를 GREEN 으로 감싼다 — staged/flush/
+        discard 같은 buffer 카운트 변화 로그를 한눈에 식별. 일반 debug 로그는
+        기본색 유지.
+        """
+        if not self.cfg.debug_verbose:
+            return
+        if buffer_event:
+            print(f"{self._BUF_GREEN}[Subgoal-Phase1][debug] {msg}{self._BUF_END}")
+        else:
             print(f"[Subgoal-Phase1][debug] {msg}")
 
     def _terminal_region(
@@ -452,7 +466,8 @@ class Phase1SubgoalSelector:
         ))
         if self.cfg.debug_verbose:
             self._dbg(
-                f"staged skill={skill_id} → episode pending={len(self._pending)}"
+                f"staged skill={skill_id} → episode pending={len(self._pending)}",
+                buffer_event=True,
             )
 
     def flush_episode(self, episode_id: str = "") -> None:
@@ -496,7 +511,8 @@ class Phase1SubgoalSelector:
             _persisted = f"saved → {_fp}" if _fp is not None else "MEMORY-ONLY (no buffer_file bound)"
             self._dbg(
                 f"flush episode (TRUE) → +{n} entries, "
-                f"buffer total={self.buffer.total_size()}, {_persisted}"
+                f"buffer total={self.buffer.total_size()}, {_persisted}",
+                buffer_event=True,
             )
 
     def discard_episode(self) -> None:
@@ -506,6 +522,7 @@ class Phase1SubgoalSelector:
         """
         if self._pending and self.cfg.debug_verbose:
             self._dbg(
-                f"discard episode → {len(self._pending)} staged subgoals dropped"
+                f"discard episode → {len(self._pending)} staged subgoals dropped",
+                buffer_event=True,
             )
         self._pending.clear()

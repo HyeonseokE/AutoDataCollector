@@ -687,10 +687,12 @@ class ForwardAndResetPipeline(BasePipeline):
                 r_path = Path(session_dir) / "readiness_trajectory.jsonl"
                 _hook.set_readiness_trace(r_path)
                 print(f"[method3:phase1] readiness trace → {r_path}")
+            # Buffer 카운트 로드 — GREEN (사용자 요청: buffer 변화 = 초록색).
+            # ANSI 를 inline 으로 직접 — 이 함수 스코프에 색 변수 미정의 → NameError 위험 회피.
             print(
-                f"[Perturbation] subgoal buffer file → {selector.buffer.file_path()} "
+                f"\033[92m[Perturbation] subgoal buffer file → {selector.buffer.file_path()} "
                 f"(preloaded {selector.buffer.total_size()} entries over "
-                f"{len(selector.buffer.skill_ids())} skills)"
+                f"{len(selector.buffer.skill_ids())} skills)\033[0m"
             )
             # Layout-consistency check — buffer 의 episode_id 가 현재 폴더
             # layout 과 어긋나면 stale entry 가 reconcile 에서 통째로 drop 된다.
@@ -708,17 +710,18 @@ class ForwardAndResetPipeline(BasePipeline):
                 }
                 _orphan = _buf_ids - _folder_ids
                 if _orphan:
+                    # GREEN — buffer 상태 (orphan entry 검출) 도 buffer 카테고리.
                     print(
-                        f"[Perturbation] WARN — buffer has {len(_orphan)} episode_id(s) "
+                        f"\033[92m[Perturbation] WARN — buffer has {len(_orphan)} episode_id(s) "
                         f"with no matching folder (stale layout?): "
-                        f"{sorted(_orphan)[:5]}{'...' if len(_orphan)>5 else ''}"
+                        f"{sorted(_orphan)[:5]}{'...' if len(_orphan)>5 else ''}\033[0m"
                     )
                     print(
-                        f"[Perturbation] WARN — likely cause: extension migration ran "
+                        f"\033[92m[Perturbation] WARN — likely cause: extension migration ran "
                         f"on folders but not on subgoal_buffer.npz. Run "
                         f"`scripts/migrate_session_episodes_per_seed.py --apply` (now "
                         f"handles buffer rewrite) to fix, or expect reconcile to drop "
-                        f"these entries on the next step."
+                        f"these entries on the next step.\033[0m"
                     )
 
             # resume reconcile — 삭제된 에피소드의 stale entry 를 정리한다.
@@ -729,15 +732,152 @@ class ForwardAndResetPipeline(BasePipeline):
             if _kept is not None:
                 from method3.episode_lifecycle import EpisodeReconciler, episode_id
                 _keep_ids = {episode_id(n) for n in _kept}
-                _result = EpisodeReconciler([selector.buffer]).retain_episodes(_keep_ids)
+
+                # ── Pre-reconcile breakdown ─────────────────────────────────
+                # buffer 안에 어떤 episode 의 entry 가 몇 개씩 있는지 미리
+                # 집계해서 drop 대상을 episode-by-episode 로 출력한다.
+                # _skills 는 dict[skill_id → list[Entry]]; entry.episode_id 로
+                # 그룹화. tagged("") entry 는 retain_episodes 의 안전장치로
+                # 보존되므로 drop 대상에서 제외한다.
+                _buf = selector.buffer
+                _before_total = _buf.total_size()
+                _to_drop: dict[str, dict[str, int]] = {}
+                _untagged_kept = 0
+                for _sid, _entries in _buf._skills.items():
+                    for _e in _entries:
+                        _eid = str(getattr(_e, "episode_id", ""))
+                        if not _eid:
+                            _untagged_kept += 1
+                            continue
+                        if _eid not in _keep_ids:
+                            _to_drop.setdefault(_eid, {})
+                            _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
+
+                # cleanup 로그 그룹과 시각적으로 묶기 위해 GREEN 으로 출력.
+                _GREEN = "\033[92m"
+                _RESET = "\033[0m"
+                if _to_drop:
+                    _n_eps = len(_to_drop)
+                    _total = sum(sum(d.values()) for d in _to_drop.values())
+                    print(
+                        f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
+                        f"to drop from subgoal_buffer ({_total} entries total):{_RESET}"
+                    )
+                    for _eid in sorted(_to_drop):
+                        _per_ep = sum(_to_drop[_eid].values())
+                        _bd = ", ".join(
+                            f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
+                        )
+                        print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
+                else:
+                    print(
+                        f"{_GREEN}[Perturbation] resume reconcile — no stale subgoal_buffer "
+                        f"entries to drop (kept {len(_keep_ids)} TRUE episodes){_RESET}"
+                    )
+
+                _result = EpisodeReconciler([_buf]).retain_episodes(_keep_ids)
                 _dropped = sum(_result.values())
                 print(
-                    f"[Perturbation] resume reconcile — kept {len(_keep_ids)} "
+                    f"{_GREEN}[Perturbation] resume reconcile DONE — kept {len(_keep_ids)} "
                     f"TRUE episodes, dropped {_dropped} stale buffer entries "
-                    f"(buffer now {selector.buffer.total_size()})"
+                    f"(buffer {_before_total} → {_buf.total_size()}; "
+                    f"{_untagged_kept} untagged preserved){_RESET}"
                 )
         except Exception as e:
             print(f"[Perturbation] subgoal buffer finalize skipped: {e}")
+
+    def _reconcile_subgoal_buffer_on_resume(self, session_dir: str | None) -> None:
+        """Resume 시 subgoal_buffer.npz 의 stale entry 를 정리한다 (selector-free).
+
+        `_finalize_subgoal_buffer` 의 reconcile 블록과 동일한 로직이지만,
+        `_subgoal_selector` 가 lazy init 라 cleanup 시점엔 아직 None 인 문제를
+        우회한다. SubgoalBuffer 인스턴스를 직접 만들어 .npz file 을 load 하고
+        keep_set 외 entry 를 제거 + save.
+
+        cleanup_dataset_for_resume 가 set 한 `_resume_kept_true_episodes` 를
+        keep_set 으로 쓴다. fresh run 또는 buffer file/keep_set 미설정이면 no-op.
+
+        호출 후 첫 episode 시점에 lazy selector init → buffer.load() 가 같은 파일을
+        다시 로드 → 이미 깨끗하므로 finalize 안의 두 번째 reconcile 은 0 drop 만
+        보고함. 그래서 호출 후 `_resume_kept_true_episodes = None` 으로 비워
+        finalize 의 reconcile 블록이 silent skip 되게 한다 (중복 로그 방지).
+        """
+        _kept = getattr(self, "_resume_kept_true_episodes", None)
+        if _kept is None:
+            return
+        buffer_file = getattr(self, "_subgoal_buffer_file", None)
+        if not buffer_file:
+            return
+        try:
+            from method3.phase1_state_seeding import SubgoalBuffer
+            from method3.episode_lifecycle import episode_id
+            bf_path = Path(buffer_file)
+            if not bf_path.is_absolute():
+                base = Path(session_dir) if session_dir else Path(".")
+                bf_path = base / bf_path
+            _GREEN = "\033[92m"
+            _YELLOW = "\033[93m"
+            _RESET = "\033[0m"
+            if not bf_path.exists():
+                print(
+                    f"{_YELLOW}[Perturbation] resume reconcile — "
+                    f"no buffer file at {bf_path} (nothing to reconcile){_RESET}"
+                )
+                self._resume_kept_true_episodes = None
+                return
+
+            buf = SubgoalBuffer()
+            buf.set_file(bf_path)
+            buf.load()
+            _before_total = buf.total_size()
+            _keep_ids = {episode_id(n) for n in _kept}
+
+            # Pre-reconcile breakdown
+            _to_drop: dict[str, dict[str, int]] = {}
+            _untagged_kept = 0
+            for _sid, _entries in buf._skills.items():
+                for _e in _entries:
+                    _eid = str(getattr(_e, "episode_id", ""))
+                    if not _eid:
+                        _untagged_kept += 1
+                        continue
+                    if _eid not in _keep_ids:
+                        _to_drop.setdefault(_eid, {})
+                        _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
+
+            if _to_drop:
+                _n_eps = len(_to_drop)
+                _total = sum(sum(d.values()) for d in _to_drop.values())
+                print(
+                    f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
+                    f"to drop from subgoal_buffer ({_total} entries total):{_RESET}"
+                )
+                for _eid in sorted(_to_drop):
+                    _per_ep = sum(_to_drop[_eid].values())
+                    _bd = ", ".join(
+                        f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
+                    )
+                    print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
+            else:
+                print(
+                    f"{_GREEN}[Perturbation] resume reconcile — no stale subgoal_buffer "
+                    f"entries to drop ({_before_total} entries; kept {len(_keep_ids)} "
+                    f"TRUE episodes){_RESET}"
+                )
+
+            _removed = buf.retain_episodes(_keep_ids)  # auto save()
+            print(
+                f"{_GREEN}[Perturbation] resume reconcile DONE — kept {len(_keep_ids)} "
+                f"TRUE episodes, dropped {_removed} stale buffer entries "
+                f"(buffer {_before_total} → {buf.total_size()}; "
+                f"{_untagged_kept} untagged preserved){_RESET}"
+            )
+
+            # 중복 호출 방지 — finalize 의 reconcile 블록이 None 보고 skip.
+            self._resume_kept_true_episodes = None
+        except Exception as e:
+            print(f"[Perturbation] resume reconcile skipped: {e}")
+            import traceback; traceback.print_exc()
 
     def _load_phase2_runtime_paths(self) -> tuple[str | None, str | None]:
         """phase2_config.yaml 에서 ``phase1_trained_vla_path`` / ``phase1_dataset_path``
@@ -3292,12 +3432,15 @@ class ForwardAndResetPipeline(BasePipeline):
                         if new_target is not None:
                             reset_original_positions = new_target
                             target_positions = new_target
+                            # NOTE: 이 함수 스코프엔 CYAN/RESET 만 정의돼 있음 (line 2577~).
+                            # DIM 등 추가 상수는 정의 안 돼 있어 hardcoded ANSI 사용.
+                            _DIM = "\033[2m"
                             print(f"\n  {CYAN}[Reset target UPDATED by pre_reset_callback]{RESET}")
                             for _name, _info in new_target.items():
                                 _pos = _info.get("position") if isinstance(_info, dict) else _info
                                 if _pos and len(_pos) >= 3:
                                     print(f"    {_name}: [{_pos[0]:.4f}, {_pos[1]:.4f}, {_pos[2]:.4f}]"
-                                          f"  {DIM}(actual reset 목적지){RESET}")
+                                          f"  {_DIM}(actual reset 목적지){RESET}")
 
                     result['reset']['current_positions'] = current_positions
                     result['reset']['target_positions'] = target_positions
@@ -3884,6 +4027,30 @@ class ForwardAndResetPipeline(BasePipeline):
 
         save_dir = str(Path(session_dir) / f"seed_{seed_index+1:02d}_setup")
         Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+        # ── User-provided seed 우선 ──────────────────────────────────────────
+        # seed_NN_setup/seed_positions.json 이 이미 존재하면 그것을 그대로 사용
+        # (수동 편집 또는 이전 run 에서 복사한 시드). random 자동생성 skip.
+        # resume 경로(line 4292-4299)와 동일한 파일 포맷을 공유.
+        GREEN = "\033[92m"
+        YELLOW = "\033[93m"
+        RESET = "\033[0m"
+        existing_path = Path(save_dir) / "seed_positions.json"
+        if existing_path.exists():
+            try:
+                with open(existing_path) as f:
+                    payload = json.load(f)
+                user_positions = payload.get("positions")
+                if user_positions:
+                    print(f"  {GREEN}[SeedGen] User-provided seed found: {existing_path}{RESET}")
+                    print(f"  [SeedGen] Skipping random generation, using provided positions")
+                    for _name, _info in user_positions.items():
+                        _pos = _info.get("position") if isinstance(_info, dict) else _info
+                        if _pos and len(_pos) >= 3:
+                            print(f"    {_name}: [{_pos[0]:.4f}, {_pos[1]:.4f}, {_pos[2]:.4f}]")
+                    return user_positions
+            except Exception as e:
+                print(f"  {YELLOW}[SeedGen] Failed to load {existing_path}: {e}; falling back to random gen{RESET}")
 
         grippable, obstacles = classify_objects(self.first_episode_positions)
 
@@ -4918,10 +5085,15 @@ class ForwardAndResetPipeline(BasePipeline):
         # can bind the .npz buffer once the selector is lazily created (picks
         # up the buffer persisted by the earlier run on resume).
         self._session_dir = session_dir
-        self._finalize_subgoal_buffer(session_dir)
         self._setup_phase2_session(session_dir)
         # Method3 Stage 1 — readiness hook on resume too (same opt-in via yaml).
+        # NOTE: hook must be created BEFORE _finalize_subgoal_buffer so the
+        # finalize can bind readiness_trajectory.jsonl to it.
         self._setup_phase1_readiness_hook()
+        # _finalize_subgoal_buffer 호출은 cleanup_dataset_for_resume 직후로
+        # 옮겼다 — finalize 안의 resume reconcile 이 `_resume_kept_true_episodes`
+        # 를 보고 동작하는데, 그 값은 cleanup 이 set 한다. 순서를 반대로 하면
+        # reconcile 이 항상 None 을 보고 skip 되어 stale buffer entry 가 남는다.
         batch_slots, seed_positions, batch_attempted = self._load_resume_state(session_dir)
 
         # 헤더 출력
@@ -4947,9 +5119,11 @@ class ForwardAndResetPipeline(BasePipeline):
                         session_dir=session_dir,
                         repo_id=self.dataset_repo_id,
                     )
-                    print(f"\n[Cleanup] Result: {cleanup_stats['dataset_episodes_before']} → {cleanup_stats['dataset_episodes_after']} episodes")
+                    # Dataset 카운트 변화 — BLUE (사용자 요청).
+                    # ANSI inline → NameError 위험 0.
+                    print(f"\n\033[94m[Cleanup] Result: {cleanup_stats['dataset_episodes_before']} → {cleanup_stats['dataset_episodes_after']} episodes\033[0m")
                     if cleanup_stats['deleted_indices']:
-                        print(f"[Cleanup] Deleted dataset indices: {cleanup_stats['deleted_indices']}")
+                        print(f"\033[94m[Cleanup] Deleted dataset indices: {cleanup_stats['deleted_indices']}\033[0m")
                     # episode lifecycle — 생존 에피소드 집합을 보관해 두면
                     # _finalize_subgoal_buffer 가 subgoal buffer 를 그 집합으로
                     # reconcile 한다 (삭제된 에피소드의 stale entry 제거).
@@ -4963,13 +5137,14 @@ class ForwardAndResetPipeline(BasePipeline):
                             session_dir=session_dir,
                             repo_id=self.dataset_repo_id + "_reset",
                         )
+                        # Dataset 카운트 변화 — BLUE (사용자 요청).
                         print(
-                            f"[Cleanup-Reset] Result: "
+                            f"\033[94m[Cleanup-Reset] Result: "
                             f"{reset_stats['dataset_episodes_before']} → "
-                            f"{reset_stats['dataset_episodes_after']} episodes")
+                            f"{reset_stats['dataset_episodes_after']} episodes\033[0m")
                         if reset_stats['deleted_indices']:
-                            print(f"[Cleanup-Reset] Deleted dataset indices: "
-                                  f"{reset_stats['deleted_indices']}")
+                            print(f"\033[94m[Cleanup-Reset] Deleted dataset indices: "
+                                  f"{reset_stats['deleted_indices']}\033[0m")
                     except Exception as e:
                         print(f"\n{YELLOW}[Cleanup-Reset] Warning: "
                               f"Reset dataset cleanup failed: {e}{RESET}")
@@ -4980,6 +5155,14 @@ class ForwardAndResetPipeline(BasePipeline):
 
             # cleanup 후 레코딩 초기화 (resume=True로 append 모드)
             self._init_recording()
+
+        # _subgoal_selector 는 _create_skills (lazy in _get_task_runner) 시점에
+        # 만들어지므로 cleanup 직후 _finalize_subgoal_buffer 를 호출해도 selector
+        # 가 아직 None → silent return → reconcile 로그 0개 였다. 사용자가
+        # cleanup 로그 옆에서 buffer 정리를 보고 싶어하므로, selector 없이도
+        # 동작하는 transient reconcile 을 직접 수행한다. 이후 첫 episode 시점에
+        # lazy selector init 가 같은 .npz 를 다시 load 하므로 정합성 OK.
+        self._reconcile_subgoal_buffer_on_resume(session_dir)
 
         # --------------------------------------------------------
         # 통합 에피소드 루프: 성공 slot 스킵, 실패/미시도 slot 실행

@@ -161,7 +161,7 @@ class ResetWorkspace(BaseWorkspace):
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
         max_attempts: int = 500,
-        max_iou: float = 0.7,
+        max_iou: float = 0.5,
         exclusion_zones: Optional[List[dict]] = None,
         resetspace: Optional[str] = None,
     ) -> Optional[List[float]]:
@@ -176,7 +176,7 @@ class ResetWorkspace(BaseWorkspace):
             obj_bbox_px: 이 객체의 bbox 픽셀 크기 (w_px, h_px). None이면 (30, 30) 사용.
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
-            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.7)
+            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.5)
             exclusion_zones: 제외 영역 리스트 (robot base_link frame).
                        [{"center": [x, y], "radius": float}, ...]
                        예: free state EE 주변 8cm 제외.

@@ -19,6 +19,22 @@ LEROBOT_PATH = Path(__file__).parent.parent / "lerobot" / "src"
 if str(LEROBOT_PATH) not in sys.path:
     sys.path.insert(0, str(LEROBOT_PATH))
 
+# Module-level ANSI color — dataset add/remove events 는 BLUE.
+# 모듈 top 에 정의해 함수 어디서든 NameError 없이 참조. 충돌 회피용 `_C_` prefix.
+_C_DS = "\033[94m"     # BLUE — dataset count change
+_C_END = "\033[0m"
+
+
+def _dprint(*args, sep: str = " ", end: str = "\n") -> None:
+    """Dataset-event 전용 print — 본문 전체를 BLUE 로 감싼다.
+
+    cleanup.py 의 모든 print 가 dataset add/remove/trim 이벤트라 일괄 BLUE.
+    multi-arg / multi-line concat 도 sep 으로 join 후 한 번에 색 입힘 — 색 코드가
+    중간에 끊겨 회색 공백이 보이는 일이 없다.
+    """
+    msg = sep.join(str(a) for a in args)
+    print(f"{_C_DS}{msg}{_C_END}", end=end)
+
 
 def cleanup_dataset_for_resume(
     session_dir: str,
@@ -74,6 +90,8 @@ def cleanup_dataset_for_resume(
     # idx 가 자동 정리되던 동작은 사라진다. 정상 워크플로우에선 batch_info.
     # judge="FALSE" 마킹으로 재취득을 표현하므로 영향 거의 없음. 그래도 폴더
     # 직접 삭제로 dataset 청소가 필요하면 별도 CLI 로 분리할 것.
+    # 폴더명 = execution / save 순서 (seed_major / round_robin 둘 다).
+    # sorted-by-name 순회 → dataset save 순서와 1:1 매칭.
     episode_dirs = sorted(session_path.glob("episode_*"))
     ep_states = []  # [(ep_num, state)]
     for ep_dir in episode_dirs:
@@ -105,21 +123,21 @@ def cleanup_dataset_for_resume(
 
     # 2. 데이터셋 존재 확인 및 열기
     if not dataset_path.exists():
-        print("[Cleanup] No dataset found, skipping")
+        _dprint("[Cleanup] No dataset found, skipping")
         return stats
 
     # 불완전 데이터셋 감지: meta/episodes/ parquet이 없으면 finalize() 미호출 상태
     # 전체 삭제 대신 finalize를 시도하여 기존 데이터 보존
     episodes_meta_dir = dataset_path / "meta" / "episodes"
     if dataset_path.exists() and not episodes_meta_dir.exists():
-        print(f"[Cleanup] Incomplete dataset detected (no meta/episodes/) — attempting recovery...")
+        _dprint(f"[Cleanup] Incomplete dataset detected (no meta/episodes/) — attempting recovery...")
         try:
             dataset = LeRobotDataset(repo_id=repo_id, root=dataset_path)
             dataset.meta._close_writer()  # flush metadata buffer → create meta/episodes/
             dataset._close_writer()
-            print(f"[Cleanup] Recovery successful: {dataset.meta.total_episodes} episodes recovered")
+            _dprint(f"[Cleanup] Recovery successful: {dataset.meta.total_episodes} episodes recovered")
         except Exception as e:
-            print(f"[Cleanup] Recovery failed ({e}) — removing dataset")
+            _dprint(f"[Cleanup] Recovery failed ({e}) — removing dataset")
             shutil.rmtree(dataset_path)
             return stats
 
@@ -128,7 +146,7 @@ def cleanup_dataset_for_resume(
         actual_dataset_episodes = dataset.meta.total_episodes
         stats["dataset_episodes_before"] = actual_dataset_episodes
     except Exception as e:
-        print(f"[Cleanup] Warning: Cannot open dataset, removing: {e}")
+        _dprint(f"[Cleanup] Warning: Cannot open dataset, removing: {e}")
         shutil.rmtree(dataset_path)
         return stats
 
@@ -138,11 +156,11 @@ def cleanup_dataset_for_resume(
     stats["dataset_episodes_after"] = actual_dataset_episodes
 
     if actual_dataset_episodes == 0:
-        print("[Cleanup] Dataset is empty, skipping")
+        _dprint("[Cleanup] Dataset is empty, skipping")
         return stats
 
     if not episode_dirs:
-        print("[Cleanup] No episodes found in session, skipping dataset trim")
+        _dprint("[Cleanup] No episodes found in session, skipping dataset trim")
         return stats
 
     # 3. dataset index 매핑
@@ -157,13 +175,13 @@ def cleanup_dataset_for_resume(
 
     # 할당 가능한 수가 실제 dataset 에피소드 수보다 적으면 → 데이터 불일치
     if len(could_be_in_dataset) < actual_dataset_episodes:
-        print(f"[Cleanup] Warning: dataset has {actual_dataset_episodes} episodes but "
+        _dprint(f"[Cleanup] Warning: dataset has {actual_dataset_episodes} episodes but "
               f"only {len(could_be_in_dataset)} non-FALSE pipeline episodes found")
         # 초과분은 뒤에서 자르기 (이전 불완전 resume 잔여물)
         excess_start = len(could_be_in_dataset)
         excess_indices = list(range(excess_start, actual_dataset_episodes))
         if excess_indices:
-            print(f"[Cleanup] Trimming {len(excess_indices)} excess episodes from dataset tail")
+            _dprint(f"[Cleanup] Trimming {len(excess_indices)} excess episodes from dataset tail")
 
     # 앞에서부터 actual_dataset_episodes개만 할당
     dataset_indices_to_delete = []
@@ -174,30 +192,30 @@ def cleanup_dataset_for_resume(
         if state == "missing":
             # 삭제된 에피소드 → 원래 TRUE였고 dataset에 기록됨 → 삭제 대상
             dataset_indices_to_delete.append(assigned)
-            print(f"  ep{ep_num:02d} (deleted folder) → dataset idx {assigned} → DELETE")
+            _dprint(f"  ep{ep_num:02d} (deleted folder) → dataset idx {assigned} → DELETE")
         else:
             # kept_true → 유지
-            print(f"  ep{ep_num:02d} (TRUE, kept)     → dataset idx {assigned} → keep")
+            _dprint(f"  ep{ep_num:02d} (TRUE, kept)     → dataset idx {assigned} → keep")
         assigned += 1
 
     # 초과분 처리 (dataset에 pipeline보다 많은 에피소드가 있는 경우)
     if actual_dataset_episodes > assigned:
         excess_indices = list(range(assigned, actual_dataset_episodes))
         dataset_indices_to_delete.extend(excess_indices)
-        print(f"[Cleanup] {len(excess_indices)} excess episodes at tail → DELETE (indices {excess_indices})")
+        _dprint(f"[Cleanup] {len(excess_indices)} excess episodes at tail → DELETE (indices {excess_indices})")
 
     stats["deleted_indices"] = sorted(dataset_indices_to_delete)
 
     if not dataset_indices_to_delete:
-        print(f"[Cleanup] Dataset is clean ({actual_dataset_episodes} episodes), no cleanup needed")
+        _dprint(f"[Cleanup] Dataset is clean ({actual_dataset_episodes} episodes), no cleanup needed")
         stats["dataset_episodes_after"] = actual_dataset_episodes
         return stats
 
-    print(f"[Cleanup] Deleting {len(dataset_indices_to_delete)} episodes from dataset: {dataset_indices_to_delete}")
+    _dprint(f"[Cleanup] Deleting {len(dataset_indices_to_delete)} episodes from dataset: {dataset_indices_to_delete}")
 
     # 4. 전부 삭제해야 하는 경우 → 데이터셋 디렉토리 자체 제거
     if len(dataset_indices_to_delete) >= actual_dataset_episodes:
-        print(f"[Cleanup] All episodes to be deleted, removing dataset entirely")
+        _dprint(f"[Cleanup] All episodes to be deleted, removing dataset entirely")
         del dataset
         shutil.rmtree(dataset_path)
         stats["dataset_episodes_after"] = 0
@@ -217,7 +235,7 @@ def cleanup_dataset_for_resume(
             repo_id=repo_id,
         )
         stats["dataset_episodes_after"] = new_dataset.meta.total_episodes
-        print(f"[Cleanup] New dataset: {new_dataset.meta.total_episodes} episodes")
+        _dprint(f"[Cleanup] New dataset: {new_dataset.meta.total_episodes} episodes")
 
         del dataset
         del new_dataset
@@ -231,10 +249,10 @@ def cleanup_dataset_for_resume(
         temp_dir.rename(dataset_path)
         shutil.rmtree(backup_dir)
 
-        print(f"[Cleanup] Dataset replaced successfully")
+        _dprint(f"[Cleanup] Dataset replaced successfully")
 
     except Exception as e:
-        print(f"[Cleanup] Error during cleanup: {e}")
+        _dprint(f"[Cleanup] Error during cleanup: {e}")
         import traceback
         traceback.print_exc()
         if temp_dir.exists():

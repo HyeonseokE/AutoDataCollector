@@ -4,10 +4,12 @@
 #   ./train_smolvla.sh                                    # 기본값으로 학습
 #   NUM_GPUS=4 ./train_smolvla.sh                         # 4 GPU DDP
 #   NUM_GPUS=2 MIXED_PRECISION=bf16 ./train_smolvla.sh    # bf16
-#   STEPS=1000 ./train_smolvla.sh                         # 환경변수 override
+#   EPOCHS=30 ./train_smolvla.sh                          # epoch 수 변경 (STEPS 자동계산)
+#   STEPS=1000 ./train_smolvla.sh                         # STEPS 직접 지정 시 epoch 계산 skip
 #   ./train_smolvla.sh --optimizer.lr=2e-4                # draccus 인자 직접
 #
 # effective batch = BATCH_SIZE × NUM_GPUS.
+# STEPS 미지정 시: dataset.total_frames 를 조회해 EPOCHS 만큼 환산.
 
 set -euo pipefail
 
@@ -30,26 +32,48 @@ export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 POLICY_TYPE="${POLICY_TYPE:-smolvla}"
 POLICY_PATH="${POLICY_PATH:-lerobot/smolvla_base}"   # "" 이면 from scratch
 POLICY_REPO_ID="${POLICY_REPO_ID:-}"                 # 값 있으면 push_to_hub=true
-DATASET_REPO_ID="${DATASET_REPO_ID:-skkuprism/test_pick_red_place_blue_50epi}"
+DATASET_REPO_ID="${DATASET_REPO_ID:-CoRL2026-CSI/distribute_phase1_20_table1}"
+DATASET_REVISION="${DATASET_REVISION:-v3.0}"         # HF tag/branch/commit
 JOB_NAME="${JOB_NAME:-smolvla_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/outputs/train/$JOB_NAME}"
 
-BATCH_SIZE="${BATCH_SIZE:-32}"
-# ≈ 50 epochs (dataset 49,571 frames / global batch 128 ≈ 400 step/epoch)
-STEPS="${STEPS:-20000}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+EPOCHS="${EPOCHS:-50}"                     # STEPS 미지정 시 epoch → step 환산용
 NUM_WORKERS="${NUM_WORKERS:-4}"
 SEED="${SEED:-1000}"
 DEVICE="${DEVICE:-cuda}"
 
-NUM_GPUS="${NUM_GPUS:-4}"
+NUM_GPUS="${NUM_GPUS:-1}"                  # 단일 GPU default (DDP off)
 MIXED_PRECISION="${MIXED_PRECISION:-no}"   # no | fp16 | bf16
 MASTER_PORT="${MASTER_PORT:-0}"            # 0 = auto
+
+EFFECTIVE_BS=$(( BATCH_SIZE * NUM_GPUS ))
+
+# -------- STEPS 자동계산 (EPOCHS → STEPS) --------
+# STEPS 가 직접 주어지면 그대로 사용. 아니면 dataset.total_frames 를 조회.
+if [ -z "${STEPS:-}" ]; then
+    echo "[INFO] Querying $DATASET_REPO_ID (revision=$DATASET_REVISION) for total_frames..."
+    DATASET_TOTAL_FRAMES=$(python - <<PY
+from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+meta = LeRobotDatasetMetadata("$DATASET_REPO_ID", revision="$DATASET_REVISION")
+print(meta.total_frames)
+PY
+)
+    if ! [[ "$DATASET_TOTAL_FRAMES" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Failed to fetch total_frames from $DATASET_REPO_ID @ $DATASET_REVISION" >&2
+        echo "       got: $DATASET_TOTAL_FRAMES" >&2
+        exit 1
+    fi
+    STEPS_PER_EPOCH=$(( (DATASET_TOTAL_FRAMES + EFFECTIVE_BS - 1) / EFFECTIVE_BS ))  # ceil
+    STEPS=$(( STEPS_PER_EPOCH * EPOCHS ))
+    echo "[INFO] total_frames=$DATASET_TOTAL_FRAMES  global_batch=$EFFECTIVE_BS  steps/epoch=$STEPS_PER_EPOCH  epochs=$EPOCHS  -> STEPS=$STEPS"
+fi
 
 SAVE_FREQ="${SAVE_FREQ:-50000}"
 LOG_FREQ="${LOG_FREQ:-100}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
 
-WANDB_ENABLE="${WANDB_ENABLE:-true}"
+WANDB_ENABLE="${WANDB_ENABLE:-false}"
 WANDB_PROJECT="${WANDB_PROJECT:-lerobot-smolvla}"
 
 # -------- 이미지 augmentation (각 transform 개별 on/off) --------
@@ -102,7 +126,6 @@ else
 fi
 
 # -------- 요약 출력 --------
-EFFECTIVE_BS=$(( BATCH_SIZE * NUM_GPUS ))
 if [ "$IMG_AUG" = "true" ]; then
     _aug_list=""
     [ "$IMG_AUG_BRIGHTNESS" = "1" ] && _aug_list+="brightness "
@@ -121,9 +144,9 @@ cat <<EOF
  env     : $CONDA_ENV ($(python --version 2>&1))
  lerobot : $REPO_DIR/src (PYTHONPATH)
  policy  : type=$POLICY_TYPE  path=${POLICY_PATH:-<scratch>}  hub=${POLICY_REPO_ID:-off}
- dataset : $DATASET_REPO_ID
+ dataset : $DATASET_REPO_ID @ $DATASET_REVISION
  output  : $OUTPUT_DIR
- train   : steps=$STEPS  batch=$BATCH_SIZE (global=$EFFECTIVE_BS)  workers=$NUM_WORKERS
+ train   : steps=$STEPS  epochs=$EPOCHS  batch=$BATCH_SIZE (global=$EFFECTIVE_BS)  workers=$NUM_WORKERS
  device  : $DEVICE  gpus=$NUM_GPUS  precision=$MIXED_PRECISION
  wandb   : $WANDB_ENABLE (project=$WANDB_PROJECT)
  rename  : ${POLICY_RENAME_MAP:-<none>}
@@ -137,6 +160,7 @@ TRAIN_ARGS=(
     "${POLICY_CLI_ARGS[@]}"
     --policy.device="$DEVICE"
     --dataset.repo_id="$DATASET_REPO_ID"
+    --dataset.revision="$DATASET_REVISION"
     --output_dir="$OUTPUT_DIR"
     --job_name="$JOB_NAME"
     --batch_size="$BATCH_SIZE"

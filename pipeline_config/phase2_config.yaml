@@ -15,7 +15,7 @@
 #   local    : 같은 프로세스의 CuroboBackend + method3 phase2 selector.
 #              (로컬 GPU 부족 시 비권장)
 skill_planner_transport:
-  mode: grpc                     # disabled | grpc | local
+  mode: local                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
 phase1_trained_vla_path: "CoRL2026-CSI/smol_phase1_pnp_30" # local path | hf repo

@@ -16,17 +16,13 @@ subgoal:
   enabled_forward: true        # forward execution 에서 Phase1 ON
   enabled_reset: false         # reset execution 에서는 OFF (forward-only)
 
-  # --- mode ---
-  #   buffer_aware = Phase1 buffer-aware subgoal scoring
-  mode: buffer_aware
-
   # --- 후보 생성 (§4.2) ---
+  # mode 는 항상 buffer_aware (자동). robot_origin 은 (0,0,0) 고정,
+  # max_resample 은 200 고정 — 모두 노출 제거 (이전 키들은 무시됨).
   n_candidates: 32             # K — subgoal 후보 수
   sigma: 0.05                  # 후보 분포 폭 (m)
   clip_factor: 1.0             # 후보 최대 반경 = clip_factor * sigma
-  candidate_dist: hemisphere     # uniform_ball | gaussian | hemisphere
-  robot_origin: [0.0, 0.0, 0.0]
-  max_resample: 200            # valid 후보 rejection 재샘플 상한
+  candidate_dist: hemisphere   # uniform_ball | gaussian | hemisphere
 
   # --- per-skill override (skill_id 별 다른 분포) ---
   # 항목이 없으면 위 전역 값을 그대로 사용. 지원 키: sigma / clip_factor / n_candidates.
@@ -69,11 +65,36 @@ subgoal:
 # 종료 규칙 (§15.3):
 #   stop ⇔ (ep ≥ B₁_min ∧ R_ready > τ_ready)  ∨  (ep ≥ B₁_max)
 readiness:
-  enabled: true              # opt-in. true 로 바꿔야 hook 활성.
-  phase1_min: 20              # B₁_min — 이 미만에선 측정 skip
-  phase1_max: 50              # B₁_max — 도달 시 readiness 무관 강제 종료
-  tau_ready: 0.7              # R_ready 임계값 [0,1]. 높을수록 더 모음.
+  enabled: true               # opt-in. true 로 바꿔야 hook 활성.
+  phase1_min: 30              # B₁_min — 이 미만에선 측정 skip
+  phase1_max: 60              # B₁_max — 도달 시 readiness 무관 강제 종료
+
+  # ── 1차 조건: state support 가 충분한가 ────────────────────────────────
+  # "지금까지 모은 buffer 가 Phase2 후보의 state space 를 잘 덮고 있나"
+  # leave-one-out self-coverage 로 계산하는 R_ready [0,1] 값과 비교.
+  state_ready_threshold: 0.7  # spec τ_ready. 높을수록 더 모음.
   k_min: 3                    # covered window 최소 neighbor 수 (§9.1)
   radius_k: 5                 # ρ_m (state-neighborhood radius) 계산용 kNN k
   radius_quantile: 0.7        # ρ_m quantile (§16)
   auto_stop_on_ready: true    # false → 측정·로그만, 종료는 안 함
+
+  # ── 2차 조건: Phase2 로 갈 가성비가 있는가 (budget_aware_..._rule.md §3/§5) ──
+  # "지금 Phase2 로 넘어가면 episode 하나당 얼마만큼 유용한 데이터를 얻을까"
+  # 를 surrogate G_bar_phase2 로 계산해서 임계값과 비교.
+  # AND 조건: stop ⇔ state_readiness ≥ 임계 ∧ phase2_gain ≥ 임계
+  #
+  # = 0 (기본 off) → gating disable, state_ready 만 보고 결정 (Stage 1 동작)
+  # > 0           → surrogate G_bar 계산 (Phase1 6D/3D space, VLA-free)
+  phase2_potential_gain_threshold: 0.25   # spec τ_gain. spec §3 기본값.
+  n_probes_per_skill: 8       # G_bar 계산용 probe 수 / skill
+  gain_beta: 1.0              # M_MI 의 ΔH_A (action novelty) 가중치 (§11)
+  gain_lambda: 1.0            # M_MI 의 ΔH_A|S (conditional ambiguity) 가중치 (§11)
+
+  # ── 시드 스케줄링 — round_robin 이 디폴트 (코드에 고정) ──────────────────
+  # 매 round 마다 seed0·1번 → seed1·1번 → … → seedN·1번 → seed0·2번 … 순환.
+  # 매 round 끝에 hook 체크 → early stop 도 균형 보존 + R_ready 측정 validity 유지.
+  # legacy seed_major 가 필요한 특수 경우만 `schedule_mode: seed_major` 명시.
+  #
+  # 시드당 minimum episodes 는 phase1_min 으로 *암묵적* 강제: hook 은 round 끝마다
+  # 만 호출되므로 첫 측정 시점에 모든 seed 가 ceil(phase1_min / num_seeds) 만큼
+  # 채워져 있음. 예: phase1_min=30, num_seeds=10 → 각 seed 3번씩 보장.

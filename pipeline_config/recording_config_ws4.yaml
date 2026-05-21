@@ -53,16 +53,16 @@ cameras:
       fps: 30
       fourcc: "MJPG"
 
-  # ## Right arm 카메라 (ROBOT_IDS[1]에 매핑)
-  right_arm:
-    - name: "wrist"
-      type: "opencv"
-      enabled: true
-      index_or_path: "/dev/video16"
-      width: 640
-      height: 480
-      fps: 30
-      fourcc: "MJPG"
+  # # ## Right arm 카메라 (ROBOT_IDS[1]에 매핑)
+  # right_arm:
+  #   - name: "wrist"
+  #     type: "opencv"
+  #     enabled: true
+  #     index_or_path: "/dev/video16"
+  #     width: 640
+  #     height: 480
+  #     fps: 30
+  #     fourcc: "MJPG"
 
 # =============================================================================
 # Skill Features Configuration

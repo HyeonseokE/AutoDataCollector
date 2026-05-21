@@ -107,6 +107,14 @@ class GrpcPlannerClient:
             print(f"  [Skill Perturbation] grpc plan_and_select failed: {e}")
             return []
 
+        # ANSI red — paradigm 의 selection 결과를 client 터미널에 즉시 출력.
+        _summary = _summarize_score_report(
+            resp.get("score_report_json", ""),
+            chosen_index=resp.get("chosen_index", -1),
+        )
+        _label = "used_fallback" if resp.get("used_fallback", False) else "accepted"
+        print(f"\033[91m[Phase2-Selection] {_label} | {_summary}\033[0m", flush=True)
+
         if resp.get("used_fallback", False):
             return []
 
@@ -121,6 +129,50 @@ class GrpcPlannerClient:
             cost=float(traj.get("cost", 0.0)),
             times=times if times.size else None,
         )]
+
+
+def _summarize_score_report(json_str: str, chosen_index: int = -1) -> str:
+    """server 의 score_report_json (Phase2ScoreReport list) → 한 줄 summary."""
+    if not json_str:
+        return "no report"
+    try:
+        import json as _json
+        reports = _json.loads(json_str)
+    except Exception as e:
+        return f"parse failed: {e}"
+    if not reports:
+        return "empty report"
+    n = len(reports)
+    under = sum(1 for r in reports if r.get("under_covered"))
+    def _mm(key):
+        xs = [float(r.get(key, 0.0)) for r in reports]
+        if not xs:
+            return (0.0, 0.0, 0.0)
+        return (min(xs), max(xs), sum(xs) / n)
+    dha_min, dha_max, dha_mean = _mm("delta_h_a")
+    dhas_min, dhas_max, dhas_mean = _mm("delta_h_a_given_s")
+    mn_min, mn_max, mn_mean = _mm("m_mi_norm")
+    m_min, m_max, m_mean = _mm("m_mi")
+    u_min, u_max, u_mean = _mm("u_vla")
+    chosen_str = ""
+    if chosen_index >= 0:
+        cr = next((r for r in reports if int(r.get("i", -1)) == int(chosen_index)), None)
+        if cr is not None:
+            chosen_str = (
+                f" | chosen #{chosen_index}: ΔH_A={cr.get('delta_h_a', 0):.3f} "
+                f"ΔH_A|S={cr.get('delta_h_a_given_s', 0):.3f} "
+                f"M_MI={cr.get('m_mi', 0):.3f} M̃_MI={cr.get('m_mi_norm', 0):+.3f} "
+                f"U_VLA={cr.get('u_vla', 0):.3f} under={cr.get('under_covered', False)}"
+            )
+    return (
+        f"K={n} under_covered={under}/{n} "
+        f"ΔH_A=[{dha_min:.3f},{dha_max:.3f},μ={dha_mean:.3f}] "
+        f"ΔH_A|S=[{dhas_min:.3f},{dhas_max:.3f},μ={dhas_mean:.3f}] "
+        f"M̃_MI=[{mn_min:+.3f},{mn_max:+.3f},μ={mn_mean:+.3f}] "
+        f"M_MI=[{m_min:.3f},{m_max:.3f},μ={m_mean:.3f}] "
+        f"U_VLA=[{u_min:.3f},{u_max:.3f},μ={u_mean:.3f}]"
+        f"{chosen_str}"
+    )
 
     # ------------------------------------------------------------------
     # update_scene — server-side curobo can also accept obstacle updates,

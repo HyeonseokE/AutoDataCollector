@@ -92,7 +92,12 @@ class PreselectiveClient:
         resp = self.stub.PlanAndSelect(req, timeout=self.timeout_s)
 
         if resp.used_fallback:
-            return {"used_fallback": True, "selection_id": ""}
+            return {
+                "used_fallback": True,
+                "selection_id": resp.selection_id or "",
+                "score_report_json": resp.score_report_json or "",
+                "chosen_index": int(resp.chosen_index),
+            }
 
         traj = decode_pickle(resp.chosen_trajectory_pickle)
         if resp.selection_id:

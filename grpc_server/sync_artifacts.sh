@@ -125,8 +125,14 @@ if [ "${REMOTE_USING_ALIAS:-0}" != "1" ]; then
     SSH_OPTS+=(-i "$REMOTE_IDENTITY")
   fi
 fi
-# rsync 가 -e 로 ssh 호출 시 같은 옵션
+# rsync 가 -e 로 ssh 호출 시 같은 옵션. rsync 부모 프로세스가 conda 의
+# LD_LIBRARY_PATH/LD_PRELOAD 를 ssh child 로 상속하면 OpenSSL ABI mismatch
+# (e.g., "Built against 30000020, you have 30600020") → rsync 자체를 env -u
+# 로 wrap 해 child ssh 도 system lib 사용하도록.
 RSYNC_SSH="$_SYS_SSH ${SSH_OPTS[*]}"
+do_rsync() {
+  env -u LD_LIBRARY_PATH -u LD_PRELOAD rsync "$@"
+}
 
 bold "Phase2 artifact sync (yaml-driven)"
 info "yaml          : $YAML"
@@ -164,10 +170,10 @@ sync_one() {
   }
   if [ -d "$local_path" ]; then
     info "$label DIR : $local_path → $REMOTE_TARGET:$remote_path/"
-    rsync -avP -e "$RSYNC_SSH" "$local_path/" "$REMOTE_TARGET:$remote_path/"
+    do_rsync -avP -e "$RSYNC_SSH" "$local_path/" "$REMOTE_TARGET:$remote_path/"
   else
     info "$label FILE: $local_path → $REMOTE_TARGET:$remote_path"
-    rsync -avP -e "$RSYNC_SSH" "$local_path" "$REMOTE_TARGET:$remote_path"
+    do_rsync -avP -e "$RSYNC_SSH" "$local_path" "$REMOTE_TARGET:$remote_path"
   fi
 }
 

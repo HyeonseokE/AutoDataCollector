@@ -28,6 +28,41 @@ import cv2
 import numpy as np
 from pathlib import Path
 from datetime import datetime
+
+
+# ============================================================
+# Phase-aware episode dir helpers (method3 paradigm — phase1/, phase2/ subdir).
+# ============================================================
+def _phase_subdir(method3_phase: str | None) -> str:
+    """Return ``"phase2"`` if phase=phase2 (chain 이후 reorg 된 session 의 새 episode
+    저장 위치). 그 외 (phase1 cycle 또는 미지정) 는 ``""`` (legacy episode_*/ 위치).
+
+    chain 진입 시 phase1_end_prompt 가 기존 episode_* → phase1/ 으로 mv 하므로
+    phase1 cycle 의 *추가* 데이터 수집 (resume / more) 은 *legacy 위치* 유지가
+    안전. phase2 cycle 시작 시 self.method3_phase=="phase2" → phase2/ subdir.
+    """
+    return "phase2" if str(method3_phase or "").lower() == "phase2" else ""
+
+
+def _episode_dir(session_dir: str | Path, episode_num: int, method3_phase: str | None) -> Path:
+    """Resolve episode artifact dir based on phase. phase2 → session/phase2/episode_*."""
+    sub = _phase_subdir(method3_phase)
+    base = Path(session_dir) / sub if sub else Path(session_dir)
+    return base / f"episode_{episode_num:02d}"
+
+
+def _iter_episode_dirs(session_dir: str | Path) -> list[Path]:
+    """Return all existing episode_*/ dirs across legacy + phase1/ + phase2/.
+
+    Used by resume mode (incomplete detection) and any analysis that must scan
+    *all* historical episodes regardless of reorg state.
+    """
+    sd = Path(session_dir)
+    out: list[Path] = []
+    out.extend(sorted(sd.glob("episode_*")))
+    out.extend(sorted(sd.glob("phase1/episode_*")))
+    out.extend(sorted(sd.glob("phase2/episode_*")))
+    return [p for p in out if p.is_dir()]
 from typing import Dict, List, Optional, Tuple
 
 
@@ -5049,7 +5084,8 @@ class ForwardAndResetPipeline(BasePipeline):
                   f"(Batch {batch_index+1}, Slot {slot})  ".center(70) + RESET)
             print(CYAN + "=" * 70 + RESET)
 
-            episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
+            episode_dir = str(_episode_dir(session_dir, episode_num, getattr(self, "method3_phase", None)))
+            Path(episode_dir).parent.mkdir(parents=True, exist_ok=True)
 
             # Reset target & next-seed handling.
             # round_robin: 매 episode 마다 next seed 가 cycle 로 바뀜 → pre_reset_cb 항상 set.
@@ -5286,7 +5322,8 @@ class ForwardAndResetPipeline(BasePipeline):
                     print(f"{RED}  → run_forward_and_reset.sh에서 NUM_EPISODES={orig_eps}, NUM_RANDOM_SEEDS={orig_seeds}로 맞춰주세요.{RESET}")
             else:
                 # session_config.json 없는 이전 세션: 실제 데이터에서 추정
-                actual_episodes = len(list(Path(session_dir).glob("episode_*")))
+                # phase1/, phase2/ subdir 인식 (chain 이후 reorg 된 session 포함)
+                actual_episodes = len(_iter_episode_dirs(session_dir))
                 if actual_episodes > num_episodes:
                     print(f"\n{RED}{BOLD}  [Config Mismatch] Session has {actual_episodes} episodes but NUM_EPISODES={num_episodes}, NUM_RANDOM_SEEDS={self.num_random_seeds}{RESET}")
                     print(f"{RED}  → run_forward_and_reset.sh의 NUM_EPISODES와 NUM_RANDOM_SEEDS를 원래 세션 설정으로 맞춰주세요.{RESET}")
@@ -5333,7 +5370,8 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(CYAN + BOLD + f"  [{episode_num:02d}/{num_episodes:02d}] Episode (Batch {batch_index+1}, Slot {slot})  ".center(70) + RESET)
                 print(CYAN + "=" * 70 + RESET)
 
-                episode_dir = str(Path(session_dir) / f"episode_{episode_num:02d}")
+                episode_dir = str(_episode_dir(session_dir, episode_num, getattr(self, "method3_phase", None)))
+                Path(episode_dir).parent.mkdir(parents=True, exist_ok=True)
 
                 # Reset target 결정: 배치 내 남은 미완료 slot이 있는지 확인
                 remaining_in_batch = [s for s in range(slot + 1, episodes_per_seed)
@@ -5798,14 +5836,11 @@ def main():
         )
 
     # ========================================================
-    # Phase1 early termination → prompt + Phase2 prep chain
+    # Phase1 early termination → 3-option prompt loop (chain / resume / more)
     # ========================================================
-    # Phase1 boundary check 가 ready 로 인해 일찍 종료된 경우에만 trigger.
-    # 사용자가 Enter → scripts/phase2_prep_chain.sh 호출:
-    #   Step 1: skill segment DCT parquet 생성 (VLA 학습용 preprocessed data)
-    #   Step 2: DCT-tuned VLA 학습
-    #   Step 3: P_phase1 vector DB rebuild
-    # Ctrl+C 또는 'n' → skip (그대로 종료).
+    # phase1 boundary check 가 ready → method3_integration.phase1_end_prompt 가
+    # 사용자 입력 받아 chain / resume / more 분기. (2)/(3) 은 self 재호출로 loop
+    # 진입; (1) chain 만 break out.
     _hook = getattr(pipeline, "_phase1_readiness_hook", None)
     _stop_reason = getattr(_hook, "stop_reason", None) if _hook is not None else None
     _phase_str = str(getattr(args, "phase", "")).lower()
@@ -5815,37 +5850,17 @@ def main():
             and str(_stop_reason).startswith("phase1_ready")
             and _session_dir_str
             and getattr(args, "dataset_repo_id", None)):
-        _chain_script = Path(__file__).resolve().parent / "scripts" / "phase2_prep_chain.sh"
-        if _chain_script.exists():
-            print()
-            print("=" * 70)
-            print(f"  Phase1 early termination detected (reason={_stop_reason})")
-            print(f"  session: {_session_dir_str}")
-            print(f"  dataset: {args.dataset_repo_id}")
-            print("=" * 70)
-            try:
-                _ans = input(
-                    "  Enter   = run Phase2 prep chain "
-                    "(Step1: skill DCT parquet / Step2: VLA train / Step3: DB rebuild)\n"
-                    "  n+Enter = skip (just exit)\n"
-                    "  > "
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                _ans = "n"
-            if _ans in ("", "y", "yes"):
-                print(f"  → launching {_chain_script.name} ...")
-                import subprocess
-                _rc = subprocess.call([
-                    "bash", str(_chain_script),
-                    "--dataset", str(args.dataset_repo_id),
-                    "--session-dir", str(_session_dir_str),
-                ])
-                if _rc != 0:
-                    print(f"  [prep chain] exit code {_rc} — Phase2 prep INCOMPLETE")
-                    sys.exit(_rc)
-                print(f"  [prep chain] DONE — see chain output for next manual steps")
-            else:
-                print("  → skipping Phase2 prep chain")
+        try:
+            from method3_integration.phase1_end_prompt import run_prompt_loop
+            run_prompt_loop(
+                session_dir=Path(_session_dir_str),
+                dataset_repo_id=str(args.dataset_repo_id),
+                stop_reason=str(_stop_reason),
+                project_root=Path(__file__).resolve().parent,
+                self_argv=sys.argv,
+            )
+        except Exception as _e:
+            print(f"  [phase1_end_prompt] failed: {_e}", flush=True)
 
     # 종료 코드 결정 (성공률 기반). resume 이 "all done" 으로 빈 결과를
     # 돌릴 수 있으므로 .get() 로 안전 접근.

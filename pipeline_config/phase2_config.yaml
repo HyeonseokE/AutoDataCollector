@@ -128,6 +128,16 @@ reembedding:
 # 는 *제거* — 위의 phase1_trained_vla_path 가 *유일한 SoT*. mismatch race 가
 # 사라진다 (옛 두 yaml 별개 관리로 인한 buggy state).
 
+# --- 카메라 키 rename (raw capture key → policy image feature key) ---
+# 학습 시 lerobot/scripts/train_DCT_smolvla.sh 의 CAMERA_RENAME_PAIRS 와
+# *반드시 동일* 해야 한다. DCT-tuned VLA 는 observation.images.camera{N} 을
+# 기대하는데, client 는 raw capture 키 (top / left_wrist) 로 이미지를 보낸다.
+# server 가 plan_and_select / ingest 시점에 이 map 으로 키를 바꿔 encoder·
+# VLA scorer 가 policy 와 정합되게 한다.
+camera_rename:
+  left_wrist: camera1
+  top: camera2
+
 # --- gRPC transport endpoint (client ↔ server 통신) ---
 transport:
   address: "127.0.0.1:50061"

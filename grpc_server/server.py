@@ -128,6 +128,7 @@ class PreselectiveAcquirerServicer(
         action_horizon: int = 50,
         max_T_eval: int | None = None,
         servo_calibration_file: str | None = None,
+        camera_rename: dict | None = None,
     ) -> None:
         self.stack = stack
         self.selector = stack.selector
@@ -139,6 +140,14 @@ class PreselectiveAcquirerServicer(
         self.recording_fps = int(recording_fps)
         self._chunk_size = int(chunk_size)
         self.debug_verbose = debug_verbose
+        # camera_rename — raw capture 키 → policy image feature 키 매핑.
+        # value 가 "observation.images." prefix 없으면 자동 보강.
+        self._camera_rename: dict = {}
+        for _rk, _pk in (camera_rename or {}).items():
+            _pk = str(_pk)
+            if not _pk.startswith("observation.images."):
+                _pk = f"observation.images.{_pk}"
+            self._camera_rename[str(_rk)] = _pk
 
         # Phase2Candidate (T, H) chunking 파라미터 — curobo_candidate_gen 의 input.
         # T 는 trajectory 길이 N 에서 자동 계산 (stride=1). max_T_eval 은 cost cap.
@@ -161,6 +170,25 @@ class PreselectiveAcquirerServicer(
         self._lock = threading.Lock()
 
     # ----------------------------------------------------------------
+    def _rename_cameras(self, raw_imgs: dict) -> dict:
+        """raw capture 키 → policy image feature 키 (camera_rename map).
+
+        학습 policy 는 observation.images.camera{N} 을 기대하는데 client 는
+        raw 키 (top/left_wrist) 로 보낸다. 본 메서드가 VLA encoder·scorer 가
+        policy 와 정합되도록 키를 바꾼다. map 에 없는 키는 그대로 통과.
+        map 이 비어있으면 원본 그대로 반환 (legacy / 매핑 불필요 환경).
+        """
+        if not self._camera_rename or not isinstance(raw_imgs, dict):
+            return raw_imgs
+        out: dict = {}
+        for k, v in raw_imgs.items():
+            out[self._camera_rename.get(str(k), str(k))] = v
+        # camera{N} 순서 정렬 — vla_embedding._map_raw_images 가 dict insertion
+        # 순서대로 policy image_keys 에 매핑하므로, 키 이름 순(=camera1,2,3)이
+        # policy feature 순서와 일치해야 한다.
+        return dict(sorted(out.items(), key=lambda kv: kv[0]))
+
+    # ----------------------------------------------------------------
     def PlanAndSelect(self, request, context):
         t0 = time.perf_counter()
         try:
@@ -168,6 +196,7 @@ class PreselectiveAcquirerServicer(
             goal_qpos = decode_ndarray(request.goal_qpos)
             state = decode_ndarray(request.state)
             raw_imgs = decode_pickle(request.images_pickle) if request.images_pickle else {}
+            raw_imgs = self._rename_cameras(raw_imgs)
         except Exception as e:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"deserialization failed: {e}")
@@ -418,6 +447,7 @@ class PreselectiveAcquirerServicer(
                             k: decode_jpeg(v)
                             for k, v in decode_pickle(fm.images_pickle).items()
                         }
+                        images = self._rename_cameras(images)
                     proprio = decode_ndarray(fm.state)
                     action_chunk = decode_ndarray(fm.action_chunk)
                     raw_instruction = str(fm.instruction or "")
@@ -527,6 +557,18 @@ def serve(args: argparse.Namespace) -> None:
             sel_cfg = _ph2.get("selector") or sel_cfg
         except Exception:
             pass
+    # camera_rename — raw capture 키 (top/left_wrist) → policy image feature
+    # 키 (camera1/2/...). 학습 train_DCT_smolvla.sh 의 CAMERA_RENAME_PAIRS 와
+    # 동일해야 VLA encoder·scorer 가 policy 와 정합.
+    _camera_rename: dict = {}
+    if phase2_yaml_path.exists():
+        try:
+            with phase2_yaml_path.open("r", encoding="utf-8") as _f:
+                _ph2 = yaml.safe_load(_f) or {}
+            _camera_rename = dict(_ph2.get("camera_rename") or {})
+        except Exception:
+            pass
+
     # action_horizon: 신 키. chunk_size 는 deprecated alias (spec mismatch 였던
     # 옛 yaml 호환). 둘 다 없으면 spec §7.3 의 50 으로 default.
     # T 는 trajectory 길이의 함수로 자동 (stride=1). max_T_eval 은 *옵션* cost cap.
@@ -556,11 +598,13 @@ def serve(args: argparse.Namespace) -> None:
         action_horizon=_action_horizon,
         max_T_eval=_max_T_eval,
         servo_calibration_file=_servo_calib,
+        camera_rename=_camera_rename,
     )
     print(
         f"[server] selector: action_horizon (H)={_action_horizon}, "
         f"max_T_eval={_max_T_eval} (None=evaluate all T=N points)"
     )
+    print(f"[server] camera_rename: {_camera_rename or '<none — raw keys passed through>'}")
 
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=int(args.workers)),

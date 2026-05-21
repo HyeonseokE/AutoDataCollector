@@ -300,7 +300,15 @@ class Phase1ReadinessHook:
             return True
 
         # readiness check only after cumulative B₁_min.
+        # silent skip 이었지만 사용자가 진행률 확인할 수 있게 한 줄 progress 로그 추가.
+        # DIM 으로 noise 최소화 — 측정 panel 과 시각적 구분.
         if episodes_done < self.cfg.phase1_min:
+            print(
+                f"{DIM}[method3:phase1] gate skipped — "
+                f"episodes_done={episodes_done}/{self.cfg.phase1_min} — "
+                f"measure deferred until threshold "
+                f"(folder ep={episode_num}, buffer total={buf_total}){RESET}"
+            )
             return False
 
         report = measure_phase1_readiness_loo(buffer, self.cfg.to_readiness_config())

@@ -63,7 +63,7 @@ RECORD_DATASET=true
 
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
 # RESUME_SESSION="./results/completed_logs/table2/pnp_phase1_100"
-RESUME_SESSION=""
+RESUME_SESSION="./results/session_20260521_083952_50"
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

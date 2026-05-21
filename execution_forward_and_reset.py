@@ -807,6 +807,22 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         buffer_file = getattr(self, "_subgoal_buffer_file", None)
         if not buffer_file:
+            # _subgoal_selector 가 lazy init (첫 episode robot init 시점) 라
+            # cleanup 직후 시점엔 _subgoal_buffer_file 가 아직 None. yaml 을
+            # 직접 읽어 buffer_file 경로만 fallback 으로 가져온다 → selector
+            # 인스턴스 없이도 transient reconcile 가능 → cleanup 로그와 동기.
+            try:
+                from method3.config import load_phase1_config
+                yaml_path = (
+                    Path(__file__).resolve().parent
+                    / "pipeline_config" / "phase1_config.yaml"
+                )
+                if yaml_path.exists():
+                    cfg = load_phase1_config(yaml_path)
+                    buffer_file = cfg.get("buffer_file")
+            except Exception:
+                pass
+        if not buffer_file:
             return
         try:
             from method3.phase1_state_seeding import SubgoalBuffer

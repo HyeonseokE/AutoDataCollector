@@ -35,7 +35,7 @@ from method3.phase2_mi_selection import (
     Phase2MISelector,
     SkillVectorDB,
 )
-from method3.config import load_phase2_config
+from method3.config import load_phase2_config, resolve_repo_path
 
 
 @dataclass
@@ -131,7 +131,10 @@ def setup_method3_phase2_server(
     # race 가 잦아 *제거*. policy 안의 다른 키 (family/device/autocast_dtype/state_weight)
     # 는 server runtime config 로 유지.
     policy_cfg = psf_raw.get("policy") or {}
-    ckpt = ph2_raw.get("phase1_trained_vla_path") or policy_cfg.get("checkpoint")
+    # repo-relative path 도 허용 (local/remote portable yaml 의도).
+    ckpt = resolve_repo_path(
+        ph2_raw.get("phase1_trained_vla_path") or policy_cfg.get("checkpoint")
+    )
     if not ckpt:
         print("[method3_setup] no VLA checkpoint — set phase1_trained_vla_path in phase2_config.yaml; disabling")
         return None

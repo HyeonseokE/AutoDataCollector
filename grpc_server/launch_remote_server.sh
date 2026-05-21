@@ -351,6 +351,19 @@ info "tunnel    : localhost:$LOCAL_PORT  →  $REMOTE_HOST:$REMOTE_PORT"
 info "log dir   : $LOG_DIR"
 
 # ============================================================
+# Step 0 — yaml-driven artifact sync (ckpt + sidecar + vector DB)
+# ============================================================
+# yaml 의 phase1_trained_vla_path / selector.skill_dct_parquet / buffer 위치를
+# remote 로 rsync. *first boot* 시 큰 ckpt 가 전송돼 시간 듦 — SYNC_ARTIFACTS=0
+# 로 skip 가능 (이미 동기화된 경우).
+if [ "${SYNC_ARTIFACTS:-1}" = "1" ]; then
+  bold "step 0/4  sync artifacts (yaml-driven)"
+  bash "$SCRIPT_DIR/sync_artifacts.sh" 2>&1 | sed 's/^/    /'
+else
+  info "(skip artifact sync — SYNC_ARTIFACTS=$SYNC_ARTIFACTS)"
+fi
+
+# ============================================================
 # Step 1 — (옵션) 원격 git pull
 # ============================================================
 if [ "$REMOTE_GIT_PULL" = "1" ] || [ "$REMOTE_GIT_PULL" = "true" ]; then

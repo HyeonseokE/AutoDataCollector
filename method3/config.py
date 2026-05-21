@@ -22,6 +22,30 @@ from method3.phase_control.phase_controller import PhaseControllerConfig
 from method3.reembedding.seed_builder import ReembeddingConfig
 
 
+# Project root = AutoDataCollector/ (method3/config.py 의 부모의 부모)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def resolve_repo_path(p: str | Path | None) -> str | None:
+    """repo-relative path 를 ``_REPO_ROOT`` 기준 absolute 로 resolve.
+
+    yaml 의 artifact path 가 local/remote 양쪽 portable 하도록:
+      * absolute path → 그대로 (이미 운영자가 절대경로로 명시)
+      * repo-relative path → ``_REPO_ROOT/p`` 로 join
+      * None / "" → 그대로 (None)
+
+    HF repo_id 같이 *path 아닌 식별자* 는 caller 가 미리 분기해야 한다
+    (예: ``phase1_dataset_path`` 는 repo_id 도 받을 수 있으므로 resolve
+    적용 안 함). 본 helper 는 *path 인 것이 보장된 키* 에만 사용한다.
+    """
+    if p is None or p == "":
+        return None if p is None else p
+    pp = Path(str(p))
+    if pp.is_absolute():
+        return str(pp)
+    return str(_REPO_ROOT / pp)
+
+
 def load_phase1_config(path: str | Path) -> dict:
     """phase1_config.yaml → Phase1 subgoal 설정 dict.
 
@@ -79,9 +103,8 @@ def load_phase2_config(
     sel = raw.get("selector") or {}
     action_horizon = int(sel.get("action_horizon", sel.get("chunk_size", 50)))
     use_dct_target = bool(sel.get("use_dct_target", False))
-    skill_dct_parquet = sel.get("skill_dct_parquet")
-    if skill_dct_parquet is not None:
-        skill_dct_parquet = str(skill_dct_parquet)
+    # path-like 항목은 repo-relative 도 허용하도록 resolve.
+    skill_dct_parquet = resolve_repo_path(sel.get("skill_dct_parquet"))
 
     mi = raw.get("mi_selection") or {}
     phase2_mi = Phase2MIConfig(

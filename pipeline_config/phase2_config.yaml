@@ -15,10 +15,10 @@
 #   local    : 같은 프로세스의 CuroboBackend + method3 phase2 selector.
 #              (로컬 GPU 부족 시 비권장)
 skill_planner_transport:
-  mode: local                     # disabled | grpc | local
+  mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "/home/lerobot/AutoDataCollector/lerobot/outputs/train/smolvla_dct_20260521_155241/checkpoints/003750/pretrained_model"  # DCT-tuned ckpt
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260521_155241/checkpoints/003750/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
 # 2026-05-20: ws3 의 100 episode 확장에 맞춰 100용 dataset 으로 통일.
@@ -28,8 +28,8 @@ phase1_dataset_path: "CoRL2026-CSI/pnp_ours_100_table2"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
-phase1_min: 20                 # B_{1,min} — Phase1 최소 guard
-phase1_max: 50                 # B_{1,max} — Phase1 최대 guard
+phase1_min: 30                 # B_{1,min} — Phase1 최소 guard
+phase1_max: 60                 # B_{1,max} — Phase1 최대 guard
 tau_ready: 0.7                 # §15.1 — Phase2-readiness 전환 임계값
 saturation_window: 10          # §15.2 — W (최근 accepted score 평균 window)
 enable_phase2_early_stop: true # false → 공정비교용 (t=B 까지 강제 진행)
@@ -180,7 +180,7 @@ selector:
                                   # candidate.dct_target (skill-atomic (L0, dof)) 을
                                   # z-space 로 사용. vla_informativeness.scorer_type=dct
                                   # + phase1_trained_vla_path=DCT-tuned ckpt 와 함께.
-  skill_dct_parquet: "/home/lerobot/AutoDataCollector/results/skill_dct/pnp_phase1_30_table2.parquet"  # P_phase1 build 의 sidecar
+  skill_dct_parquet: "results/skill_dct/pnp_phase1_30_table2.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
                                   # null + use_dct_target=true 면 build_or_load 가 에러.
 
@@ -213,7 +213,7 @@ remote:
   # [필수] 원격 서버 운영
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES
+  gpu_id: 0                              # 원격 CUDA_VISIBLE_DEVICES
   tmux_session: "phase2_server"          # 재시작 시 reuse
 
   # [선택] 동작 옵션

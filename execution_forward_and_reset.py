@@ -5797,6 +5797,56 @@ def main():
             skip_forward=args.skip_forward,
         )
 
+    # ========================================================
+    # Phase1 early termination → prompt + Phase2 prep chain
+    # ========================================================
+    # Phase1 boundary check 가 ready 로 인해 일찍 종료된 경우에만 trigger.
+    # 사용자가 Enter → scripts/phase2_prep_chain.sh 호출:
+    #   Step 1: skill_dct sidecar 생성
+    #   Step 2: DCT-tuned VLA 학습
+    #   Step 3: P_phase1 vector DB rebuild
+    # Ctrl+C 또는 'n' → skip (그대로 종료).
+    _hook = getattr(pipeline, "_phase1_readiness_hook", None)
+    _stop_reason = getattr(_hook, "stop_reason", None) if _hook is not None else None
+    _phase_str = str(getattr(args, "phase", "")).lower()
+    _session_dir_str = getattr(pipeline, "_session_dir", None)
+    if (_phase_str == "phase1"
+            and _stop_reason
+            and str(_stop_reason).startswith("phase1_ready")
+            and _session_dir_str
+            and getattr(args, "dataset_repo_id", None)):
+        _chain_script = Path(__file__).resolve().parent / "scripts" / "phase2_prep_chain.sh"
+        if _chain_script.exists():
+            print()
+            print("=" * 70)
+            print(f"  Phase1 early termination detected (reason={_stop_reason})")
+            print(f"  session: {_session_dir_str}")
+            print(f"  dataset: {args.dataset_repo_id}")
+            print("=" * 70)
+            try:
+                _ans = input(
+                    "  Enter   = run Phase2 prep chain "
+                    "(Step1: sidecar / Step2: VLA train / Step3: DB rebuild)\n"
+                    "  n+Enter = skip (just exit)\n"
+                    "  > "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                _ans = "n"
+            if _ans in ("", "y", "yes"):
+                print(f"  → launching {_chain_script.name} ...")
+                import subprocess
+                _rc = subprocess.call([
+                    "bash", str(_chain_script),
+                    "--dataset", str(args.dataset_repo_id),
+                    "--session-dir", str(_session_dir_str),
+                ])
+                if _rc != 0:
+                    print(f"  [prep chain] exit code {_rc} — Phase2 prep INCOMPLETE")
+                    sys.exit(_rc)
+                print(f"  [prep chain] DONE — see chain output for next manual steps")
+            else:
+                print("  → skipping Phase2 prep chain")
+
     # 종료 코드 결정 (성공률 기반). resume 이 "all done" 으로 빈 결과를
     # 돌릴 수 있으므로 .get() 로 안전 접근.
     n = all_results.get('num_episodes', 0)

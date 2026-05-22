@@ -108,6 +108,10 @@ class SubgoalBufferEntry:
     핵심 항목은 subgoal ``g_i``, terminal region descriptor ``h_i``,
     마지막 구간 descriptor set ``{h_i^τ}``, raw dataset pointer
     (episode_id/start_t/end_t) 이다.
+
+    ``skill_id`` 는 episode 내 ordinal key (``skill_0``, ``skill_1``, ...) —
+    변동 정보(natural_language)가 아니라 안정적인 호출 순번을 키로 쓴다.
+    natural_language / skill_type 은 metadata 로만 보존한다.
     """
 
     skill_id: str
@@ -120,6 +124,8 @@ class SubgoalBufferEntry:
     success_flag: bool = True            # §5.5 — TRUE episode 만 적재
     planner_type: str = "InterpPlan"     # §5.2 — canonical preview planner
     phase: str = "phase1"
+    natural_language: str = ""           # metadata — skill.natural_language
+    skill_type: str = ""                 # metadata — skill.type
 
 
 @dataclass
@@ -300,6 +306,8 @@ class SubgoalBuffer:
             arrays[f"{s}::episode"] = np.array([e.episode_id for e in entries])
             arrays[f"{s}::span"] = np.array(
                 [(e.start_t, e.end_t) for e in entries], dtype=np.int64)
+            arrays[f"{s}::nl"] = np.array([e.natural_language for e in entries])
+            arrays[f"{s}::skilltype"] = np.array([e.skill_type for e in entries])
         if not arrays:
             return
         self._file.parent.mkdir(parents=True, exist_ok=True)
@@ -324,6 +332,9 @@ class SubgoalBuffer:
                 endlen = data[f"{s}::endlen"]
                 episodes = data[f"{s}::episode"]
                 span = data[f"{s}::span"]
+                # nl/skilltype 은 구버전 npz 에 없을 수 있음 → fallback "".
+                nls = data[f"{s}::nl"] if f"{s}::nl" in data.files else None
+                stypes = data[f"{s}::skilltype"] if f"{s}::skilltype" in data.files else None
                 offsets = np.concatenate([[0], np.cumsum(endlen)])
                 entries: list[SubgoalBufferEntry] = []
                 for i in range(keys.shape[0]):
@@ -336,5 +347,7 @@ class SubgoalBuffer:
                         episode_id=str(episodes[i]),
                         start_t=int(span[i, 0]),
                         end_t=int(span[i, 1]),
+                        natural_language=(str(nls[i]) if nls is not None else ""),
+                        skill_type=(str(stypes[i]) if stypes is not None else ""),
                     ))
                 self._skills[s] = entries

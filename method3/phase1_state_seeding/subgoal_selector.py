@@ -91,14 +91,19 @@ class SubgoalSelection:
 
 @dataclass(frozen=True)
 class _PendingMove:
-    """현재 episode 에서 실행된 transit move 하나 (flush 까지 staging)."""
+    """현재 episode 에서 실행된 transit move 하나 (flush 까지 staging).
 
-    skill_id: str
+    skill_id(ordinal)는 flush 시점에 _pending 리스트 인덱스로 부여한다.
+    natural_language / skill_type 은 metadata.
+    """
+
     start_ee: np.ndarray
     goal: np.ndarray
     episode_id: str
     start_t: int
     end_t: int
+    natural_language: str = ""
+    skill_type: str = ""
 
 
 class Phase1SubgoalSelector:
@@ -166,17 +171,16 @@ class Phase1SubgoalSelector:
         self,
         current_ee: np.ndarray,
         nominal_goal: np.ndarray,
-        skill_id,
         rng: np.random.Generator,
         reachable_fn: Callable[[np.ndarray], bool] | None = None,
         feasibility_fn: Callable[[np.ndarray], bool] | None = None,
+        skill_type: str = "",
     ) -> SubgoalSelection:
         """문서 §4.2·§5.4 — 가장 novel 한 subgoal 을 골라 반환한다.
 
         Args:
             current_ee: 현재 end-effector 위치 (3,) xyz — preview 시작점.
             nominal_goal: 현재 nominal subgoal ``g`` (3,) xyz.
-            skill_id: 현재 skill ``m`` 식별자.
             rng: 재현 가능한 numpy Generator.
             reachable_fn: 이 호출에 한해 생성자 ``reachable_fn`` 을 덮어쓰는
                 reachable/safe 후보 필터.
@@ -191,6 +195,9 @@ class Phase1SubgoalSelector:
             랜덤/ nominal 폴백.
         """
         cfg = self.cfg
+        # skill_id = ordinal key — 이 transit move 가 flush 시 받을 _pending
+        # 인덱스 = 현재 len(_pending). B_{g}^(m) 를 이 안정적 순번으로 조회.
+        skill_id = f"skill_{len(self._pending)}"
         current_ee = np.asarray(current_ee, dtype=np.float64).reshape(3)
         nominal_goal = np.asarray(nominal_goal, dtype=np.float64).reshape(3)
         reach_fn = reachable_fn if reachable_fn is not None else self._reachable_fn
@@ -201,7 +208,10 @@ class Phase1SubgoalSelector:
         # per-skill override (있으면 이 호출에 한해 sigma/clip_factor/n_candidates
         # 만 교체; 없으면 전역 값 그대로). FOV 가림 회피용 좁은 분포 같은 skill-
         # 별 튜닝을 코드 분기 없이 config 만으로 가능하게 한다.
-        _ov = (cfg.per_skill_overrides or {}).get(str(skill_id), {})
+        # per_skill_overrides 는 skill.type 단위 튜닝 (move_initial/move/...) —
+        # buffer 분할 키(skill_id=nl)가 아니라 skill_type 으로 lookup 한다.
+        # skill_type 미전달 시 skill_id 로 폴백 (구 호출부 호환).
+        _ov = (cfg.per_skill_overrides or {}).get(str(skill_type or skill_id), {})
         eff_sigma = float(_ov.get("sigma", cfg.sigma))
         eff_clip = float(_ov.get("clip_factor", cfg.clip_factor))
         eff_n = int(_ov.get("n_candidates", cfg.n_candidates))
@@ -433,12 +443,13 @@ class Phase1SubgoalSelector:
 
     def stage_executed(
         self,
-        skill_id,
         start_ee: np.ndarray,
         goal: np.ndarray,
         episode_id: str = "",
         start_t: int = -1,
         end_t: int = -1,
+        natural_language: str = "",
+        skill_type: str = "",
     ) -> None:
         """실행된 transit move 를 episode pending 에 staging 한다 (문서 §5.5).
 
@@ -448,7 +459,6 @@ class Phase1SubgoalSelector:
         ``discard_episode`` (FALSE·UNCERTAIN) 가 확정/폐기한다.
 
         Args:
-            skill_id: skill ``m`` 식별자.
             start_ee: 그 move 시작 시점의 end-effector 위치 (3,).
             goal: 그 move 가 향했던 (선택된) subgoal ``g*`` (3,).
             episode_id: §5.2 raw dataset pointer — episode 식별자. 파이프라인이
@@ -457,16 +467,17 @@ class Phase1SubgoalSelector:
             end_t: §5.2 raw dataset pointer — 구간 끝 time index.
         """
         self._pending.append(_PendingMove(
-            skill_id=str(skill_id),
             start_ee=np.asarray(start_ee, dtype=np.float64).reshape(3),
             goal=np.asarray(goal, dtype=np.float64).reshape(3),
             episode_id=str(episode_id),
             start_t=int(start_t),
             end_t=int(end_t),
+            natural_language=str(natural_language),
+            skill_type=str(skill_type),
         ))
         if self.cfg.debug_verbose:
             self._dbg(
-                f"staged skill={skill_id} → episode pending={len(self._pending)}",
+                f"staged skill_type={skill_type} → episode pending={len(self._pending)}",
                 buffer_event=True,
             )
 
@@ -487,10 +498,10 @@ class Phase1SubgoalSelector:
         """
         if not self._pending:
             return
-        for mv in self._pending:
+        for i, mv in enumerate(self._pending):
             end_keys, h_star = self._terminal_region(mv.start_ee, mv.goal)   # §5.5
             self.buffer.append(SubgoalBufferEntry(
-                skill_id=mv.skill_id,
+                skill_id=f"skill_{i}",
                 subgoal=mv.goal,
                 terminal_region_key=h_star,
                 end_state_keys=end_keys,
@@ -500,6 +511,8 @@ class Phase1SubgoalSelector:
                 success_flag=True,
                 planner_type="InterpPlan",
                 phase="phase1",
+                natural_language=mv.natural_language,
+                skill_type=mv.skill_type,
             ))
         n = len(self._pending)
         self._pending.clear()

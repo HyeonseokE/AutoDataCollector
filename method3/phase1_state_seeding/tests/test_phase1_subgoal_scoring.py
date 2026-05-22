@@ -48,9 +48,9 @@ def _entry(skill_id, key, subgoal=None) -> SubgoalBufferEntry:
     )
 
 
-def _commit_one(sel, skill_id, start_ee, goal):
+def _commit_one(sel, start_ee, goal):
     """한 에피소드(TRUE 판정)처럼 stage 후 flush — buffer 에 1개 commit."""
-    sel.stage_executed(skill_id, start_ee, goal)
+    sel.stage_executed(start_ee, goal)
     sel.flush_episode()
 
 
@@ -184,7 +184,7 @@ class TestSampleSubgoalCandidates:
                                   robot_origin=(0.0, 0.0, 0.0), n_candidates=16)
         sel = Phase1SubgoalSelector(SubgoalBuffer(), cfg)
         out = sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]),
-                                 "reach", np.random.default_rng(0))
+                                 np.random.default_rng(0))
         assert out.chosen_goal.shape == (3,)
 
 
@@ -228,7 +228,7 @@ class TestReachability:
             reachability=ReachabilityConfig(z_min=0.18),
         )
         sel = Phase1SubgoalSelector(SubgoalBuffer(), cfg)
-        out = sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]), "move",
+        out = sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]),
                                  np.random.default_rng(0))
         assert out.chosen_goal[2] >= 0.18 - 1e-9
 
@@ -455,7 +455,7 @@ class TestPhase1SubgoalSelector:
     def test_cold_start_falls_back_to_random_candidate(self):
         # buffer 비어있음 → cold_start, 변형 후보(idx != 0) 선택
         sel = Phase1SubgoalSelector(SubgoalBuffer(), self._cfg())
-        out = sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]), "move",
+        out = sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]),
                                  np.random.default_rng(0))
         assert out.cold_start is True
         assert out.reports == []
@@ -465,7 +465,7 @@ class TestPhase1SubgoalSelector:
         sel = Phase1SubgoalSelector(SubgoalBuffer(), self._cfg(),
                                     reachable_fn=lambda xyz: False)
         nominal = np.array([0.3, 0.0, 0.2])
-        out = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(0))
+        out = sel.select_subgoal(START_EE, nominal, np.random.default_rng(0))
         assert out.cold_start is False
         np.testing.assert_allclose(out.chosen_goal, nominal)
 
@@ -477,8 +477,8 @@ class TestPhase1SubgoalSelector:
         sel = Phase1SubgoalSelector(buf, cfg)
         rng = np.random.default_rng(123)
         for _ in range(20):
-            _commit_one(sel, "move", START_EE, nominal + rng.normal(0.0, 0.003, 3))
-        out = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(2))
+            _commit_one(sel, START_EE, nominal + rng.normal(0.0, 0.003, 3))
+        out = sel.select_subgoal(START_EE, nominal, np.random.default_rng(2))
 
         assert out.cold_start is False
         dists = np.array([np.linalg.norm(r.goal - nominal) for r in out.reports])
@@ -489,12 +489,12 @@ class TestPhase1SubgoalSelector:
     def test_deterministic_for_same_seed(self):
         buf = SubgoalBuffer()
         for i in range(10):
-            buf.append(_entry("move", np.arange(DESCRIPTOR_DIM, dtype=float) + i * 0.5))
+            buf.append(_entry("skill_0", np.arange(DESCRIPTOR_DIM, dtype=float) + i * 0.5))
         cfg = self._cfg()
         a = Phase1SubgoalSelector(buf, cfg).select_subgoal(
-            START_EE, np.array([0.3, 0.0, 0.2]), "move", np.random.default_rng(5))
+            START_EE, np.array([0.3, 0.0, 0.2]), np.random.default_rng(5))
         b = Phase1SubgoalSelector(buf, cfg).select_subgoal(
-            START_EE, np.array([0.3, 0.0, 0.2]), "move", np.random.default_rng(5))
+            START_EE, np.array([0.3, 0.0, 0.2]), np.random.default_rng(5))
         np.testing.assert_array_equal(a.chosen_goal, b.chosen_goal)
         assert a.chosen_index == b.chosen_index
 
@@ -502,38 +502,39 @@ class TestPhase1SubgoalSelector:
         # 호출 시 '전부 unreachable' → valid 후보 0개 → nominal 폴백.
         sel = Phase1SubgoalSelector(SubgoalBuffer(), self._cfg())
         nominal = np.array([0.3, 0.0, 0.2])
-        out = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(0),
+        out = sel.select_subgoal(START_EE, nominal, np.random.default_rng(0),
                                  reachable_fn=lambda xyz: False)
         np.testing.assert_allclose(out.chosen_goal, nominal)
 
     def test_stage_does_not_grow_buffer_until_flush(self):
         buf = SubgoalBuffer()
         sel = Phase1SubgoalSelector(buf, self._cfg())
-        sel.stage_executed("move", START_EE, np.array([0.3, 0.0, 0.2]))
-        sel.stage_executed("move", START_EE, np.array([0.3, 0.0, 0.25]))
-        assert buf.size("move") == 0          # staged, 아직 buffer 미반영
+        sel.stage_executed(START_EE, np.array([0.3, 0.0, 0.2]))
+        sel.stage_executed(START_EE, np.array([0.3, 0.0, 0.25]))
+        assert buf.size("skill_0") == 0       # staged, 아직 buffer 미반영
         sel.flush_episode()                   # episode TRUE
-        assert buf.size("move") == 2          # flush → commit
+        assert buf.size("skill_0") == 1       # flush → commit (첫 번째 staged: skill_0)
+        assert buf.size("skill_1") == 1       # flush → commit (두 번째 staged: skill_1)
 
     def test_flush_episode_commits_terminal_descriptor(self):
         buf = SubgoalBuffer()
         sel = Phase1SubgoalSelector(buf, self._cfg())
         goal = np.array([0.3, 0.0, 0.2])
-        _commit_one(sel, "move", START_EE, goal)
-        assert buf.size("move") == 1
+        _commit_one(sel, START_EE, goal)
+        assert buf.size("skill_0") == 1
         # §5.5 — buffer key = canonical preview 의 T_end descriptor 평균 h*.
         _, h_star = sel._terminal_region(START_EE, goal)
-        np.testing.assert_allclose(buf.query_skill("move")[0], h_star)
+        np.testing.assert_allclose(buf.query_skill("skill_0")[0], h_star)
 
     def test_flush_records_spec_5_2_entry_fields(self):
         # §5.2 — flush 가 raw pointer 까지 갖춘 entry 를 적재한다.
         buf = SubgoalBuffer()
         sel = Phase1SubgoalSelector(buf, self._cfg())
         goal = np.array([0.3, 0.0, 0.2])
-        sel.stage_executed("move", START_EE, goal,
+        sel.stage_executed(START_EE, goal,
                            episode_id="ep_0007", start_t=120, end_t=170)
         sel.flush_episode()
-        e = buf.entries("move")[0]
+        e = buf.entries("skill_0")[0]
         np.testing.assert_allclose(e.subgoal, goal)
         assert e.terminal_region_key.shape == (DESCRIPTOR_DIM,)
         assert e.end_state_keys.ndim == 2
@@ -547,16 +548,16 @@ class TestPhase1SubgoalSelector:
     def test_discard_episode_drops_staged_subgoals(self):
         buf = SubgoalBuffer()
         sel = Phase1SubgoalSelector(buf, self._cfg())
-        sel.stage_executed("move", START_EE, np.array([0.3, 0.0, 0.2]))
+        sel.stage_executed(START_EE, np.array([0.3, 0.0, 0.2]))
         sel.discard_episode()
         sel.flush_episode()                   # pending 비었으므로 no-op
-        assert buf.size("move") == 0
+        assert buf.size("skill_0") == 0
 
     def test_flush_episode_persists_to_file(self, tmp_path):
         # TRUE flush 시점에 .npz 로 즉시 영속화 (raw dataset ingest 와 동일 시점).
         path = tmp_path / "subgoal_buffer.npz"
         sel = Phase1SubgoalSelector(SubgoalBuffer(buffer_file=path), self._cfg())
-        sel.stage_executed("move", START_EE, np.array([0.3, 0.0, 0.2]))
+        sel.stage_executed(START_EE, np.array([0.3, 0.0, 0.2]))
         sel.flush_episode()
         assert path.exists()
 
@@ -573,11 +574,11 @@ class TestPhase1SubgoalSelector:
             interp_plan(START_EE, nominal, cfg.preview_points), cfg.end_fraction)
         for s in end_states:
             for _ in range(4):                       # k_nn=3 이웃 모두 exact-match
-                buf.append(_entry("move", state_descriptor(s, nominal)))
+                buf.append(_entry("skill_0", state_descriptor(s, nominal)))
         for i in range(5):                           # scale > 0 되도록 떨어진 점
-            buf.append(_entry("move", state_descriptor(nominal + 0.1 * (i + 1), nominal)))
+            buf.append(_entry("skill_0", state_descriptor(nominal + 0.1 * (i + 1), nominal)))
         sel = Phase1SubgoalSelector(buf, cfg)
-        out = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(0))
+        out = sel.select_subgoal(START_EE, nominal, np.random.default_rng(0))
         assert out.cold_start is False
         gains = {r.candidate_index: r.gain for r in out.reports}
         assert gains[0] == pytest.approx(0.0, abs=1e-9)   # nominal 이미 covered
@@ -586,12 +587,12 @@ class TestPhase1SubgoalSelector:
         cfg = self._cfg(min_buffer_size=5, k_nn=1)
         sel = Phase1SubgoalSelector(SubgoalBuffer(), cfg)
         nominal = np.array([0.3, 0.0, 0.2])
-        assert sel.select_subgoal(START_EE, nominal, "move",
+        assert sel.select_subgoal(START_EE, nominal,
                                   np.random.default_rng(0)).cold_start is True
         rng = np.random.default_rng(1)
         for _ in range(6):
-            _commit_one(sel, "move", START_EE, nominal + rng.normal(0, 0.02, 3))
-        assert sel.select_subgoal(START_EE, nominal, "move",
+            _commit_one(sel, START_EE, nominal + rng.normal(0, 0.02, 3))
+        assert sel.select_subgoal(START_EE, nominal,
                                   np.random.default_rng(0)).cold_start is False
 
     def test_cold_start_threshold_respects_k_nn(self):
@@ -601,17 +602,17 @@ class TestPhase1SubgoalSelector:
         nominal = np.array([0.3, 0.0, 0.2])
         rng = np.random.default_rng(1)
         for _ in range(4):                       # N=4 < k_nn=5 → 아직 cold-start
-            _commit_one(sel, "move", START_EE, nominal + rng.normal(0, 0.02, 3))
-        assert sel.select_subgoal(START_EE, nominal, "move",
+            _commit_one(sel, START_EE, nominal + rng.normal(0, 0.02, 3))
+        assert sel.select_subgoal(START_EE, nominal,
                                   np.random.default_rng(0)).cold_start is True
-        _commit_one(sel, "move", START_EE, nominal + np.array([0.03, 0.0, 0.0]))  # N=5
-        assert sel.select_subgoal(START_EE, nominal, "move",
+        _commit_one(sel, START_EE, nominal + np.array([0.03, 0.0, 0.0]))  # N=5
+        assert sel.select_subgoal(START_EE, nominal,
                                   np.random.default_rng(0)).cold_start is False
 
     def test_candidate_dist_config_is_used(self):
         for d in ("uniform_ball", "gaussian"):
             sel = Phase1SubgoalSelector(SubgoalBuffer(), self._cfg(candidate_dist=d))
-            out = sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]), "move",
+            out = sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]),
                                      np.random.default_rng(0))
             assert out.chosen_goal.shape == (3,)
 
@@ -629,12 +630,12 @@ class TestDebugVerbose:
         nominal = np.array([0.3, 0.0, 0.2])
         rng = np.random.default_rng(1)
         for _ in range(8):
-            _commit_one(sel, "move", START_EE, nominal + rng.normal(0, 0.03, 3))
-        sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(0))
+            _commit_one(sel, START_EE, nominal + rng.normal(0, 0.03, 3))
+        sel.select_subgoal(START_EE, nominal, np.random.default_rng(0))
 
         out = capsys.readouterr().out
         assert "[Subgoal-Phase1][debug]" in out
-        assert "staged skill=move" in out
+        assert "staged skill_type=" in out
         assert "flush episode" in out
         assert "CHOSEN cand#" in out
         assert "gain" in out
@@ -644,13 +645,13 @@ class TestDebugVerbose:
         nominal = np.array([0.3, 0.0, 0.2])
         rng = np.random.default_rng(1)
         for _ in range(8):
-            _commit_one(sel, "move", START_EE, nominal + rng.normal(0, 0.03, 3))
-        sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(0))
+            _commit_one(sel, START_EE, nominal + rng.normal(0, 0.03, 3))
+        sel.select_subgoal(START_EE, nominal, np.random.default_rng(0))
         assert "[Subgoal-Phase1][debug]" not in capsys.readouterr().out
 
     def test_debug_verbose_logs_cold_start(self, capsys):
         sel = Phase1SubgoalSelector(SubgoalBuffer(), self._cfg(debug_verbose=True))
-        sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]), "move",
+        sel.select_subgoal(START_EE, np.array([0.3, 0.0, 0.2]),
                            np.random.default_rng(0))
         assert "COLD-START" in capsys.readouterr().out
 
@@ -675,17 +676,16 @@ class TestPerSkillOverrides:
         })
         buf = SubgoalBuffer()
         for i in range(8):
-            buf.append(_entry("move_initial",
-                              np.arange(DESCRIPTOR_DIM, dtype=float) + i * 0.3))
-            buf.append(_entry("move",
+            buf.append(_entry("skill_0",
                               np.arange(DESCRIPTOR_DIM, dtype=float) + i * 0.3))
         sel = Phase1SubgoalSelector(buf, cfg)
         nominal = np.array([0.3, 0.0, 0.2])
 
-        global_out = sel.select_subgoal(START_EE, nominal, "move",
+        global_out = sel.select_subgoal(START_EE, nominal,
                                         np.random.default_rng(0))
-        override_out = sel.select_subgoal(START_EE, nominal, "move_initial",
-                                          np.random.default_rng(0))
+        override_out = sel.select_subgoal(START_EE, nominal,
+                                          np.random.default_rng(0),
+                                          skill_type="move_initial")
         global_max = float(self._radii(nominal, global_out.reports).max())
         override_max = float(self._radii(nominal, override_out.reports).max())
         assert override_max <= 0.04 + 1e-9          # override clip = 2 × 0.02
@@ -695,12 +695,13 @@ class TestPerSkillOverrides:
         cfg = self._cfg(per_skill_overrides={"move_initial": {"sigma": 0.02}})
         buf = SubgoalBuffer()
         for i in range(8):
-            buf.append(_entry("other_skill",
+            buf.append(_entry("skill_0",
                               np.arange(DESCRIPTOR_DIM, dtype=float) + i * 0.3))
         sel = Phase1SubgoalSelector(buf, cfg)
         nominal = np.array([0.3, 0.0, 0.2])
-        out = sel.select_subgoal(START_EE, nominal, "other_skill",
-                                 np.random.default_rng(0))
+        out = sel.select_subgoal(START_EE, nominal,
+                                 np.random.default_rng(0),
+                                 skill_type="other_skill")
         # 전역 sigma=0.05, clip=2.0 → R=0.10. 후보 반경 최대 ≤ 0.10 + 수치오차.
         radii = self._radii(nominal, out.reports)
         assert float(radii.max()) <= 0.10 + 1e-9
@@ -712,13 +713,13 @@ class TestPerSkillOverrides:
         cfg_b = self._cfg()  # default: 빈 dict
         buf = SubgoalBuffer()
         for i in range(8):
-            buf.append(_entry("move",
+            buf.append(_entry("skill_0",
                               np.arange(DESCRIPTOR_DIM, dtype=float) + i * 0.3))
         nominal = np.array([0.3, 0.0, 0.2])
         a = Phase1SubgoalSelector(buf, cfg_a).select_subgoal(
-            START_EE, nominal, "move", np.random.default_rng(7))
+            START_EE, nominal, np.random.default_rng(7))
         b = Phase1SubgoalSelector(buf, cfg_b).select_subgoal(
-            START_EE, nominal, "move", np.random.default_rng(7))
+            START_EE, nominal, np.random.default_rng(7))
         np.testing.assert_array_equal(a.chosen_goal, b.chosen_goal)
         assert a.chosen_index == b.chosen_index
 
@@ -736,13 +737,13 @@ class TestEpisodeSimulation:
         chosen_goals = []
         prev_size = 0
         for _ in range(40):                   # 각 반복 = 한 에피소드(TRUE)
-            out = sel.select_subgoal(START_EE, nominal, "move", rng,
+            out = sel.select_subgoal(START_EE, nominal, rng,
                                      reachable_fn=lambda x: True)
             for r in out.reports:
                 assert np.isfinite(r.gain) and r.gain >= 0.0
-            _commit_one(sel, "move", START_EE, out.chosen_goal)
-            assert buf.size("move") == prev_size + 1   # episode 당 정확히 +1
-            prev_size = buf.size("move")
+            _commit_one(sel, START_EE, out.chosen_goal)
+            assert buf.size("skill_0") == prev_size + 1   # episode 당 정확히 +1
+            prev_size = buf.size("skill_0")
             chosen_goals.append(tuple(np.round(out.chosen_goal, 4)))
 
         assert len(set(chosen_goals)) > 1   # 여러 subgoal 을 탐색
@@ -755,9 +756,9 @@ class TestEpisodeSimulation:
 
         rng = np.random.default_rng(5)
         for _ in range(30):
-            _commit_one(sel, "move", START_EE, nominal + rng.normal(0, 0.005, 3))
+            _commit_one(sel, START_EE, nominal + rng.normal(0, 0.005, 3))
 
-        out = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(0),
+        out = sel.select_subgoal(START_EE, nominal, np.random.default_rng(0),
                                  reachable_fn=lambda xyz: True)
         assert out.cold_start is False
         gains = {r.candidate_index: r.gain for r in out.reports}
@@ -773,27 +774,30 @@ class TestEpisodeSimulation:
         rng = np.random.default_rng(0)
 
         # episode 1 (TRUE): 3 transit move → flush
+        # 각 에피소드 내에서 select_subgoal 호출 순번: skill_0, skill_1, skill_2
         for _ in range(3):
-            out = sel.select_subgoal(START_EE, nominal, "move", rng,
+            out = sel.select_subgoal(START_EE, nominal, rng,
                                      reachable_fn=lambda x: True)
-            sel.stage_executed("move", START_EE, out.chosen_goal)
+            sel.stage_executed(START_EE, out.chosen_goal)
         sel.flush_episode()
-        assert buf.size("move") == 3
+        # flush 후 skill_0, skill_1, skill_2 각 1개씩 commit
+        assert buf.size("skill_0") + buf.size("skill_1") + buf.size("skill_2") == 3
 
         # episode 2 (FALSE): 2 transit move → discard
         for _ in range(2):
-            out = sel.select_subgoal(START_EE, nominal, "move", rng,
+            out = sel.select_subgoal(START_EE, nominal, rng,
                                      reachable_fn=lambda x: True)
-            sel.stage_executed("move", START_EE, out.chosen_goal)
+            sel.stage_executed(START_EE, out.chosen_goal)
         sel.discard_episode()
-        assert buf.size("move") == 3          # FALSE 에피소드는 buffer 미반영
+        # FALSE 에피소드는 buffer 미반영
+        assert buf.size("skill_0") + buf.size("skill_1") + buf.size("skill_2") == 3
 
         # episode 3 (TRUE): 1 transit move → flush
-        out = sel.select_subgoal(START_EE, nominal, "move", rng,
+        out = sel.select_subgoal(START_EE, nominal, rng,
                                  reachable_fn=lambda x: True)
-        sel.stage_executed("move", START_EE, out.chosen_goal)
+        sel.stage_executed(START_EE, out.chosen_goal)
         sel.flush_episode()
-        assert buf.size("move") == 4
+        assert buf.size("skill_0") + buf.size("skill_1") + buf.size("skill_2") == 4
 
 
 # ─────────────────────────────────────────────────────────────
@@ -809,13 +813,13 @@ class TestFeasibilityFilter:
         nominal = np.array([0.30, 0.0, 0.10])
         rng = np.random.default_rng(0)
         for _ in range(10):
-            _commit_one(sel, "move", START_EE, nominal + rng.normal(0, 0.03, 3))
+            _commit_one(sel, START_EE, nominal + rng.normal(0, 0.03, 3))
         return sel, nominal
 
     def test_none_preserves_legacy_behavior(self):
         sel, nominal = self._populated()
-        a = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(1))
-        b = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(1),
+        a = sel.select_subgoal(START_EE, nominal, np.random.default_rng(1))
+        b = sel.select_subgoal(START_EE, nominal, np.random.default_rng(1),
                                feasibility_fn=None)
         assert a.chosen_index == b.chosen_index
 
@@ -825,7 +829,7 @@ class TestFeasibilityFilter:
         # reports 는 전체 valid 후보를 담는다 (feasible 만이 아님).
         sel, nominal = self._populated()
         feas = lambda xyz: xyz[0] <= 0.30          # x>0.30 후보 전부 탈락
-        out = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(1),
+        out = sel.select_subgoal(START_EE, nominal, np.random.default_rng(1),
                                  feasibility_fn=feas)
         assert out.chosen_goal[0] <= 0.30 + 1e-9
         feasible = [r for r in out.reports if r.goal[0] <= 0.30 + 1e-9]
@@ -835,7 +839,7 @@ class TestFeasibilityFilter:
 
     def test_all_rejected_falls_back_to_nominal(self):
         sel, nominal = self._populated()
-        out = sel.select_subgoal(START_EE, nominal, "move", np.random.default_rng(1),
+        out = sel.select_subgoal(START_EE, nominal, np.random.default_rng(1),
                                  feasibility_fn=lambda xyz: False)
         assert out.chosen_index == 0
         assert np.allclose(out.chosen_goal, nominal)
@@ -847,7 +851,7 @@ class TestFeasibilityFilter:
         nominal = np.array([0.30, 0.0, 0.10])
         feas = lambda xyz: xyz[0] <= 0.30
         for seed in range(20):
-            out = sel.select_subgoal(START_EE, nominal, "move",
+            out = sel.select_subgoal(START_EE, nominal,
                                      np.random.default_rng(seed), feasibility_fn=feas)
             assert out.cold_start is True
             assert out.chosen_goal[0] <= 0.30 + 1e-9

@@ -1663,8 +1663,11 @@ class LeRobotSkills:
         # perturbation; recording shows the canonical intent, the perturbed end
         # pose is reflected in the executed trajectory.
         goal_joint_rad = self._normalized_to_radians(self.initial_state)
+        # skill.natural_language label — subgoal selector 가 recorder 와 동일한
+        # nl 을 buffer key 로 쓰도록 한 곳에서 계산한다.
+        _home_label = skill_description or "move to initial state"
         self._set_skill_recording(
-            label=skill_description or "move to initial state",
+            label=_home_label,
             skill_type="move_initial",
             goal_joint_5=goal_joint_rad,
             goal_gripper=self.initial_state_gripper,
@@ -1695,10 +1698,10 @@ class LeRobotSkills:
                 _sel = self._subgoal_selector.select_subgoal(
                     current_ee=current_ee,
                     nominal_goal=home_xyz,
-                    skill_id="move_initial",
                     rng=self._perturbation_rng,
                     reachable_fn=self.kinematics.is_position_reachable,
                     feasibility_fn=_feas,
+                    skill_type="move_initial",
                 )
                 chosen_xyz = np.asarray(_sel.chosen_goal, dtype=float)
                 if _sel.chosen_index != 0:
@@ -1724,11 +1727,12 @@ class LeRobotSkills:
                     )
                     if ok:
                         end_normalized = self._radians_to_normalized(joints[:5])
-                        self._pending_subgoal_commit = (
-                            "move_initial",
-                            np.asarray(current_ee, dtype=float),
-                            chosen_xyz.copy(),
-                        )
+                        self._pending_subgoal_commit = {
+                            "start_ee": np.asarray(current_ee, dtype=float),
+                            "goal": chosen_xyz.copy(),
+                            "natural_language": _home_label,
+                            "skill_type": "move_initial",
+                        }
                         if getattr(self._subgoal_selector, "is_phase2_replay", False):
                             _tag = "Subgoal-Phase2"
                             _mode = "replayed seed subgoal"
@@ -1775,7 +1779,7 @@ class LeRobotSkills:
                     and self._pending_subgoal_commit is not None):
                 try:
                     self._subgoal_selector.stage_executed(
-                        *self._pending_subgoal_commit
+                        **self._pending_subgoal_commit
                     )
                 except Exception as _e:
                     self._log(f"  [Subgoal-Phase1] subgoal staging skipped: {_e}")
@@ -2004,6 +2008,17 @@ class LeRobotSkills:
         # it before skill_type_val is assigned further down.
         _skill_id = {"close": "move_and_close",
                      "open": "move_and_open"}.get(gripper_action, "move")
+        # skill.natural_language label — buffer-aware subgoal selector 가
+        # recorder 가 stamp 하는 nl 과 동일 문자열을 B_{g}^(m) key 로 쓰도록
+        # 섭동 블록 이전에 미리 계산한다 (recorder 의 _set_skill_recording 도
+        # 아래에서 이 label 을 그대로 쓴다 — 분절·partition 일원화).
+        if skill_description:
+            label = skill_description
+        else:
+            _lbase = f"move {target_name}" if target_name else "move to position"
+            _lsuffix = {"close": "and close gripper",
+                        "open": "and open gripper"}.get(gripper_action, "")
+            label = f"{_lbase} {_lsuffix}".strip() if _lsuffix else _lbase
         self._pending_subgoal_commit = None
         # clearance-lead ascent state (holding-phase perturbation 안전장치) —
         # holding move 가 subgoal-perturbation 되면 set 되고, IK 계획 직후의
@@ -2057,10 +2072,10 @@ class LeRobotSkills:
             _sel = self._subgoal_selector.select_subgoal(
                 current_ee=current_ee,
                 nominal_goal=target_position,
-                skill_id=_skill_id,
                 rng=self._perturbation_rng,
                 reachable_fn=_reach_fn,
                 feasibility_fn=_feasibility_fn,
+                skill_type=_skill_id,
             )
             target_position = np.asarray(_sel.chosen_goal, dtype=float)
             _subgoal_perturbed = True
@@ -2081,11 +2096,12 @@ class LeRobotSkills:
             )
             # Stage (skill_id, start_ee, chosen_goal) — committed to the
             # subgoal buffer only on a TRUE episode (selector.flush_episode).
-            self._pending_subgoal_commit = (
-                _skill_id,
-                np.asarray(current_ee, dtype=float),
-                target_position.copy(),
-            )
+            self._pending_subgoal_commit = {
+                "start_ee": np.asarray(current_ee, dtype=float),
+                "goal": target_position.copy(),
+                "natural_language": label,
+                "skill_type": _skill_id,
+            }
         elif (is_transit
                 and self._perturbation is not None
                 and self._perturbation_rng is not None):
@@ -2288,12 +2304,9 @@ class LeRobotSkills:
         else:
             raise ValueError(f"gripper_action must be None, 'close', or 'open' (got: {gripper_action!r})")
 
-        # Set skill recording info (after trajectory planning)
-        if skill_description:
-            label = skill_description
-        else:
-            base = f"move {target_name}" if target_name else "move to position"
-            label = f"{base} {default_suffix}".strip() if default_suffix else base
+        # Set skill recording info (after trajectory planning).
+        # label 은 위(_skill_id 직후)에서 이미 계산됨 — subgoal selector 와
+        # recorder 가 동일 nl 을 쓰도록 일원화 (중복 계산 제거).
 
         goal_joint_rad = trajectory.joint_positions[-1]
 
@@ -2554,7 +2567,7 @@ class LeRobotSkills:
                     and self._pending_subgoal_commit is not None):
                 try:
                     self._subgoal_selector.stage_executed(
-                        *self._pending_subgoal_commit
+                        **self._pending_subgoal_commit
                     )
                 except Exception as _e:
                     self._log(f"  [Subgoal-Phase1] subgoal staging skipped: {_e}")

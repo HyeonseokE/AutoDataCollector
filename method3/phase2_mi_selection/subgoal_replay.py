@@ -44,37 +44,31 @@ class Phase2SubgoalReplay:
         buf = SubgoalBuffer()
         buf.set_file(Path(buffer_path))
         buf.load()
-        # {episode_id: {skill_id: [subgoal_xyz, ...]}} — episode 내 frame 순서.
-        self._by_episode: dict[str, dict[str, list[np.ndarray]]] = {}
+        # {episode_id: [subgoal_xyz, ...]} — episode 내 ordinal(=호출 순서).
+        # SubgoalBuffer 는 ordinal key(skill_0, skill_1, ...)로 저장되므로
+        # entry 를 start_t(=staging 순서) 로 정렬하면 곧 호출 순서다.
+        _staged: dict[str, list[tuple]] = {}
         for skill_id in buf.skill_ids():
             for e in buf.entries(skill_id):
                 eid = str(e.episode_id)
                 if not eid:
                     # episode_id 미태깅 entry 는 replay 순서를 특정할 수 없어 제외.
                     continue
-                self._by_episode.setdefault(eid, {}).setdefault(
-                    str(skill_id), []
-                ).append((int(e.start_t), np.asarray(e.subgoal, dtype=float)))
-        # episode 내 frame 시작 시각(start_t)으로 정렬해 호출 순서와 맞춘다.
-        for skills in self._by_episode.values():
-            for sk, lst in list(skills.items()):
-                lst.sort(key=lambda t: t[0])
-                skills[sk] = [xyz for _, xyz in lst]
+                _staged.setdefault(eid, []).append(
+                    (int(e.start_t), np.asarray(e.subgoal, dtype=float)))
+        self._by_episode: dict[str, list[np.ndarray]] = {}
+        for eid, lst in _staged.items():
+            lst.sort(key=lambda t: t[0])
+            self._by_episode[eid] = [xyz for _, xyz in lst]
 
         self._episode_id: str = ""
-        self._cursor: dict[str, int] = {}
+        self._cursor: int = 0
 
     def n_episodes(self) -> int:
         return len(self._by_episode)
 
-    def skill_ids(self) -> list[str]:
-        out: set[str] = set()
-        for skills in self._by_episode.values():
-            out.update(skills.keys())
-        return sorted(out)
-
     def set_episode(self, episode_id: str) -> None:
-        """episode 전환 — per-skill replay 커서를 0 으로 리셋.
+        """episode 전환 — replay 커서를 0 으로 리셋.
 
         Phase2 는 ``phase2/episode_{N}`` 으로 쌓이고 N 은 Phase1 episode 수
         다음부터 이어진다 (예: Phase1 episode_01~40 → Phase2 episode_41~).
@@ -93,28 +87,32 @@ class Phase2SubgoalReplay:
                       f"(buffer 범위로 cycle 매핑; buffer={len(eps)} episodes)")
                 eid = mapped
         self._episode_id = eid
-        self._cursor = {}
+        self._cursor = 0
 
     def select_subgoal(
         self,
         current_ee,
         nominal_goal,
-        skill_id,
         rng=None,
         reachable_fn=None,
         feasibility_fn=None,
+        skill_type: str = "",
     ) -> SubgoalSelection:
-        """현재 episode·skill 의 다음 기록 subgoal 을 반환 (Phase1 도달점 replay).
+        """현재 episode 의 다음 기록 subgoal 을 호출 순서대로 반환 (Phase1 도달점 replay).
+
+        SubgoalBuffer 가 ordinal key(skill_0, skill_1, ...)로 저장되므로 episode
+        별 단일 cursor 로 k 번째 호출 → k 번째 도달 subgoal 을 매칭한다.
+        ``skill_type`` 은 Phase1SubgoalSelector 와의 시그니처 호환용 — 미사용.
 
         기록이 없거나 커서가 소진되면 ``nominal_goal`` 로 폴백한다. 폴백 시
         ``chosen_index=0`` — move-home 호출부가 이를 nominal 로 인식하도록.
         replay 성공 시 ``chosen_index=1`` 로 *비(非)-nominal* 임을 표시한다.
         """
         nominal = np.asarray(nominal_goal, dtype=float).reshape(3)
-        recorded = self._by_episode.get(self._episode_id, {}).get(str(skill_id), [])
-        k = self._cursor.get(str(skill_id), 0)
+        recorded = self._by_episode.get(self._episode_id, [])
+        k = self._cursor
         if k < len(recorded):
-            self._cursor[str(skill_id)] = k + 1
+            self._cursor = k + 1
             return SubgoalSelection(
                 chosen_goal=recorded[k].copy(),
                 chosen_index=1,        # !=0 → move-home 호출부가 적용

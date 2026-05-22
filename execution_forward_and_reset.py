@@ -5503,18 +5503,25 @@ class ForwardAndResetPipeline(BasePipeline):
         # 통합 에피소드 루프: 성공 slot 스킵, 실패/미시도 slot 실행
         # --------------------------------------------------------
 
-        def _find_next_incomplete(from_batch):
-            """from_batch 이후 첫 미완료 배치 인덱스 반환"""
-            for i in range(from_batch + 1, self.num_random_seeds):
-                if any(not done for done in batch_slots[i]):
-                    return i
-            return None
+        # 스케줄 결정 — resume 도 동일 schedule_mode 따른다. first_incomplete
+        # (초기 restore) 와 reset_target 모두 schedule *순서* 를 따라야
+        # round_robin 에서 seed 가 맞는다 — round_robin 은 episode 마다 batch 가
+        # 바뀌므로 seed_major 식 "batch 0 부터 스캔" 은 첫 실행 episode 의 batch
+        # 와 어긋난다 (예: 첫 미완료 episode 가 batch 11 인데 batch 0 을 고름).
+        from method3_integration.scheduling import schedule_iter
+        _hook_cfg = getattr(getattr(self, "_phase1_readiness_hook", None),
+                            "cfg", None)
+        schedule_mode = getattr(_hook_cfg, "schedule_mode", "seed_major")
+        is_round_robin = (schedule_mode == "round_robin")
+        print(f"  Schedule: {schedule_mode}")
+        _schedule = list(schedule_iter(
+            num_episodes, episodes_per_seed, self.num_random_seeds, schedule_mode))
 
-        # 첫 미완료 배치 찾기 → _restore_to_seed 1회
+        # 첫 미완료 episode 의 batch 찾기 → _restore_to_seed 1회.
         first_incomplete = None
-        for i in range(self.num_random_seeds):
-            if any(not done for done in batch_slots[i]):
-                first_incomplete = i
+        for _e_i, _b_i, _s_i, _ep_i, _rl_i in _schedule:
+            if not batch_slots[_b_i][_s_i]:
+                first_incomplete = _b_i
                 break
 
         if first_incomplete is None:
@@ -5552,17 +5559,8 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"\n{YELLOW}  [Resume] Warning: seed_{first_incomplete+1} positions unavailable, "
                       f"skipping physical restore. Workspace must already be in correct state.{RESET}")
 
-            # 스케줄 결정 — resume 도 동일 schedule_mode 따름.
-            from method3_integration.scheduling import schedule_iter
-            _hook_cfg = getattr(getattr(self, "_phase1_readiness_hook", None),
-                                "cfg", None)
-            schedule_mode = getattr(_hook_cfg, "schedule_mode", "seed_major")
-            is_round_robin = (schedule_mode == "round_robin")
-            print(f"  Schedule: {schedule_mode}")
-
-            # 에피소드 루프 — schedule_iter 가 (exec, batch, slot, ep_num, round_last) 산출.
-            for execution_idx, batch_index, slot, episode_num, is_round_last in schedule_iter(
-                    num_episodes, episodes_per_seed, self.num_random_seeds, schedule_mode):
+            # 에피소드 루프 — 위에서 산출한 _schedule 을 그대로 순회.
+            for execution_idx, batch_index, slot, episode_num, is_round_last in _schedule:
 
                 # 이미 성공한 slot → 스킵
                 if batch_slots[batch_index][slot]:
@@ -5582,21 +5580,21 @@ class ForwardAndResetPipeline(BasePipeline):
                 episode_dir = str(_episode_dir(session_dir, episode_num, getattr(self, "method3_phase", None)))
                 Path(episode_dir).parent.mkdir(parents=True, exist_ok=True)
 
-                # Reset target 결정: 배치 내 남은 미완료 slot이 있는지 확인
-                remaining_in_batch = [s for s in range(slot + 1, episodes_per_seed)
-                                      if not batch_slots[batch_index][s]]
-                if not remaining_in_batch:
-                    # 배치 마지막 실행 slot → 다음 미완료 배치 탐색
-                    next_incomplete = _find_next_incomplete(batch_index)
-                    if next_incomplete is not None:
-                        if seed_positions[next_incomplete] is None:
-                            print(f"\n{MAGENTA}  [Seed Transition] Generating seed_{next_incomplete+1}...{RESET}")
-                            seed_positions[next_incomplete] = self._generate_seed_positions(session_dir, next_incomplete)
-                        reset_target = seed_positions[next_incomplete] if seed_positions[next_incomplete] else seed_positions[batch_index]
-                    else:
-                        reset_target = seed_positions[batch_index]  # 정리
-                else:
-                    reset_target = seed_positions[batch_index]  # 같은 배치 유지
+                # Reset target — schedule 순서상 "다음에 실행할 미완료
+                # episode" 의 batch seed. round_robin 은 episode 마다 batch 가
+                # 바뀌므로 "같은 batch 유지" 가정이 깨진다 (seed_major 에서는
+                # 다음 slot/batch 가 동일 batch 라 기존과 같은 결과).
+                reset_target = None
+                for _e2, _b2, _s2, _ep2, _rl2 in _schedule[execution_idx + 1:]:
+                    if not batch_slots[_b2][_s2]:
+                        if seed_positions[_b2] is None:
+                            print(f"\n{MAGENTA}  [Seed Transition] Generating seed_{_b2+1}...{RESET}")
+                            seed_positions[_b2] = self._generate_seed_positions(session_dir, _b2)
+                        reset_target = seed_positions[_b2]
+                        break
+                if reset_target is None:
+                    # 마지막 실행 episode — 더 실행할 게 없으면 현재 batch 로 정리.
+                    reset_target = seed_positions[batch_index]
 
                 try:
                     _slot_r = slot

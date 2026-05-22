@@ -93,6 +93,9 @@ def _build_curobo(
         max_vias_per_candidate=int(
             skill_cfg.get("curobo_max_vias_per_candidate", 1)
         ),
+        # joint-space 저주파 perturbation — 경로 다양화 (A안).
+        joint_perturb_k=int(skill_cfg.get("curobo_joint_perturb_k", 0)),
+        joint_perturb_mag=float(skill_cfg.get("curobo_joint_perturb_mag", 0.0)),
         # Option A wrist-cam transit bias: clamp via-point orientations to
         # pitch-down. Driven by the top-level transit_pitch_max_deg key.
         via_pitch_max_rad=(
@@ -148,12 +151,6 @@ class PreselectiveAcquirerServicer(
             if not _pk.startswith("observation.images."):
                 _pk = f"observation.images.{_pk}"
             self._camera_rename[str(_rk)] = _pk
-
-        # candidate dump — episode 별 폴더 분리용. server 는 Phase2 episode
-        # 번호를 직접 모르므로, episode 첫 transit(move_and_open) 을 경계로
-        # 카운트한다 (server 시작 후 순번 ep001, ep002, ...).
-        self._dump_ep_counter = 0
-        self._dump_prev_skill = ""
 
         # Phase2Candidate (T, H) chunking 파라미터 — curobo_candidate_gen 의 input.
         # T 는 trajectory 길이 N 에서 자동 계산 (stride=1). max_T_eval 은 cost cap.
@@ -231,6 +228,7 @@ class PreselectiveAcquirerServicer(
                   f"images_pickle_bytes={len(request.images_pickle)} "
                   f"raw_imgs={_img_info} "
                   f"→ curobo returned {len(cands)} cands", flush=True)
+            _t_curobo = time.perf_counter()
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"curobo plan_batch failed: {e}")
@@ -277,6 +275,7 @@ class PreselectiveAcquirerServicer(
                     # (proprio = observation.state) 과 unit 통일.
                     robot_state=np.asarray(state, dtype=np.float64),
                 )
+                _t_encode = time.perf_counter()
                 if p2_cands:
                     _c0 = p2_cands[0]
                     print(f"[debug] cand#0 state_keys={_c0.state_keys.shape} "
@@ -304,6 +303,7 @@ class PreselectiveAcquirerServicer(
                 # 4. Useful-OOD selection (§13.2): argmax U_VLA s.t. M̃_MI ≥ τ_MI.
                 #    vla_scorer 가 None 이면 argmax M_MI fallback.
                 selection = self.selector.select(p2_cands, vla_scorer=self.vla_scorer)
+                _t_select = time.perf_counter()
                 _reports = selection.reports or []
                 _under = sum(1 for r in _reports if r.under_covered)
                 _mn = [r.q2_norm for r in _reports]
@@ -328,27 +328,35 @@ class PreselectiveAcquirerServicer(
                     f"U_VLA[min,max,mean]={_stats(_uvla)}",
                     flush=True,
                 )
-                # candidate dump — 128 후보 trajectory(EE 경로) + per-candidate
-                # 점수 + selection 결과를 npz 로 보존 (시각화/사후분석용).
-                # scripts/visualize_phase2_candidates.py 가 소비. dump 실패는
-                # selection 흐름에 영향 주지 않도록 격리.
+                # 단계별 소요 — curobo plan_batch / VLA embedding(encode) /
+                # selection(M_MI + U_VLA score_batch) 의 wall-clock.
+                print(
+                    f"[timing] curobo={(_t_curobo - t0) * 1000:.0f}ms  "
+                    f"encode(VLA embed)={(_t_encode - _t_curobo) * 1000:.0f}ms  "
+                    f"select(M_MI+U_VLA)={(_t_select - _t_encode) * 1000:.0f}ms",
+                    flush=True,
+                )
+                # PlanResponse.selection_id — accept_to_buffer·candidate dump·
+                # client episode hook 이 공유하는 selection 식별자.
+                sel_id = uuid.uuid4().hex
+                # candidate dump — 128 후보 trajectory + per-candidate 점수 +
+                # selection + top-view 이미지를 npz 로 보존. 파일명이 sel_id 라
+                # client 가 PlanResponse.selection_id 로 이 dump 를 특정한다.
+                # dump 실패는 selection 흐름과 격리.
                 try:
                     from method3.phase2_mi_selection.candidate_dump import (
                         dump_phase2_candidates,
                     )
-                    # episode 경계 — move_and_open(episode 첫 transit) 이
-                    # 직전과 달리 새로 나오면 새 episode 로 카운트.
-                    if (skill_id == "move_and_open"
-                            and self._dump_prev_skill != "move_and_open"):
-                        self._dump_ep_counter += 1
-                    self._dump_prev_skill = skill_id
-                    _ep_label = f"ep{self._dump_ep_counter:03d}"
                     _dump = dump_phase2_candidates(
                         self.curobo, cands, selection,
                         skill_id=skill_id, seed_xyz=seed_xyz,
                         start_qpos=start_qpos, goal_qpos=goal_qpos,
                         tau_MI=self.selector.cfg.tau_MI,
-                        episode=_ep_label,
+                        selection_id=sel_id,
+                        # top-view(camera2) 이미지 — client 오버레이 배경.
+                        top_image=raw_imgs.get("observation.images.camera2"),
+                        # g.t. descriptor(servo DCT) → radians 변환용 calib.
+                        servo_calib_path=self._candidate_cfg.servo_calibration_file,
                     )
                     print(f"[server] candidate dump → {_dump}", flush=True)
                 except Exception as _de:
@@ -371,7 +379,7 @@ class PreselectiveAcquirerServicer(
         # 5. inline accept — useful-OOD 가 accepted 면 SkillVectorDB 에 즉시 append
         #    (옛 CommitToBuffer 의 retro pattern 대체. 학습 데이터의 무결성은
         #    client 의 judge-FALSE 시 IngestEpisode 미호출로 자연 보존).
-        sel_id = uuid.uuid4().hex
+        #    sel_id 는 위 candidate dump 블록에서 이미 생성됨.
         if selection.accepted:
             try:
                 with self._lock:

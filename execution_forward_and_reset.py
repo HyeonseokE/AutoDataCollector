@@ -1177,6 +1177,85 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception as e:
             print(f"[Method3 phase2] subgoal replay 부착 실패: {e}")
 
+    def _phase2_dump_remote(self) -> str | None:
+        """phase2_config.yaml 의 remote → 'user@host:<project>/results/phase2_cands'.
+
+        server 의 candidate dump 디렉터리 — episode hook 이 scp 로 가져온다.
+        """
+        cfg_path = (Path(__file__).resolve().parent
+                    / "pipeline_config" / "phase2_config.yaml")
+        if not cfg_path.exists():
+            return None
+        try:
+            import yaml as _yaml
+            with open(cfg_path, "r") as f:
+                cfg = _yaml.safe_load(f) or {}
+            r = cfg.get("remote") or {}
+            user, host, proj = r.get("user"), r.get("hostname"), r.get("project_path")
+            if user and host and proj:
+                return f"{user}@{host}:{proj}/results/phase2_cands"
+        except Exception:
+            pass
+        return None
+
+    def _dump_phase2_candidate_overlays(self, forward_dir: str) -> None:
+        """이번 episode 의 Phase2 candidate dump 를 server 에서 가져와 top-view
+        오버레이 PNG 를 forward_dir 에 ``skill{N}_{skill}.png`` 로 저장한다.
+
+        server 가 plan_and_select 마다 ``phase2_cands/<selection_id>.npz`` 로
+        dump 하고, GrpcPlannerClient 가 (selection_id, skill_id) 를 누적해 둔다.
+        episode 종료 시 ``pop_dump_refs()`` 로 가져와 selection_id 로 scp →
+        ``visualize_phase2_candidates.visualize`` 로 오버레이.
+        """
+        adapter = getattr(self, "_skill_planner_client", None)
+        if adapter is None or not hasattr(adapter, "pop_dump_refs"):
+            return
+        refs = adapter.pop_dump_refs()
+        if not refs:
+            return
+        remote = self._phase2_dump_remote()
+        if not remote:
+            print("  [phase2 overlay] phase2_config.remote 미설정 — skip")
+            return
+        import subprocess
+        import sys
+        import tempfile
+        _scripts = str(Path(__file__).resolve().parent / "scripts")
+        if _scripts not in sys.path:
+            sys.path.insert(0, _scripts)
+        try:
+            from visualize_phase2_candidates import visualize
+        except Exception as e:
+            print(f"  [phase2 overlay] visualize import 실패: {e}")
+            return
+        # conda env(lerobot_cap)의 LD_LIBRARY_PATH 가 시스템 scp(OpenSSH)의
+        # OpenSSL 을 깨뜨린다(version mismatch → rc=255). 제거한 env 로 scp.
+        _scp_env = {k: v for k, v in os.environ.items()
+                    if k != "LD_LIBRARY_PATH"}
+        n_ok = 0
+        for idx, (sel_id, skill) in enumerate(refs):
+            tmp = tempfile.mktemp(suffix=".npz")
+            try:
+                r = subprocess.run(
+                    ["scp", "-o", "ConnectTimeout=15",
+                     f"{remote}/{sel_id}.npz", tmp],
+                    capture_output=True, timeout=40, env=_scp_env,
+                )
+                if r.returncode != 0 or not os.path.exists(tmp):
+                    print(f"  [phase2 overlay] scp 실패 {sel_id[:8]}: "
+                          f"{r.stderr.decode('utf-8', 'ignore')[:120]}")
+                    continue
+                out = os.path.join(forward_dir, f"skill{idx}_{skill}.png")
+                visualize(tmp, out_path=out)
+                n_ok += 1
+            except Exception as e:
+                print(f"  [phase2 overlay] {sel_id[:8]} 실패: {e}")
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+        if n_ok:
+            print(f"  [phase2 overlay] {n_ok}/{len(refs)} 개 → {forward_dir}")
+
     def _build_phase2_selector(self):
         """phase2_config.yaml.mi_selection 으로 Phase2MISelector 인스턴스화.
 
@@ -3356,6 +3435,16 @@ class ForwardAndResetPipeline(BasePipeline):
                 from pipeline.save_logs import save_execution_context as _save_ec
                 _save_ec(forward_dir, instruction, self.detected_positions,
                          self.generated_code, forward_success, robot_id=self.robot_id)
+
+                # Phase2 candidate top-view 오버레이 — forward 종료 직후,
+                # dataset 저장 전(execution_context 등 로깅 시점)에 이번 episode
+                # 의 plan_and_select dump 를 server 에서 가져와 forward_dir 에
+                # skill{N}_{skill}.png 로 저장. phase1 이면 dump_refs 가 비어
+                # no-op.
+                try:
+                    self._dump_phase2_candidate_overlays(forward_dir)
+                except Exception as _e:
+                    print(f"  Warning: phase2 candidate overlay 실패: {_e}")
 
                 # ================================================================
                 # PHASE 2: JUDGE (EVALUATION)

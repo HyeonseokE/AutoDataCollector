@@ -64,6 +64,20 @@ class GrpcPlannerClient:
         self._client = client
         self._provider = context_provider
         self._skill_id = str(skill_id)
+        # candidate dump 참조 — plan_batch 마다 (selection_id, skill_id) 누적.
+        # episode 종료 시 client 가 pop_dump_refs() 로 가져가 server 의 dump
+        # (phase2_cands/<selection_id>.npz) 를 scp + 오버레이한다.
+        self._dump_refs: list[tuple[str, str]] = []
+
+    def pop_dump_refs(self) -> list[tuple[str, str]]:
+        """누적된 (selection_id, skill_id) 목록을 반환하고 비운다.
+
+        client 가 episode 종료 시 호출 — 이번 episode 의 plan_and_select 들이
+        남긴 dump 참조를 모두 가져가고 다음 episode 를 위해 clear.
+        """
+        refs = list(self._dump_refs)
+        self._dump_refs.clear()
+        return refs
 
     # ------------------------------------------------------------------
     # plan_batch — drop-in replacement for CuroboBackend
@@ -137,6 +151,12 @@ class GrpcPlannerClient:
         )
         _label = "used_fallback" if resp.get("used_fallback", False) else "accepted"
         print(f"\033[91m[Phase2-Selection] skill={effective_skill_id} {_label} | {_summary}\033[0m", flush=True)
+
+        # candidate dump 참조 누적 — server 가 dump 한 npz 파일명 = selection_id.
+        # episode 종료 시 client 가 pop_dump_refs() 로 가져가 scp + 오버레이.
+        _sid = str(resp.get("selection_id", "") or "")
+        if _sid:
+            self._dump_refs.append((_sid, effective_skill_id))
 
         if resp.get("used_fallback", False):
             return []

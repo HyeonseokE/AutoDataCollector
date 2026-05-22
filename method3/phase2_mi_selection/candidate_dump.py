@@ -63,14 +63,18 @@ def _goal_ee_xyz(curobo_backend, goal_qpos) -> np.ndarray | None:
 
 
 def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
-                goal_ee_xyz: np.ndarray):
-    """P_phase1 DB 에서 이 skill·subgoal 의 g.t. trajectory 를 복원.
+                goal_ee_xyz: np.ndarray, converter=None,
+                start_ee_xyz: np.ndarray | None = None):
+    """P_phase1 DB 에서 이 skill segment 의 g.t. trajectory 를 복원.
 
-    DB 의 ``<skill>::descriptors`` (DCT_50, 250=50×5) 를 ``dct_to_traj`` 로
-    joint trajectory 로 역변환하고 curobo FK 로 EE 경로화한다. ``goal_ee_xyz``
-    (이번 plan 의 목표 EE) 와 가장 가까운 ``meta.subgoal`` 의 entry 를 매칭한다
-    — Phase2 가 replay 한 subgoal 은 Phase1 도달 subgoal 과 동일하므로 nearest
-    매칭이 그 episode 의 해당 skill segment 를 정확히 특정한다.
+    DB 의 ``<skill>::descriptors`` (DCT_50, servo-space) 를 모두 ``dct_to_traj``
+    로 역변환 → ``converter`` 로 radians → curobo FK 로 EE 경로화한다. 그 중
+    이번 plan 의 **start_ee + goal_ee 둘 다**에 가장 가까운 entry 를 고른다.
+
+    start 까지 보는 이유: ``move`` 처럼 episode 당 여러 번 나오는 skill 은
+    도달점(goal)만으로는 instance 를 구분할 수 없다 (time_index 2 의 move 와
+    4 의 move 는 goal 이 비슷해도 start 가 다름). goal 만으로 nearest 하면
+    엉뚱한 instance 의 g.t. 가 잡혀 "여러 동작이 합쳐진" 경로처럼 보인다.
 
     Returns:
         (gt_ee_path (T,3) | None, episode_id: str, gt_subgoal (3,) | None)
@@ -89,37 +93,48 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     descriptors = d[dkey]                                   # (N, L0*dof)
     metas = d[mkey] if mkey in d.files else None
     refs = d[rkey] if rkey in d.files else None
+    if len(descriptors) == 0:
+        return None, "", None
 
-    # meta.subgoal nearest 매칭.
-    g = np.asarray(goal_ee_xyz, dtype=float).reshape(-1)[:3]
-    best, best_dist = -1, float("inf")
+    # 모든 entry 의 descriptor(servo DCT) → servo → radians 복원.
+    L0 = 50
+    joint_trajs: list[np.ndarray] = []
     for i in range(len(descriptors)):
-        if metas is None:
-            break
-        try:
-            sg = json.loads(str(metas[i])).get("subgoal")
-        except Exception:
-            sg = None
-        if sg is None:
+        desc = np.asarray(descriptors[i], dtype=float)
+        dof = max(1, desc.size // L0)
+        servo = np.asarray(dct_to_traj(desc.reshape(L0, dof), L0), dtype=float)
+        if converter is not None:
+            try:
+                jt = np.asarray(
+                    converter.normalized_to_radians(servo), dtype=float)
+            except Exception:
+                jt = servo
+        else:
+            jt = servo
+        joint_trajs.append(jt)
+    # curobo FK 로 모든 entry 의 EE 경로 (batch).
+    ee_all = _ee_paths_via_fk(curobo_backend, joint_trajs)
+
+    # start+goal 동시 매칭 — entry 의 EE 경로 끝(=도달점)·시작과 비교.
+    g = np.asarray(goal_ee_xyz, dtype=float).reshape(-1)[:3]
+    s = (np.asarray(start_ee_xyz, dtype=float).reshape(-1)[:3]
+         if start_ee_xyz is not None else None)
+    best, best_score = -1, float("inf")
+    for i, ee in enumerate(ee_all):
+        if ee is None:
             continue
-        sg = np.asarray(sg, dtype=float).reshape(-1)
-        if sg.shape[0] < 3:
+        ee = np.asarray(ee, dtype=float)
+        if ee.ndim != 2 or len(ee) < 2:
             continue
-        dist = float(np.linalg.norm(sg[:3] - g))
-        if dist < best_dist:
-            best_dist, best = dist, i
+        score = float(np.linalg.norm(ee[-1] - g))
+        if s is not None:
+            score += float(np.linalg.norm(ee[0] - s))
+        if score < best_score:
+            best_score, best = score, i
     if best < 0:
         return None, "", None
 
-    # DCT_50 descriptor → joint trajectory → curobo FK → EE 경로.
-    desc = np.asarray(descriptors[best], dtype=float)
-    L0 = 50
-    dof = max(1, desc.size // L0)
-    coeffs = desc.reshape(L0, dof)
-    joint_traj = np.asarray(dct_to_traj(coeffs, L0), dtype=float)   # (L0, dof)
-    ee = _ee_paths_via_fk(curobo_backend, [joint_traj])
-    gt_ee = ee[0] if ee else None
-
+    gt_ee = np.asarray(ee_all[best], dtype=float)
     episode_id, gt_subgoal = "", None
     if refs is not None:
         try:
@@ -146,8 +161,10 @@ def dump_phase2_candidates(
     goal_qpos,
     tau_MI: float,
     dump_dir: str = "results/phase2_cands",
-    episode: str = "",
+    selection_id: str = "",
     db_npz_path: str = _DEFAULT_DB_NPZ,
+    top_image=None,
+    servo_calib_path: str | None = None,
 ) -> str:
     """plan_and_select 한 회의 전체 후보 상태 + g.t. 를 npz 로 저장. 경로 반환.
 
@@ -184,8 +201,18 @@ def dump_phase2_candidates(
     gt_ee_path, gt_episode, gt_subgoal = None, "", None
     if goal_ee is not None:
         try:
+            _conv = None
+            if servo_calib_path:
+                from method3.phase2_mi_selection.curobo_candidate_gen import (
+                    _get_converter,
+                )
+                _conv = _get_converter(servo_calib_path)
+            # start_ee — 이번 plan 의 출발 EE. move 처럼 episode 당 여러 번
+            # 나오는 skill 의 g.t. instance 구분에 쓰인다.
+            _start_ee = _goal_ee_xyz(curobo_backend, start_qpos)
             gt_ee_path, gt_episode, gt_subgoal = _extract_gt(
-                curobo_backend, db_npz_path, skill_id, goal_ee)
+                curobo_backend, db_npz_path, skill_id, goal_ee, _conv,
+                start_ee_xyz=_start_ee)
         except Exception:
             gt_ee_path, gt_episode, gt_subgoal = None, "", None
 
@@ -194,11 +221,13 @@ def dump_phase2_candidates(
             return np.zeros(K, dtype=float)
         return np.array([float(getattr(r, attr)) for r in reports], dtype=float)
 
-    # episode 별 하위폴더로 분리 (episode 비면 dump_dir 직속).
-    sub_dir = Path(dump_dir) / episode if episode else Path(dump_dir)
-    sub_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
-    path = str(sub_dir / f"{skill_id}_{stamp}.npz")
+    # selection_id 파일명 — client 가 PlanResponse.selection_id 로 이 dump 를
+    # 특정해 episode 종료 시 가져간다. selection_id 가 비면 timestamp fallback.
+    Path(dump_dir).mkdir(parents=True, exist_ok=True)
+    _name = selection_id or (
+        time.strftime("%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}_{skill_id}"
+    )
+    path = str(Path(dump_dir) / f"{_name}.npz")
 
     np.savez(
         path,
@@ -227,8 +256,13 @@ def dump_phase2_candidates(
         seed_xyz=np.asarray(seed_xyz, dtype=float).reshape(-1)[:3],
         start_qpos=np.asarray(start_qpos, dtype=float).reshape(-1),
         goal_qpos=np.asarray(goal_qpos, dtype=float).reshape(-1),
+        # top-view 카메라 이미지 — client 가 robot→pixel 투영으로 trajectory
+        # 오버레이를 그릴 배경. 없으면 빈 배열.
+        top_image=(np.asarray(top_image, dtype=np.uint8)
+                   if top_image is not None
+                   else np.zeros((0, 0, 3), dtype=np.uint8)),
         skill_id=str(skill_id),
         tau_MI=float(tau_MI),
-        episode=str(episode),
+        selection_id=str(selection_id),
     )
     return path

@@ -36,7 +36,11 @@ import numpy as np
 
 from method3.phase2_mi_selection.action_coverage import action_coverage_gain
 from method3.phase2_mi_selection.action_descriptor import dct_action_descriptor
-from method3.phase2_mi_selection.conditional_ambiguity import conditional_ambiguity
+from method3.phase2_mi_selection.conditional_ambiguity import (
+    conditional_ambiguity,
+    reset_amb_timing,
+    get_amb_timing,
+)
 from method3.phase2_mi_selection.radius import state_neighborhood_radius
 from method3.phase2_mi_selection.vector_db import SkillVectorDB, VectorDBEntry
 
@@ -205,6 +209,9 @@ class Phase2MISelector:
     def score_one(self, index: int, candidate: Phase2Candidate) -> Phase2ScoreReport:
         """후보 하나의 ΔH_A·ΔH_A|S·Q2 (정규화 전) 계산 (문서 §8-11)."""
         cfg = self.cfg
+        import time as _tmod
+        _acc = getattr(self, "_t_acc", None)
+        _t = _tmod.perf_counter()
         cand_z = self.action_descriptors(candidate)
         db_keys = self.db.state_keys(candidate.skill_id)
         db_z = self.db.action_descriptors(candidate.skill_id)
@@ -222,6 +229,9 @@ class Phase2MISelector:
             if db_keys.ndim == 2 and db_keys.shape[1] > (full - arm):
                 db_keys = db_keys[:, :-(full - arm)]
         n_windows = cand_z.shape[0]
+        if _acc is not None:
+            _acc["db"] += _tmod.perf_counter() - _t
+            _t = _tmod.perf_counter()
 
         # Cold-start — buffer 가 2개 미만이면 d̄_NN/radius 를 계산할 수 없다.
         # ΔH_A·ΔH_A|S 를 0 으로 두고 under-covered 로 표시한다 (Phase1 seed 가
@@ -233,10 +243,23 @@ class Phase2MISelector:
         # §8 — action coverage gain ΔH_A.
         delta_a = action_coverage_gain(
             cand_z, db_z, cfg.k_nn_a, cfg.q_quantile, cfg.eps)
+        if _acc is not None:
+            _acc["cov"] += _tmod.perf_counter() - _t
+            _t = _tmod.perf_counter()
 
-        # §16 — skill buffer 에서 state-neighborhood radius ρ_m 자동 추정.
-        radius = state_neighborhood_radius(
-            db_keys, cfg.radius_k, cfg.radius_quantile)
+        # §16 — state-neighborhood radius ρ_m. db_keys 는 한 plan_and_select
+        # 내 모든 후보가 동일하므로 skill 별 1회만 계산하고 cache. 128× 중복
+        # 호출이 select 의 최대 병목이었다 (timing rad≈18.5s → 1회 ≈0.15s).
+        _rc = getattr(self, "_radius_cache", None)
+        if _rc is not None and _rc[0] == candidate.skill_id:
+            radius = _rc[1]
+        else:
+            radius = state_neighborhood_radius(
+                db_keys, cfg.radius_k, cfg.radius_quantile)
+            self._radius_cache = (candidate.skill_id, radius)
+        if _acc is not None:
+            _acc["rad"] += _tmod.perf_counter() - _t
+            _t = _tmod.perf_counter()
 
         # 진단 — index==0 일 때 한 번만 출력. why under_covered? 거리 분포 + radius.
         if index == 0:
@@ -259,9 +282,22 @@ class Phase2MISelector:
                 print(f"[diagnose] failed: {_e}", flush=True)
 
         # §9 — conditional ambiguity increase ΔH_A|S (covered window 만).
+        # db_z pairwise distance — §9.3 s_a(mean_nn) 용. db_z 는 한
+        # plan_and_select 내 동일하므로 skill 별 1회만 계산하고 cache
+        # (radius cache 와 동일 패턴 — covered window 128× 중복 제거).
+        _pc = getattr(self, "_pdist_cache", None)
+        if _pc is not None and _pc[0] == candidate.skill_id:
+            db_z_pdist = _pc[1]
+        else:
+            db_z_pdist = np.linalg.norm(
+                db_z[:, None, :] - db_z[None, :, :], axis=2)
+            self._pdist_cache = (candidate.skill_id, db_z_pdist)
         amb = conditional_ambiguity(
             candidate.state_keys, cand_z, db_keys, db_z,
-            radius, cfg.k_min, cfg.s_min_a, cfg.eps, cfg.amb_agg)
+            radius, cfg.k_min, cfg.s_min_a, cfg.eps, cfg.amb_agg,
+            db_z_pdist=db_z_pdist)
+        if _acc is not None:
+            _acc["amb"] += _tmod.perf_counter() - _t
 
         under = amb.n_covered < cfg.min_covered_windows
         q2 = cfg.beta * delta_a - cfg.lambda_ * amb.delta_h_a_given_s   # §11
@@ -306,7 +342,14 @@ class Phase2MISelector:
         if not candidates:
             raise ValueError("candidates is empty")
         cfg = self.cfg
+        import time as _t_mod
+        _t0 = _t_mod.perf_counter()
+        self._t_acc = {"db": 0.0, "cov": 0.0, "rad": 0.0, "amb": 0.0}
+        self._radius_cache = None  # plan_and_select 마다 invalidate
+        self._pdist_cache = None   # db_z pairwise distance cache invalidate
+        reset_amb_timing()  # amb 내부 timing (state/zdist/loop) reset
         reports = [self.score_one(i, c) for i, c in enumerate(candidates)]
+        _t_mmi = _t_mod.perf_counter()
 
         # Stage 1 — §11 M_MI 계산 + §13.2 batch 정규화 M̃_MI.
         m_mi = np.array([r.q2 for r in reports], dtype=np.float64)
@@ -335,6 +378,20 @@ class Phase2MISelector:
                 u_scores = [vla_scorer.score(c) for c in elig_cands]
             for j, i in enumerate(eligible):
                 u_vla[i] = float(u_scores[j])
+
+        _t_uvla = _t_mod.perf_counter()
+        _a = self._t_acc
+        _at = get_amb_timing()
+        print(
+            f"[timing:select] M_MI({len(candidates)}cand)="
+            f"{(_t_mmi - _t0) * 1000:.0f}ms "
+            f"[db={_a['db'] * 1000:.0f} cov={_a['cov'] * 1000:.0f} "
+            f"rad={_a['rad'] * 1000:.0f} amb={_a['amb'] * 1000:.0f}"
+            f"(state={_at['state'] * 1000:.0f} zdist={_at['zdist'] * 1000:.0f} "
+            f"loop={_at['loop'] * 1000:.0f})]  "
+            f"U_VLA({len(eligible)}elig)={(_t_uvla - _t_mmi) * 1000:.0f}ms",
+            flush=True,
+        )
 
         # report 에 정규화 score · U_VLA 를 채워 dataclass 재생성.
         reports = [

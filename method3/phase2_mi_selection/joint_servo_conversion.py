@@ -134,3 +134,21 @@ class JointServoConverter:
         # drive_mode inversion
         sign = np.where(self.drive_modes == 1, -1.0, 1.0)
         return base * sign + self.offset_normalized
+
+    def normalized_to_radians(self, normalized: np.ndarray) -> np.ndarray:
+        """Convert normalized servo positions (-100~+100) → URDF radians.
+
+        ``radians_to_normalized`` 의 역변환. uncalibrated joint
+        (half_range==0) 는 정보가 없어 0 rad 로 둔다 (* half_range 가 0 이므로
+        자동). 입력 ``(..., n_joints)`` → ``(..., n_joints)``.
+        """
+        norm = np.asarray(normalized, dtype=np.float64)
+        n_joints = self.half_range_radians.shape[0]
+        if norm.shape[-1] != n_joints:
+            raise ValueError(
+                f"normalized last-dim={norm.shape[-1]} ≠ n_joints={n_joints} "
+                f"(joints={self.joint_names})"
+            )
+        sign = np.where(self.drive_modes == 1, -1.0, 1.0)
+        base = (norm - self.offset_normalized) * sign
+        return (base / 100.0) * self.half_range_radians

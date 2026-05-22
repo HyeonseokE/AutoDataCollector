@@ -92,6 +92,13 @@ class CuroboBackendConfig:
     # two endpoint orientations are far apart. None = no clamp (legacy).
     via_pitch_max_rad: Optional[float] = None
 
+    # joint-space 저주파 perturbation — curobo collision-free trajectory 에
+    # boundary-0 sinusoidal Σ_{k=1}^{K} a_k·sin(kπt) 를 더해 경로를 질적으로
+    # 다양화한다. sin(kπ·0)=sin(kπ)=0 이라 start/goal joint 는 보존. K 를
+    # 2~3 저주파로 두므로 매끄러운 S자/곡선 — 고주파 noise 아님. 0 = off.
+    joint_perturb_k: int = 0          # 저주파 항 개수 K (2~3 권장)
+    joint_perturb_mag: float = 0.0    # rad — per-joint amplitude 범위
+
 
 class CuroboBackend:
     """Single-process curobo wrapper with batched, graph-cached planning.
@@ -432,6 +439,8 @@ class CuroboBackend:
                 full_wp = self._smooth_junction(full_wp, next_seg, k=seg_k)
 
             full_wp = self._apply_fixed_joint_lock(full_wp, start_full)
+            # joint-space 저주파 perturbation — 경로 다양화 (start/goal 보존).
+            full_wp = self._apply_joint_perturbation(full_wp, rng)
             algo_name = "curobo:direct" if K == 0 else f"curobo:via{K}_s{i}"
 
             candidates.append(self._make_candidate(
@@ -485,6 +494,38 @@ class CuroboBackend:
     def _compute_ee_xyz_quat(self, qpos_full: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Single-config FK convenience wrapper around the batched call."""
         return self._compute_ee_xyz_quat_batch([qpos_full])[0]
+
+    def _apply_joint_perturbation(
+        self,
+        waypoints: np.ndarray,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """boundary-0 저주파 sinusoidal perturbation 으로 경로를 다양화.
+
+        q'(t) = q(t) + Σ_{k=1}^{K} a_k·sin(kπt). sin(kπt) 는 t=0,1 에서 0
+        이므로 start/goal joint 가 그대로 보존된다 (collision-free baseline
+        의 양 끝 유지). per-candidate random amplitude 라 후보마다 다른 굴곡
+        → curobo via 만으로는 안 나오는 joint-space 다양성. fixed joint
+        (wrist_roll 등)은 cartesian IK lock 유지를 위해 perturbation 제외.
+        K 를 2~3 저주파로만 쓰므로 매끄러운 S자/곡선 (고주파 noise 아님).
+        """
+        K = int(self.cfg.joint_perturb_k)
+        mag = float(self.cfg.joint_perturb_mag)
+        if K <= 0 or mag <= 0.0:
+            return waypoints
+        wp = np.asarray(waypoints, dtype=float)
+        if wp.ndim != 2 or wp.shape[0] < 3:
+            return waypoints
+        T, dof = wp.shape
+        t = np.linspace(0.0, 1.0, T)
+        perturb = np.zeros((T, dof), dtype=float)
+        for k in range(1, K + 1):
+            a = rng.uniform(-mag, mag, size=dof)
+            perturb += np.sin(k * np.pi * t)[:, None] * a[None, :]
+        for idx in self._fixed_idx:
+            if 0 <= idx < dof:
+                perturb[:, idx] = 0.0
+        return wp + perturb
 
     def _compute_via_xyz(
         self,

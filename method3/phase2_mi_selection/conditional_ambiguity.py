@@ -22,6 +22,20 @@ import numpy as np
 
 from method3.phase2_mi_selection.neighbor_search import mean_nn_distance, min_distance
 
+# conditional_ambiguity 내부 단계별 누적 시간 (디버그용). mi_selector.select 가
+# plan_and_select 마다 reset 하고 [timing:select] 에 출력한다.
+_AMB_T = {"state": 0.0, "zdist": 0.0, "loop": 0.0}
+
+
+def reset_amb_timing() -> None:
+    """conditional_ambiguity 내부 누적 timing 초기화 (plan_and_select 마다)."""
+    _AMB_T.update(state=0.0, zdist=0.0, loop=0.0)
+
+
+def get_amb_timing() -> dict:
+    """누적 timing snapshot — {state, zdist, loop} (초 단위)."""
+    return dict(_AMB_T)
+
 
 @dataclass(frozen=True)
 class ConditionalAmbiguityReport:
@@ -79,6 +93,7 @@ def conditional_ambiguity(
     s_min: float = 1e-3,
     eps: float = 1e-6,
     agg: str = "mean",
+    db_z_pdist: np.ndarray | None = None,
 ) -> ConditionalAmbiguityReport:
     """``ΔH_A|S(D_t, ξ)`` — trajectory-level conditional ambiguity (문서 §9).
 
@@ -99,25 +114,64 @@ def conditional_ambiguity(
     """
     if agg not in ("mean", "max"):
         raise ValueError(f"agg must be 'mean' or 'max', got {agg!r}")
+    import time as _tm
     cand_z = np.asarray(candidate_descriptors, dtype=np.float64)
     db_z = np.asarray(db_action_descriptors, dtype=np.float64)
-    n_windows = int(np.asarray(candidate_keys).shape[0])
+    cand_keys = np.asarray(candidate_keys, dtype=np.float64)
+    db_keys = np.asarray(db_state_keys, dtype=np.float64)
+    n_windows = int(cand_keys.shape[0])
+    if cand_keys.ndim != 2:
+        raise ValueError(f"candidate_keys must be (T, D_e), got {cand_keys.shape}")
+    if db_keys.ndim != 2 or db_keys.shape[0] == 0:
+        return ConditionalAmbiguityReport(0.0, 0, n_windows)
 
-    covered = covered_windows(candidate_keys, db_state_keys, radius, k_min)
-    # use_dct_target=True 면 cand_z 가 *skill-atomic single window* (1, D_z) —
-    # 모든 τ 에 동일 row broadcast. legacy frame-level path 면 cand_z.shape[0]==T.
+    _t = _tm.perf_counter()
+    # §9.1 covered window — state distance. window 축 broadcast
+    # ``norm(db[None]-cand[:,None], axis=2)`` 는 (T,N,D=965) 임시(100MB+)가
+    # 메모리 압박을 일으켜 오히려 느리므로 — 작은 임시(N,D)만 쓰는 τ-loop 로
+    # 계산한다. ``norm(db - cand[τ], axis=1)`` 은 broadcast 판·원본
+    # covered_windows() 와 bit-exact (동일 numpy 연산, 동일 행).
+    _N = db_keys.shape[0]
+    state_dist = np.empty((n_windows, _N), dtype=np.float64)      # (T, N)
+    for _tau in range(n_windows):
+        state_dist[_tau] = np.linalg.norm(db_keys - cand_keys[_tau], axis=1)
+    covered_mask = state_dist < radius                            # (T, N)
+    covered_count = covered_mask.sum(axis=1)                      # (T,)
+    _AMB_T["state"] += _tm.perf_counter() - _t
+    _t = _tm.perf_counter()
+
+    # §9.3 d_min 용 — cz_row vs 모든 db_z 의 action descriptor distance.
+    # z_dist[c] 의 neighbor 부분집합은 min_distance(cz, db_z[nb]) 의 norm 과
+    # bit-exact (동일 행 부분집합). use_dct_target 면 cand_z 가 (1, D_z) —
+    # 모든 τ 에 cand_z[0] broadcast, legacy 면 cand_z.shape[0]==T.
     _cand_n = cand_z.shape[0]
+    z_dist = np.linalg.norm(
+        db_z[None, :, :] - cand_z[:, None, :], axis=2)            # (cand_n, N)
+    _AMB_T["zdist"] += _tm.perf_counter() - _t
+    _t = _tm.perf_counter()
+
     deltas: list[float] = []
-    for tau, neighbors in covered:
-        support = db_z[neighbors]                          # §9.2 A_{e_τ}
-        _cz_row = cand_z[tau if tau < _cand_n else 0]
-        d_min = min_distance(_cz_row, support)             # §9.3 d_min^a
-        # covered → |support| >= k_min >= 2 이므로 d̄_NN 계산 가능.
-        s_a = max(mean_nn_distance(support), s_min)        # §9.3 s_a
+    for tau in range(n_windows):
+        if int(covered_count[tau]) < k_min:
+            continue
+        neighbors = np.flatnonzero(covered_mask[tau])             # §9.1
+        cz_idx = tau if tau < _cand_n else 0
+        d_min = float(z_dist[cz_idx, neighbors].min())            # §9.3 d_min^a
+        # §9.3 s_a — support 내부 mean NN distance. db_z_pdist (db_z 전체의
+        # pairwise distance) 가 주어지면 neighbor 부분행렬 인덱싱만 한다 —
+        # mean_nn_distance(db_z[neighbors]) 와 bit-exact (같은 db_z 행쌍,
+        # 같은 norm). 없으면 원본 mean_nn_distance fallback.
+        if db_z_pdist is not None:
+            _sub = db_z_pdist[np.ix_(neighbors, neighbors)].copy()
+            np.fill_diagonal(_sub, np.inf)
+            s_a = max(float(_sub.min(axis=1).mean()), s_min)
+        else:
+            s_a = max(mean_nn_distance(db_z[neighbors]), s_min)
         if d_min <= 0.0:
             deltas.append(0.0)                             # log(0) 단락
         else:
             deltas.append(max(math.log(d_min / (s_a + eps)), 0.0))   # §9.3
+    _AMB_T["loop"] += _tm.perf_counter() - _t
 
     if not deltas:
         return ConditionalAmbiguityReport(0.0, 0, n_windows)

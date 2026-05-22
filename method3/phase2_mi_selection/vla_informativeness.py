@@ -177,11 +177,11 @@ class LeRobotVLAInformativenessScorer:
             return float(np.max(losses))
         return float(np.mean(losses))
 
-    def score_batch(self, candidates, batch_size: int = 64) -> np.ndarray:
+    def score_batch(self, candidates, batch_size: int = 128) -> np.ndarray:
         """여러 candidate 의 U_VLA 를 GPU batched forward 로 일괄 계산 (dct mode).
 
-        Phase2 후보 수는 2^N (예: 128) 으로 잡으므로 ``batch_size`` (기본 64) 단위
-        로 묶어 GPU 에서 batched forward 한다 — candidate 1개씩 forward 하던 것
+        Phase2 후보 수는 2^N (예: 128) 으로 잡으므로 ``batch_size`` (기본 128)
+        단위로 묶어 GPU 에서 batched forward 한다 — candidate 1개씩 forward 하던 것
         대비 큰 속도 이득. 각 candidate 의 U_VLA 는 skill segment 의 *단일*
         DCT_50 target 에 대한 single-step denoise loss 이므로 batch 의 한 행에
         대응한다: skill 초기 관측(builder 결과의 첫 window)을 prefix,
@@ -223,41 +223,45 @@ class LeRobotVLAInformativenessScorer:
 
         out = np.zeros(n, dtype=float)
         was_training = getattr(self.policy, "training", False)
+        import time as _tmod
+        _tb_build = _tb_fwd = 0.0
         try:
             if hasattr(self.policy, "eval"):
                 self.policy.eval()
             with torch.no_grad():
                 for start in range(0, n, max(1, int(batch_size))):
+                    _t_c = _tmod.perf_counter()
                     chunk = candidates[start:start + max(1, int(batch_size))]
-                    rows: list[dict] = []
+                    # dct_target 필수 체크.
                     for c in chunk:
                         if c.dct_target is None:
                             raise ValueError(
                                 "mode='dct' requires candidate.dct_target — use "
                                 "curobo_candidate_gen.candidates_from_trajectory_list."
                             )
-                        b = builder(c)
-                        if b is None:
-                            raise ValueError(
-                                "batch_builder returned None — candidate may be "
-                                "missing observations/proprio."
-                            )
-                        if not isinstance(b, dict):
-                            b = dict(b)
-                        # skill 초기 관측 — builder 가 쌓은 T windows 중 첫 행만.
-                        # (image/instruction 은 전 window 동일, proprio 는 첫
-                        # window = skill 시작 상태. dct_target 은 아래에서 inject.)
-                        rows.append({
-                            k: (v[:1] if hasattr(v, "shape")
-                                and getattr(v, "ndim", 0) >= 1 else v)
-                            for k, v in b.items()
-                        })
-                    # 행들을 batch 차원으로 cat → (chunk_n, ...).
+                    # image/instruction/proprio(첫 window=skill 시작) 는 chunk 내
+                    # 모든 candidate 가 동일하다 — 같은 plan_and_select 의 obs.
+                    # candidate 마다 다른 건 dct_target(아래 inject) 뿐이므로
+                    # builder 를 1회만 호출하고 batch 차원으로 expand 한다.
+                    # builder 가 score_batch 의 최대 병목이었다 (13~18s →
+                    # 1회 ≈0.2s; candidate 마다 image resize/tokenize 중복).
+                    b0 = builder(chunk[0])
+                    if b0 is None:
+                        raise ValueError(
+                            "batch_builder returned None — candidate may be "
+                            "missing observations/proprio."
+                        )
+                    if not isinstance(b0, dict):
+                        b0 = dict(b0)
+                    cn = len(chunk)
                     batch: dict = {}
-                    for k in rows[0]:
-                        vs = [r[k] for r in rows]
-                        batch[k] = (torch.cat(vs, dim=0)
-                                    if hasattr(vs[0], "shape") else vs[0])
+                    for k, v in b0.items():
+                        if hasattr(v, "shape") and getattr(v, "ndim", 0) >= 1:
+                            # 첫 window (1, ...) → (chunk_n, ...) 로 expand.
+                            v1 = v[:1]
+                            batch[k] = v1.expand(cn, *v1.shape[1:]).contiguous()
+                        else:
+                            batch[k] = v
                     # dct_target → action 자리 (chunk_n, L0, dof).
                     z = np.stack([
                         np.asarray(c.dct_target, dtype=np.float32) for c in chunk
@@ -279,6 +283,8 @@ class LeRobotVLAInformativenessScorer:
                             _time = _time.to(_dev)
                         forward_kwargs["time"] = _time
                     # reduction="none" → per-sample loss (chunk_n,).
+                    _t_f = _tmod.perf_counter()
+                    _tb_build += _t_f - _t_c
                     out_t = self.policy.forward(
                         batch, reduction="none", **forward_kwargs
                     )
@@ -287,9 +293,15 @@ class LeRobotVLAInformativenessScorer:
                         loss_t.detach().cpu().numpy(), dtype=float
                     ).reshape(-1)
                     out[start:start + len(chunk)] = loss_np[:len(chunk)]
+                    _tb_fwd += _tmod.perf_counter() - _t_f
         finally:
             if was_training and hasattr(self.policy, "train"):
                 self.policy.train(True)
+        print(
+            f"[timing:score_batch] builder={_tb_build * 1000:.0f}ms  "
+            f"forward={_tb_fwd * 1000:.0f}ms  (n={n})",
+            flush=True,
+        )
         return out
 
 

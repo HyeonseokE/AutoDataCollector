@@ -475,11 +475,15 @@ class Phase1SubgoalSelector:
             natural_language=str(natural_language),
             skill_type=str(skill_type),
         ))
-        if self.cfg.debug_verbose:
-            self._dbg(
-                f"staged skill_type={skill_type} → episode pending={len(self._pending)}",
-                buffer_event=True,
-            )
+        # staging 요약 — 항상 초록색으로 간단히 출력.
+        _mv = self._pending[-1]
+        _g = _mv.goal
+        print(
+            f"{self._BUF_GREEN}[Subgoal] staged skill_{len(self._pending) - 1}  "
+            f"{_mv.skill_type or '?'}  \"{(_mv.natural_language or '')[:34]}\"  "
+            f"g=[{_g[0]:.3f}, {_g[1]:.3f}, {_g[2]:.3f}]  "
+            f"(episode pending={len(self._pending)}){self._BUF_END}"
+        )
 
     def flush_episode(self, episode_id: str = "") -> None:
         """episode TRUE 판정 → staged subgoal 들을 buffer 에 commit + 영속화 (문서 §5.5).
@@ -517,16 +521,15 @@ class Phase1SubgoalSelector:
         n = len(self._pending)
         self._pending.clear()
         self.buffer.save()   # 파일 미바인딩 시 no-op
-        if self.cfg.debug_verbose:
-            # 로그를 정직하게 — file 미바인딩이면 save() 가 no-op 이므로
-            # "saved" 라고 쓰지 않는다 (이전 misleading 로그 수정).
-            _fp = self.buffer.file_path()
-            _persisted = f"saved → {_fp}" if _fp is not None else "MEMORY-ONLY (no buffer_file bound)"
-            self._dbg(
-                f"flush episode (TRUE) → +{n} entries, "
-                f"buffer total={self.buffer.total_size()}, {_persisted}",
-                buffer_event=True,
-            )
+        # episode commit 요약 — 항상 초록색으로 간단히 출력.
+        # file 미바인딩이면 save() 가 no-op 이므로 "saved" 표기 안 함.
+        _fp = self.buffer.file_path()
+        _persisted = f"saved → {_fp}" if _fp is not None else "MEMORY-ONLY"
+        print(
+            f"{self._BUF_GREEN}[Subgoal] episode TRUE → +{n} subgoals committed "
+            f"(skill_0..skill_{n - 1}), buffer total={self.buffer.total_size()}, "
+            f"{_persisted}{self._BUF_END}"
+        )
 
     def discard_episode(self) -> None:
         """episode FALSE/UNCERTAIN 판정 → staged subgoal 폐기 (문서 §5.5).

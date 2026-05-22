@@ -635,8 +635,9 @@ class TestDebugVerbose:
 
         out = capsys.readouterr().out
         assert "[Subgoal-Phase1][debug]" in out
-        assert "staged skill_type=" in out
-        assert "flush episode" in out
+        # staging/flush 는 always-on 초록 로그 (debug_verbose 무관).
+        assert "[Subgoal] staged skill_" in out
+        assert "[Subgoal] episode TRUE" in out
         assert "CHOSEN cand#" in out
         assert "gain" in out
 

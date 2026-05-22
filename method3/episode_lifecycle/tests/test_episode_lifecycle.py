@@ -198,10 +198,11 @@ class TestFlushEpisodeStamping:
             Phase1SubgoalSelector,
         )
         sel = Phase1SubgoalSelector(SubgoalBuffer(), Phase1SubgoalConfig())
-        sel.stage_executed("move", np.zeros(3), np.array([0.3, 0.0, 0.2]))
-        sel.stage_executed("move", np.zeros(3), np.array([0.3, 0.1, 0.2]))
+        sel.stage_executed(np.zeros(3), np.array([0.3, 0.0, 0.2]))
+        sel.stage_executed(np.zeros(3), np.array([0.3, 0.1, 0.2]))
         sel.flush_episode(episode_id="episode_07")
-        committed = sel.buffer.entries("move")
+        # ordinal 키 — 2개 staged → skill_0, skill_1.
+        committed = sel.buffer.entries("skill_0") + sel.buffer.entries("skill_1")
         assert len(committed) == 2
         assert all(e.episode_id == "episode_07" for e in committed)
 
@@ -211,10 +212,10 @@ class TestFlushEpisodeStamping:
             Phase1SubgoalSelector,
         )
         sel = Phase1SubgoalSelector(SubgoalBuffer(), Phase1SubgoalConfig())
-        sel.stage_executed("move", np.zeros(3), np.array([0.3, 0.0, 0.2]),
+        sel.stage_executed(np.zeros(3), np.array([0.3, 0.0, 0.2]),
                            episode_id="episode_03")
         sel.flush_episode()                       # episode_id 미지정
-        assert sel.buffer.entries("move")[0].episode_id == "episode_03"
+        assert sel.buffer.entries("skill_0")[0].episode_id == "episode_03"
 
 
 # ─────────────────────────────────────────────────────────────

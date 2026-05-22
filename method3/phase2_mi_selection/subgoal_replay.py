@@ -16,6 +16,7 @@ subgoal 을 호출 순서대로(= episode 내 frame 순서) 반환한다.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -73,8 +74,25 @@ class Phase2SubgoalReplay:
         return sorted(out)
 
     def set_episode(self, episode_id: str) -> None:
-        """episode 전환 — per-skill replay 커서를 0 으로 리셋."""
-        self._episode_id = str(episode_id)
+        """episode 전환 — per-skill replay 커서를 0 으로 리셋.
+
+        Phase2 는 ``phase2/episode_{N}`` 으로 쌓이고 N 은 Phase1 episode 수
+        다음부터 이어진다 (예: Phase1 episode_01~40 → Phase2 episode_41~).
+        buffer 는 Phase1 의 episode_01~M 만 보유하므로, buffer 에 직접 매치되지
+        않는 episode_id 는 번호를 buffer episode 범위로 cycle 매핑한다 — Phase2
+        의 k 번째 episode 가 Phase1 의 k 번째 도달 subgoal set 을 replay 하도록
+        (episode_41 → episode_01, episode_42 → episode_02, ...).
+        """
+        eid = str(episode_id)
+        if eid not in self._by_episode and self._by_episode:
+            eps = sorted(self._by_episode.keys())
+            m = re.search(r"(\d+)", eid)
+            if m:
+                mapped = eps[(int(m.group(1)) - 1) % len(eps)]
+                print(f"[Phase2SubgoalReplay] {eid} → {mapped} "
+                      f"(buffer 범위로 cycle 매핑; buffer={len(eps)} episodes)")
+                eid = mapped
+        self._episode_id = eid
         self._cursor = {}
 
     def select_subgoal(

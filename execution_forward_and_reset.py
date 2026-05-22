@@ -595,9 +595,18 @@ class ForwardAndResetPipeline(BasePipeline):
         """
         self._subgoal_phase = {"forward": False, "reset": False}
         if getattr(self, "method3_phase", "phase1") == "phase2":
-            print("[Method3] phase=phase2 → Phase1 subgoal selector skipped "
-                  "(P_phase1 load / MI selector / subgoal replay 는 "
-                  "_setup_phase2_session 에서 설치)")
+            # Phase1 subgoal 섭동 selector 는 설치하지 않는다. 단 Phase2
+            # subgoal replay selector 는 _setup_phase2_session 이
+            # set_subgoal_selector 로 이미 붙여 놓았다 — forward episode 의
+            # systems_disabled(subgoal = not _subgoal_phase[phase]) 가 그
+            # selector 를 None 으로 끄지 않도록 _subgoal_phase["forward"]=True
+            # 로 둔다. reset episode 는 Phase1 forward-task buffer 와 무관
+            # 하므로 끈 채로 둔다.
+            _has_replay = getattr(self, "_phase2_subgoal_replay", None) is not None
+            self._subgoal_phase = {"forward": _has_replay, "reset": False}
+            print("[Method3] phase=phase2 → Phase1 subgoal selector skipped; "
+                  f"subgoal replay forward={'ON' if _has_replay else 'OFF'} "
+                  "(_setup_phase2_session 에서 설치)")
             return
         if not self.recording_config:
             return

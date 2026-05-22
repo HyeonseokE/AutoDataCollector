@@ -168,7 +168,7 @@ else
     # latest checkpoint 자동 검색 — mtime desc 의 첫 번째
     VLA_CKPT="$(find "lerobot/outputs/train/$TRAIN_JOB/checkpoints" \
         -type d -name pretrained_model 2>/dev/null \
-        | xargs -I {} stat -c '%Y {}' 2>/dev/null \
+        | xargs -I {} stat -c '%Y %n' {} 2>/dev/null \
         | sort -rn | head -1 | awk '{print $2}')"
     if [ -z "$VLA_CKPT" ] || [ ! -d "$VLA_CKPT" ]; then
         err "Step 2 ok 이지만 latest checkpoint 못 찾음 (탐색: lerobot/outputs/train/$TRAIN_JOB/checkpoints/*/pretrained_model)"

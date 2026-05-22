@@ -322,6 +322,23 @@ class PreselectiveAcquirerServicer(
                     f"U_VLA[min,max,mean]={_stats(_uvla)}",
                     flush=True,
                 )
+                # candidate dump — 128 후보 trajectory(EE 경로) + per-candidate
+                # 점수 + selection 결과를 npz 로 보존 (시각화/사후분석용).
+                # scripts/visualize_phase2_candidates.py 가 소비. dump 실패는
+                # selection 흐름에 영향 주지 않도록 격리.
+                try:
+                    from method3.phase2_mi_selection.candidate_dump import (
+                        dump_phase2_candidates,
+                    )
+                    _dump = dump_phase2_candidates(
+                        self.curobo, cands, selection,
+                        skill_id=skill_id, seed_xyz=seed_xyz,
+                        start_qpos=start_qpos, goal_qpos=goal_qpos,
+                        tau_MI=self.selector.cfg.tau_MI,
+                    )
+                    print(f"[server] candidate dump → {_dump}", flush=True)
+                except Exception as _de:
+                    print(f"[server] candidate dump skipped: {_de}", flush=True)
         except Exception as e:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"phase2 candidate/select failed: {e}")

@@ -1445,11 +1445,16 @@ class ForwardAndResetPipeline(BasePipeline):
             """ξ* index 반환. None 이면 skills_lerobot 의 RNG fallback."""
             if not cands:
                 return None
-            # 현재 skill_id 는 skills_lerobot 호출자 가 hook 시그니처에 안 실어줌.
-            # acquisition 단계에서 skill 별 acquisition 정책이 필요해지면 별도 hook
-            # 으로 분리하되, 지금은 "default" skill bucket 으로 단일 키 사용 —
-            # vector DB 가 한 bucket 으로 동작하면서 selection rule 자체는 정상.
-            skill_id = "default"
+            # candidate 의 vector DB partition 키 = episode-내 skill ordinal
+            # (skill_0, skill_1, ...). _hook 은 move_to_position 실행 중
+            # (plan_batch 직후, 해당 move 의 _set_skill_recording 이전) 에
+            # 호출되므로 skill_sequence 에 현재 move 가 아직 미반영 →
+            # len - _episode_skill_base 가 곧 현재 move 의 ordinal.
+            # P_phase1 (skill_{skill_index}) 과 같은 키 공간 → MI 정합.
+            _sk = getattr(self, "_skills", None)
+            _ord = (len(_sk.skill_sequence) - getattr(_sk, "_episode_skill_base", 0)
+                    ) if _sk is not None else 0
+            skill_id = f"skill_{_ord}"
 
             # anchor: 현재 goal_joint_rad 의 EE xyz 추출은 비싸므로 일단 그대로
             # 단순화 — anchor 가 없어도 candidate 의 action 다양성으로 selection

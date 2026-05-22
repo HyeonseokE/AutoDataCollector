@@ -154,6 +154,9 @@ class LeRobotSkills:
         self.pick_offset = pick_offset  # Fixed offset from object top for pick/place
         self.RECORDING_FPS = int(recording_fps)  # instance attr shadows class default
         self.skill_sequence = []  # 실행된 스킬 시퀀스 기록 (후처리 라벨링용)
+        # episode 시작 시 connect() 가 snapshot — 현재 skill 의 episode-내
+        # 0-based ordinal = len(skill_sequence) - _episode_skill_base.
+        self._episode_skill_base = 0
         LeRobotSkills._last_instance = self  # 후처리에서 접근 가능하도록
 
         # LeRobot dataset recording callback
@@ -408,6 +411,9 @@ class LeRobotSkills:
         self._log(f"\n{'='*60}")
         self._log("LeRobotSkills: Initializing...")
         self._log(f"{'='*60}")
+        # episode 경계 — generated code 는 매 episode skills.connect() 로 시작.
+        # 이후 skill 들의 episode-내 ordinal 기준점 (Phase2 candidate skill_{k} 키).
+        self._episode_skill_base = len(self.skill_sequence)
 
         # Load configuration
         if not self.robot_config_path.exists():

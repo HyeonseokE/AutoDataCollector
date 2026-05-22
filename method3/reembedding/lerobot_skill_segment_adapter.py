@@ -130,15 +130,21 @@ class LeRobotPhase1SkillSegmentAdapter:
         if action.ndim == 2 and action.shape[1] > _ARM_DOF:
             action = action[:, :_ARM_DOF]
 
-        # instruction format SoT — 학습 / Phase2 inference 와 동일 분포.
+        # VLA instruction — 학습(SkillDCTDataset)이 episode-level task 를 쓰므로
+        # re-embedding 입력도 동일하게 episode task 로 맞춘다 (Option A: VLA
+        # 입력은 {skill_type}: {episode_task} 고정 — per-skill nl 아님).
         from method3.dct.instruction_format import format_skill_instruction
-        _formatted_instr = format_skill_instruction(
-            str(seg.skill_type), str(seg.instruction),
-        )
+        _ep_task = ""
+        if "task" in frame:
+            _t = frame["task"]
+            _ep_task = str(_t.item() if hasattr(_t, "item") else _t)
+        _formatted_instr = format_skill_instruction(str(seg.skill_type), _ep_task)
         return RawDatasetEntry(
             episode_id=seg.episode_id,
             phase="phase1",
-            skill_id=str(seg.skill_type),
+            # skill_id = episode-내 ordinal key (skill_0, skill_1, ...).
+            # skill.type 는 pointer() 의 ref 로 보존 (변동 정보가 아닌 안정 키).
+            skill_id=f"skill_{int(seg.skill_index)}",
             instruction=_formatted_instr,
             subgoal=subgoal,
             time_index=int(seg.skill_index),

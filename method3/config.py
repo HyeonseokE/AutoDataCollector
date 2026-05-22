@@ -99,10 +99,8 @@ def load_phase2_config(
     # selector.action_horizon 은 Phase1 re-embed (lerobot_adapter) 와 Phase2 candidate
     # gen (curobo_candidate_gen) 의 *공통* H — yaml 의 단일 SoT (spec §7.3: H=50).
     # 옛 키 ``selector.chunk_size`` 는 deprecated alias.
-    # selector.use_dct_target 은 method3 DCT paradigm 의 z-space 전환 flag.
     sel = raw.get("selector") or {}
     action_horizon = int(sel.get("action_horizon", sel.get("chunk_size", 50)))
-    use_dct_target = bool(sel.get("use_dct_target", False))
     # path-like 항목은 repo-relative 도 허용하도록 resolve.
     skill_dct_parquet = resolve_repo_path(sel.get("skill_dct_parquet"))
 
@@ -125,7 +123,6 @@ def load_phase2_config(
         amb_agg=str(mi.get("amb_agg", "mean")),
         min_covered_windows=int(mi.get("min_covered_windows", 1)),
         debug_verbose=bool(mi.get("debug_verbose", False)),
-        use_dct_target=use_dct_target,
         # DB 가 arm-only (gripper 축 사전 제외) 로 build 되므로 arm_dof==full_dof
         # → slicing 비활성. legacy full-dof DB 면 yaml 에 full_dof: 6 명시.
         arm_dof=mi.get("arm_dof", 5),
@@ -145,7 +142,6 @@ def load_phase2_config(
         subgoal_filter_min_keep=int(re.get("subgoal_filter_min_keep", 30)),
         decode_workers=int(re.get("decode_workers", 1)),
         action_horizon=action_horizon,
-        use_dct_target=use_dct_target,
         skill_dct_parquet=skill_dct_parquet,
     )
 

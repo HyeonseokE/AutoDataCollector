@@ -191,13 +191,8 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  use_dct_target: true            # ← DCT paradigm — mi_selector 가
-                                  # candidate.dct_target (skill-atomic (L0, dof)) 을
-                                  # z-space 로 사용. vla_informativeness.scorer_type=dct
-                                  # + phase1_trained_vla_path=DCT-tuned ckpt 와 함께.
   skill_dct_parquet: "results/skill_dct/pnp_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
-                                  # null + use_dct_target=true 면 build_or_load 가 에러.
 
 # --- server-local SkillVectorDB 영속화 ---
 # server 가 boot/restart 사이에도 buffer 를 유지하기 위한 sidecar npz.

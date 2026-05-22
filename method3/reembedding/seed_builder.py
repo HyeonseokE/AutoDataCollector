@@ -22,7 +22,6 @@ from typing import Callable
 
 import numpy as np
 
-from method3.phase2_mi_selection.action_descriptor import dct_action_descriptor
 from method3.phase2_mi_selection.vector_db import SkillVectorDB, VectorDBEntry
 from method3.reembedding.vla_encoder import VLAStateEncoder
 from method3.storage.raw_dataset import RawTrajectoryDataset
@@ -58,22 +57,15 @@ class ReembeddingConfig:
                                  # I/O bound 라 thread 가 GIL 영향 거의 없음.
                                  # H100 server (64+ cores) 권장: 16. RTX 3050: 4.
     action_horizon: int = 50     # H — action_chunk window 길이 (spec §7.3, smolvla
-                                 # chunk_size 와 일치). LeRobotPhase1RawAdapter 가
-                                 # 이 값으로 episode 안 sliding window 를 자른다.
+                                 # chunk_size 와 일치). traj_to_dct 의 L0 과 동일.
                                  # Phase2 candidate gen (curobo_candidate_gen) 의
                                  # action_horizon 과 *반드시* 동일해야 P_phase1 의
                                  # action descriptor 가 Phase2 candidate descriptor
                                  # 와 같은 metric space 에 놓인다.
-                                 # use_dct_target=True 시 traj_to_dct 의 L0 도 동일.
     # ── method3 DCT paradigm ────────────────────────────────────────────
-    use_dct_target: bool = False
-    # True 시 build_phase1_vector_db 가 entry.action_chunk (= skill segment 의
-    # 가변 길이 raw action) 을 traj_to_dct(L0=action_horizon).flatten() 으로
-    # 변환해 action_descriptor 로 사용. candidate 의 dct_target 과 같은
-    # z-space (L0·dof,) 가 된다. False 면 기존 truncated DCT_K (frame-level).
     skill_dct_parquet: str | None = None
-    # use_dct_target=True 시 LeRobotPhase1SkillSegmentAdapter 의 sidecar parquet
-    # 경로. raw_dataset 을 직접 주입할 경우 무시 (build_or_load 가 사용).
+    # LeRobotPhase1SkillSegmentAdapter 의 sidecar parquet 경로.
+    # raw_dataset 을 직접 주입할 경우 무시 (build_or_load 가 사용).
 
 
 def _apply_subgoal_filter(
@@ -294,18 +286,15 @@ def build_phase1_vector_db(
         for j, (idx, entry) in enumerate(zip(chunk_indices, chunk_entries)):
             e_vla = np.asarray(e_vla_batch[j], dtype=np.float64).reshape(-1)
             e_i = state_retrieval_key(e_vla, entry.proprioception)           # §7.3
-            # action descriptor — paradigm 분기.
-            if cfg.use_dct_target:
-                # entry.action_chunk = skill segment 의 가변 길이 raw action
-                # (T_skill, dof). traj_to_dct 로 (L0, dof) → flatten = candidate
-                # 의 dct_target 과 같은 z-space.
-                from method3.dct.transform import traj_to_dct
-                z_i = traj_to_dct(
-                    np.asarray(entry.action_chunk, dtype=np.float64),
-                    L0=cfg.action_horizon,
-                ).flatten()
-            else:
-                z_i = dct_action_descriptor(entry.action_chunk, cfg.dct_coeffs)  # §4.2
+            # action descriptor — DCT skill-unit paradigm.
+            # entry.action_chunk = skill segment 의 가변 길이 raw action
+            # (T_skill, dof). traj_to_dct 로 (L0, dof) → flatten = candidate
+            # 의 dct_target 과 같은 z-space (L0·dof,).
+            from method3.dct.transform import traj_to_dct
+            z_i = traj_to_dct(
+                np.asarray(entry.action_chunk, dtype=np.float64),
+                L0=cfg.action_horizon,
+            ).flatten()
             db.append(VectorDBEntry(
                 skill_id=entry.skill_id,
                 state_key=e_i,

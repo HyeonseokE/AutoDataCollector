@@ -183,7 +183,6 @@ def main(seg_index: int = 5) -> int:
     selector = Phase2MISelector(
         vector_db=db,
         config=Phase2MIConfig(
-            use_dct_target=True,
             k_nn_a=3,
             k_min=1,
             min_covered_windows=1,

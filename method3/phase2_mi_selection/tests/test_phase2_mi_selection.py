@@ -265,12 +265,21 @@ class TestConditionalAmbiguity:
 # ─────────────────────────────────────────────────────────────
 # §11-14  Phase2 MI selector
 # ─────────────────────────────────────────────────────────────
+_L0, _DOF = 50, 6   # DCT paradigm 고정 shape
+
+
 def _candidate(skill_id, rng, key_center=0.0, action_loc=0.0,
                T=4, De=8, H=12, A=6):
-    """합성 후보 — state key 는 key_center 부근, action chunk 는 action_loc 중심."""
+    """합성 후보 — state key 는 key_center 부근, dct_target 은 action_loc 중심.
+
+    DCT skill-unit paradigm: 한 sample = 한 skill segment.
+    action_chunks 는 schema 호환용 (실제 z-space 로는 dct_target 사용).
+    """
     state_keys = key_center + rng.normal(0.0, 0.05, (T, De))
     action_chunks = rng.normal(action_loc, 0.3, (T, H, A))
-    return Phase2Candidate(skill_id, state_keys, action_chunks)
+    dct_target = rng.normal(action_loc, 0.3, (_L0, _DOF))
+    return Phase2Candidate(skill_id, state_keys, action_chunks,
+                           dct_target=dct_target)
 
 
 def _seed_db(selector, skill_id, rng, n_seed=6):
@@ -289,7 +298,7 @@ class TestPhase2MISelector:
         sel = Phase2MISelector(SkillVectorDB(), self._cfg())
         cand = _candidate("reach", np.random.default_rng(0))
         z = sel.action_descriptors(cand)
-        assert z.shape == (4, 3 * 6)               # (T, K·action_dim)
+        assert z.shape == (1, _L0 * _DOF)          # skill-atomic: (1, L0·dof)
 
     def test_cold_start_empty_buffer(self):
         # buffer 가 비면 ΔH_A·ΔH_A|S 계산 불가 → under-covered, accept 안 함.
@@ -304,8 +313,9 @@ class TestPhase2MISelector:
         sel = Phase2MISelector(db, self._cfg())
         cand = _candidate("reach", np.random.default_rng(0), T=5)
         n = sel.accept_to_buffer(cand, ref={"episode_id": "ep_1"})
-        assert n == 5
-        assert db.size("reach") == 5               # window 당 1 entry
+        # DCT skill-unit paradigm: 한 candidate = 1 entry (dct_target 단일 z).
+        assert n == 1
+        assert db.size("reach") == 1
         assert db.query_skill("reach")[0].meta["phase"] == "phase2"
 
     def test_select_returns_report_per_candidate(self):

@@ -34,21 +34,11 @@ class SkillDCTDataset:
     ``__getitem__``) 을 따른다. lerobot 의 ``LeRobotDataset`` 가 아니므로
     train script 측에서 dataset factory 분기 필요.
 
-    두 sample 단위 mode:
-      * ``frame_mode=False`` (default, paradigm 정합) — 한 sample = 한
-        skill segment. obs 는 segment 시작 frame 1개. 함수 의미:
-        ``f(obs_at_skill_start, lang, skill_type) → skill 전체 DCT``.
-        후보 traj 평가 (acquisition runtime) 도 skill 시작 obs 에서
-        후보의 dct_target 을 비교하므로 학습 / 추론 함수 정합.
-        sample 수 = segment 수 (~297 for 30 episode).
-      * ``frame_mode=True`` — 한 sample = 한 frame. 같은 segment 의 모든
-        frame 이 *동일한* (skill 전체) DCT target 을 공유. 의도가
-        progress-conditioned augmentation 이지만, VLA 가 학습하는 함수가
-        *time-invariant* (= 어느 progress 에서든 skill 전체 DCT 예측)
-        가 되어 paradigm 의 "skill 시작점 → skill 전체 DCT" 의도와
-        어긋난다 (skill 중간 obs → 그 skill 전체 DCT 라는 spec 외 mapping
-        까지 같이 학습됨). 데이터 부족 보완용 trick 이며 paradigm 자연
-        해석 아님.
+    한 sample = 한 skill segment. obs 는 segment 시작 frame 1개. 함수 의미:
+    ``f(obs_at_skill_start, lang, skill_type) → skill 전체 DCT``.
+    후보 traj 평가 (acquisition runtime) 도 skill 시작 obs 에서
+    후보의 dct_target 을 비교하므로 학습 / 추론 함수 정합.
+    sample 수 = segment 수 (~297 for 30 episode).
     """
 
     def __init__(
@@ -60,7 +50,6 @@ class SkillDCTDataset:
         task_key: str = "task",
         actions_pad_key: str = "actions_id_pad",
         skill_type_prefix_format: str = "{skill_type}: {instruction}",
-        frame_mode: bool = False,
     ) -> None:
         """
         Args:
@@ -73,8 +62,6 @@ class SkillDCTDataset:
             skill_type_prefix_format: language 에 skill_type 을 noisy
                 prefix 로 inject 하는 format string. ``{skill_type}`` 과
                 ``{instruction}`` 를 키로 받는다.
-            frame_mode: True 면 frame 단위 sample (default), False 면
-                segment 단위 sample. 자세한 의미는 class docstring 참고.
         """
         self.base = base_dataset
         self.segments: list[SkillSegment] = load_dct_targets(skill_dct_parquet)
@@ -82,18 +69,6 @@ class SkillDCTDataset:
         self._task_key = task_key
         self._pad_key = actions_pad_key
         self._prefix_fmt = skill_type_prefix_format
-        self._frame_mode = bool(frame_mode)
-        # frame_mode=True 일 때 lookup table: idx → (frame_idx, seg_idx).
-        # segment.frame_start ≤ frame_idx < segment.frame_end.
-        self._frame_to_seg: list[tuple[int, int]] | None
-        if self._frame_mode:
-            self._frame_to_seg = [
-                (f, seg_idx)
-                for seg_idx, seg in enumerate(self.segments)
-                for f in range(seg.frame_start, seg.frame_end)
-            ]
-        else:
-            self._frame_to_seg = None
 
     # ─────────────────────────────────────────────
     # base attribute 위임 — features, meta, delta_timestamps 등
@@ -104,18 +79,11 @@ class SkillDCTDataset:
         return getattr(self.base, name)
 
     def __len__(self) -> int:
-        if self._frame_to_seg is not None:
-            return len(self._frame_to_seg)
         return len(self.segments)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        # frame_mode 분기 — frame 단위 / segment 단위.
-        if self._frame_to_seg is not None:
-            frame_idx, seg_idx = self._frame_to_seg[idx]
-            seg = self.segments[seg_idx]
-        else:
-            seg = self.segments[idx]
-            frame_idx = seg.frame_start
+        seg = self.segments[idx]
+        frame_idx = seg.frame_start
 
         item = self.base[frame_idx]
         # action 자리에 DCT target 으로 교체 — shape (L0, action_dim).

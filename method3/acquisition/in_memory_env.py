@@ -92,6 +92,7 @@ class InMemoryAcquisitionEnvironment:
         if seeds is None or len(seeds) == 0:
             return []
         cands = []
+        _L0 = 50
         for c in range(3):                          # 후보마다 action 분포 다르게
             anchor = seeds[c % len(seeds)]          # G_seed 의 seed 를 anchor 로
             keys = np.stack([
@@ -102,7 +103,9 @@ class InMemoryAcquisitionEnvironment:
                 for _ in range(3)
             ])
             chunks = self._rng.normal(float(c), 1.0, (3, _H, _A))
-            cands.append(Phase2Candidate("reach", keys, chunks, seed_subgoal=anchor))
+            dct_target = self._rng.normal(float(c), 1.0, (_L0, _A))
+            cands.append(Phase2Candidate("reach", keys, chunks, seed_subgoal=anchor,
+                                         dct_target=dct_target))
         return cands
 
     def execute_phase2_candidate(self, candidate) -> Phase2EpisodeResult:

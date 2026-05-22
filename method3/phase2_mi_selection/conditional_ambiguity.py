@@ -142,8 +142,8 @@ def conditional_ambiguity(
 
     # §9.3 d_min 용 — cz_row vs 모든 db_z 의 action descriptor distance.
     # z_dist[c] 의 neighbor 부분집합은 min_distance(cz, db_z[nb]) 의 norm 과
-    # bit-exact (동일 행 부분집합). use_dct_target 면 cand_z 가 (1, D_z) —
-    # 모든 τ 에 cand_z[0] broadcast, legacy 면 cand_z.shape[0]==T.
+    # bit-exact (동일 행 부분집합). DCT paradigm 에서 cand_z 는 (1, D_z) —
+    # skill-unit single-window z.
     _cand_n = cand_z.shape[0]
     z_dist = np.linalg.norm(
         db_z[None, :, :] - cand_z[:, None, :], axis=2)            # (cand_n, N)

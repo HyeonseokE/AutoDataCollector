@@ -105,28 +105,21 @@ def build_or_load_phase1_vector_db(
                 raise ValueError(
                     "phase1_dataset_path is required when no cached vector DB "
                     "exists and raw_dataset is not supplied")
-            _H = reembedding_config.action_horizon if reembedding_config else 50
-            _use_dct = bool(getattr(reembedding_config, "use_dct_target", False)) \
-                if reembedding_config else False
-            if _use_dct:
-                _parquet = getattr(reembedding_config, "skill_dct_parquet", None)
-                if not _parquet:
-                    raise ValueError(
-                        "reembedding.use_dct_target=True 인데 "
-                        "reembedding.skill_dct_parquet (sidecar path) 미설정. "
-                        "method3.dct.build_skill_dct 로 sidecar parquet 먼저 생성."
-                    )
-                from method3.reembedding.lerobot_skill_segment_adapter import (
-                    LeRobotPhase1SkillSegmentAdapter,
+            _parquet = getattr(reembedding_config, "skill_dct_parquet", None) \
+                if reembedding_config else None
+            if not _parquet:
+                raise ValueError(
+                    "reembedding.skill_dct_parquet (sidecar path) 미설정. "
+                    "method3.dct.build_skill_dct 로 sidecar parquet 먼저 생성."
                 )
-                raw_dataset = LeRobotPhase1SkillSegmentAdapter(
-                    phase1_dataset_path, skill_dct_parquet=_parquet,
-                )
-                print(f"[reembed] DCT paradigm — skill-segment adapter "
-                      f"({len(raw_dataset)} segments from {_parquet})")
-            else:
-                from method3.reembedding.lerobot_adapter import LeRobotPhase1RawAdapter
-                raw_dataset = LeRobotPhase1RawAdapter(phase1_dataset_path, action_horizon=_H)
+            from method3.reembedding.lerobot_skill_segment_adapter import (
+                LeRobotPhase1SkillSegmentAdapter,
+            )
+            raw_dataset = LeRobotPhase1SkillSegmentAdapter(
+                phase1_dataset_path, skill_dct_parquet=_parquet,
+            )
+            print(f"[reembed] DCT paradigm — skill-segment adapter "
+                  f"({len(raw_dataset)} segments from {_parquet})")
 
         if encoder is None:
             if phase1_trained_vla_path is None:

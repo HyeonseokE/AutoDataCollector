@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 from method3.phase2_mi_selection.action_coverage import action_coverage_gain
-from method3.phase2_mi_selection.action_descriptor import dct_action_descriptor
 from method3.phase2_mi_selection.conditional_ambiguity import (
     conditional_ambiguity,
     reset_amb_timing,
@@ -101,10 +100,6 @@ class Phase2MIConfig:
     amb_agg: str = "mean"         # §9.4 covered aggregation: "mean" | "max"
     min_covered_windows: int = 1  # §9.1 T_min — 미만이면 under-covered
     debug_verbose: bool = False
-    # method3 DCT paradigm — True 면 action_descriptors 가 candidate.dct_target
-    # (skill-unit (L0, dof) DCT) 을 그대로 z-space 로 사용. 기본 False 는
-    # 기존 frame-level chunk → truncated DCT descriptor 경로 (backward compat).
-    use_dct_target: bool = False
     # Arm-only 비교 — DB 도 candidate 도 arm-only (gripper 축 제외) 로 통일됨
     # (DB build path 의 skill_segment_adapter 가 gripper 축을 사전 제외).
     # 따라서 *기본은 slicing 비활성* (arm_dof == full_dof).
@@ -185,26 +180,18 @@ class Phase2MISelector:
     def action_descriptors(self, candidate: Phase2Candidate) -> np.ndarray:
         """후보의 action descriptor.
 
-        paradigm step [6] — ``cfg.use_dct_target=True`` 면 candidate 의 skill
-        단위 DCT feature ``dct_target (L0, dof)`` 를 flatten 한 (1, L0·dof)
-        를 single-window z 로 사용 (skill-atomic representation).
-
-        Backward compat — False (default) 면 frame-level action_chunk 의
-        truncated DCT descriptor (T, K·action_dim) 반환.
+        paradigm step [6] — candidate 의 skill 단위 DCT feature
+        ``dct_target (L0, dof)`` 를 flatten 한 (1, L0·dof) 를 single-window z
+        로 사용 (skill-atomic representation, DCT skill-unit paradigm).
         """
-        if self.cfg.use_dct_target:
-            z = candidate.dct_target
-            if z is None:
-                raise ValueError(
-                    "use_dct_target=True 인데 candidate.dct_target 이 None — "
-                    "curobo_candidate_gen 의 dct_target 필드 채움이 필요합니다."
-                )
-            arr = np.asarray(z, dtype=np.float64).reshape(1, -1)
-            return arr
-        return np.stack([
-            dct_action_descriptor(a, self.cfg.dct_coeffs)
-            for a in np.asarray(candidate.action_chunks, dtype=np.float64)
-        ])
+        z = candidate.dct_target
+        if z is None:
+            raise ValueError(
+                "candidate.dct_target 이 None — "
+                "curobo_candidate_gen 의 dct_target 필드 채움이 필요합니다."
+            )
+        arr = np.asarray(z, dtype=np.float64).reshape(1, -1)
+        return arr
 
     def score_one(self, index: int, candidate: Phase2Candidate) -> Phase2ScoreReport:
         """후보 하나의 ΔH_A·ΔH_A|S·Q2 (정규화 전) 계산 (문서 §8-11)."""
@@ -215,9 +202,9 @@ class Phase2MISelector:
         cand_z = self.action_descriptors(candidate)
         db_keys = self.db.state_keys(candidate.skill_id)
         db_z = self.db.action_descriptors(candidate.skill_id)
-        # Arm-only 비교 — DB 는 full_dof (arm+gripper) 로 저장, candidate 는
-        # arm_dof 만. 비교 시점에 DB 의 gripper 축 제거.
-        if (cfg.use_dct_target and cfg.arm_dof and cfg.full_dof
+        # Arm-only 비교 — legacy: DB 가 full_dof (arm+gripper) 로 빌드된 경우만
+        # arm_dof < full_dof 로 두면 비교 시점에 DB 의 gripper 축 제거.
+        if (cfg.arm_dof and cfg.full_dof
                 and cfg.arm_dof < cfg.full_dof):
             L0 = cfg.dct_L0
             full = cfg.full_dof

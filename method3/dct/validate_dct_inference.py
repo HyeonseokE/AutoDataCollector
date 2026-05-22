@@ -94,7 +94,7 @@ def main() -> int:
 
     print(f"[validate] loading dataset {args.dataset}")
     base = LeRobotDataset(args.dataset, video_backend="pyav")
-    wrap = SkillDCTDataset(base, args.parquet, frame_mode=False)
+    wrap = SkillDCTDataset(base, args.parquet)
     segments = load_dct_targets(args.parquet)
     assert len(wrap) == len(segments)
 

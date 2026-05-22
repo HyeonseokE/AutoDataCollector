@@ -140,7 +140,7 @@ def main(seg_index: int = 5) -> int:
         noise = rng.normal(0, scale, size=gt_waypoints.shape) if scale > 0 else 0.0
         wp = gt_waypoints + noise
         dct = traj_to_dct(wp, L0=50)  # (50, 6)
-        # mock action_chunks (use_dct_target=True 시 무시되지만 schema-필수)
+        # mock action_chunks (schema-필수 — dct_target 이 실제로 쓰이는 z)
         H = 50
         if len(wp) >= H:
             action_chunks = wp[:H][None, ...]
@@ -172,7 +172,6 @@ def main(seg_index: int = 5) -> int:
     selector = Phase2MISelector(
         vector_db=db,
         config=Phase2MIConfig(
-            use_dct_target=True,
             k_nn_a=3,
             k_min=1,
             min_covered_windows=1,

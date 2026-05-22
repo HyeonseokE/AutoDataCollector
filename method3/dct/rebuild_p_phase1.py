@@ -2,23 +2,19 @@
 
 paradigm step [5]: Phase 3 학습된 DCT-tuned smolvla 의 backbone 으로
 ``P_phase1`` (skill-wise vector DB) 을 재구축한다. ``build_or_load`` 가
-이미 rebuild flag + path swap + use_dct_target 분기를 지원하므로 본
-모듈은 thin CLI.
+rebuild flag + path swap 을 지원하므로 본 모듈은 thin CLI.
 
 저장 위치:
   --subdir 가 주어지면  ``session/<subdir>/<filename>`` 에 저장.
   default subdir="dct" → ``session/dct/skill_wise_vector_db.npz``.
 
-Usage (DCT paradigm):
+Usage:
     python -m method3.dct.rebuild_p_phase1 \\
         --session ./results/session_20260518_214931 \\
         --subdir  dct \\
         --vla-ckpt .../smolvla_dct_<ts>/checkpoints/.../pretrained_model \\
         --dataset  CoRL2026-CSI/pnp_phase1_30_table2 \\
         --skill-dct-parquet ./results/skill_dct/pnp_phase1_30_table2.parquet
-
-기존 frame-level rebuild (사이드카 없이) 도 backward compat — --skill-dct-parquet
-미지정 시 기존 LeRobotPhase1RawAdapter 경로 사용 (use_dct_target=False).
 """
 from __future__ import annotations
 
@@ -58,9 +54,8 @@ def main() -> int:
     p.add_argument("--dataset", required=True,
                    help="Phase1 dataset (LeRobot repo_id 또는 local path)")
     p.add_argument("--skill-dct-parquet", default=None,
-                   help="method3.dct.build_skill_dct 산물. 명시 시 DCT paradigm "
-                        "(use_dct_target=True) 으로 build. 미명시 시 기존 "
-                        "frame-level path.")
+                   help="method3.dct.build_skill_dct 산물. 필수 — sidecar parquet "
+                        "경로.")
     p.add_argument("--L0", type=int, default=50,
                    help="DCT paradigm 의 L0 (= action_horizon). default 50.")
     p.add_argument("--filename", default=_DEFAULT_VECTOR_DB_FILENAME,
@@ -81,12 +76,11 @@ def main() -> int:
         if moved:
             print(f"[rebuild_p_phase1] archived previous DB → {moved}")
 
-    # DCT paradigm 활성화 시 ReembeddingConfig 직접 구성 (yaml fallback 무시).
+    # ReembeddingConfig 직접 구성 (yaml fallback 무시).
     re_cfg = None
     if args.skill_dct_parquet:
         re_cfg = ReembeddingConfig(
             action_horizon=int(args.L0),
-            use_dct_target=True,
             skill_dct_parquet=str(args.skill_dct_parquet),
         )
         print(f"[rebuild_p_phase1] DCT paradigm — L0={args.L0}, "

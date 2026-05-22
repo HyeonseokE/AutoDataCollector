@@ -15,7 +15,7 @@ H-window chunk). DCT paradigm 의 P_phase1 은 한 entry = 한 skill segment 라
   observation_ref        = pointer to segment 시작 frame
   proprioception         = segment 시작 frame 의 proprio
   action_chunk           = (T_skill, dof) raw action sequence — 길이 가변.
-                            seed_builder 의 use_dct_target 분기가 이걸 traj_to_dct
+                            seed_builder 가 이걸 traj_to_dct
                             로 (L0, dof) DCT_50 feature 로 변환.
 
 video decode 는 ``load_observation`` 에서만 (segment 시작 frame 1개) → 297
@@ -50,7 +50,7 @@ class LeRobotPhase1SkillSegmentAdapter:
             skill_dct_parquet="results/skill_dct/pnp_phase1_30_table2.parquet",
         )
         db = build_phase1_vector_db(adapter, encoder, adapter.load_observation,
-                                    ReembeddingConfig(use_dct_target=True))
+                                    ReembeddingConfig())
     """
 
     def __init__(

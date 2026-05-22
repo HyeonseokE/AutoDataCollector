@@ -121,12 +121,13 @@ class TestBuildPhase1VectorDB:
         db = build_phase1_vector_db(ds, MeanPoolStateEncoder(out_dim=16), _obs_loader)
         assert db.state_keys("reach").shape == (1, 16 + 7)
 
-    def test_action_descriptor_dim_is_k_times_action_dim(self, tmp_path):
-        # z^a = DCT K=3 × action_dim=6 → 18.
+    def test_action_descriptor_dim_is_l0_times_action_dim(self, tmp_path):
+        # DCT skill-unit paradigm: z^a = traj_to_dct(L0=action_horizon).flatten()
+        # → dim = action_horizon × action_dim = 50 × 6 = 300.
         ds = self._dataset(tmp_path, [("reach", "ep_0", 0, True)])
         db = build_phase1_vector_db(ds, MeanPoolStateEncoder(),
-                                    _obs_loader, ReembeddingConfig(dct_coeffs=3))
-        assert db.action_descriptors("reach").shape == (1, 3 * 6)
+                                    _obs_loader, ReembeddingConfig(action_horizon=50))
+        assert db.action_descriptors("reach").shape == (1, 50 * 6)
 
     def test_ref_resolves_back_to_raw_entry(self, tmp_path):
         # §3/§4 — vector DB ref 로 raw dataset entry 를 복원할 수 있어야 한다.

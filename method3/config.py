@@ -126,8 +126,10 @@ def load_phase2_config(
         min_covered_windows=int(mi.get("min_covered_windows", 1)),
         debug_verbose=bool(mi.get("debug_verbose", False)),
         use_dct_target=use_dct_target,
+        # DB 가 arm-only (gripper 축 사전 제외) 로 build 되므로 arm_dof==full_dof
+        # → slicing 비활성. legacy full-dof DB 면 yaml 에 full_dof: 6 명시.
         arm_dof=mi.get("arm_dof", 5),
-        full_dof=mi.get("full_dof", 6),
+        full_dof=mi.get("full_dof", 5),
         dct_L0=int(mi.get("dct_L0", 50)),
     )
 

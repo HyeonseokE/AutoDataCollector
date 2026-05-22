@@ -101,14 +101,15 @@ class Phase2MIConfig:
     # (skill-unit (L0, dof) DCT) 을 그대로 z-space 로 사용. 기본 False 는
     # 기존 frame-level chunk → truncated DCT descriptor 경로 (backward compat).
     use_dct_target: bool = False
-    # Arm-only 비교 — DB 는 (arm + gripper = full_dof) 로 빌드되지만 candidate
-    # (curobo arm-only) 와의 비교에서 gripper 축을 제외한다.
-    # arm_dof < full_dof 면:
+    # Arm-only 비교 — DB 도 candidate 도 arm-only (gripper 축 제외) 로 통일됨
+    # (DB build path 의 skill_segment_adapter 가 gripper 축을 사전 제외).
+    # 따라서 *기본은 slicing 비활성* (arm_dof == full_dof).
+    # legacy: DB 가 full_dof (arm+gripper) 로 빌드된 경우만 arm_dof < full_dof
+    # 로 두면 score_one 이 비교 시점에 db_z / db_keys 를 slice 한다.
     #   - db_z: (N, L0*full_dof) → (N, L0, full_dof) → [:,:,:arm_dof] → (N, L0*arm_dof)
-    #   - db_keys: (N, D_vl + full_dof) → [:, :-(full_dof-arm_dof)]  (proprio 끝 축 제거)
-    # arm_dof == full_dof 또는 둘 중 하나 None 이면 slicing 비활성.
+    #   - db_keys: (N, D_vl + full_dof) → [:, :-(full_dof-arm_dof)]
     arm_dof: Optional[int] = 5
-    full_dof: Optional[int] = 6
+    full_dof: Optional[int] = 5  # = arm_dof → slicing 비활성 (DB 가 이미 arm-only)
     dct_L0: int = 50  # DB 빌드 시 L0 — db_z reshape 용
 
     def __post_init__(self) -> None:

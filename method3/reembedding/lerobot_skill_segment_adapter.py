@@ -116,6 +116,20 @@ class LeRobotPhase1SkillSegmentAdapter:
         else:
             action = self._raw_actions[_fs2:_fe2].copy()
 
+        # arm-only 차원 정합 — so101 의 observation.state / action 은 6축
+        # [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll,
+        # gripper]. Phase2 candidate 는 curobo arm-only (5축) 이므로 DB 도
+        # gripper 축(마지막)을 *제외하고* build 해 차원을 통일한다.
+        # traj_to_dct 는 per-axis 변환이라 '사전 제외 == 사후 slice' 지만,
+        # DB 를 처음부터 arm-only 로 저장하면 mi_selector 의 slice 우회가
+        # 통째로 사라진다 (저장 250/965, mismatch 위험 0).
+        _ARM_DOF = 5
+        proprio = np.asarray(proprio)
+        if proprio.ndim == 1 and proprio.shape[0] > _ARM_DOF:
+            proprio = proprio[:_ARM_DOF]
+        if action.ndim == 2 and action.shape[1] > _ARM_DOF:
+            action = action[:, :_ARM_DOF]
+
         # instruction format SoT — 학습 / Phase2 inference 와 동일 분포.
         from method3.dct.instruction_format import format_skill_instruction
         _formatted_instr = format_skill_instruction(

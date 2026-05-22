@@ -30,6 +30,7 @@ from typing import Any, Optional
 import yaml
 
 from method3.phase2_mi_selection import (
+    LeRobotBatchBuilder,
     LeRobotVLAInformativenessScorer,
     Phase2MIConfig,
     Phase2MISelector,
@@ -234,8 +235,12 @@ def setup_method3_phase2_server(
             _sigma = vla_cfg.get("sigma")
             # mode="dct" 는 R=1 single-step, candidate.dct_target inject.
             # mode="default" 는 기존 R-stochastic frame-level chunk denoise.
+            # batch_builder 명시 — _default_batch_builder 는 candidate.observations
+            # 를 그대로 넘겨 raw HWC ndarray 가 policy 로 가 (b,c,h,w) 에러.
+            # LeRobotBatchBuilder 가 HWC→BCHW + resize + normalize + B expand.
             vla_scorer = LeRobotVLAInformativenessScorer(
                 policy=encoder.policy,
+                batch_builder=LeRobotBatchBuilder(policy=encoder.policy),
                 R=int(vla_cfg.get("R", 8)),
                 agg=str(vla_cfg.get("agg", "mean")),
                 mode=scorer_mode,

@@ -286,12 +286,31 @@ class LeRobotBatchBuilder:
 
         # Observations — dict[cam, ndarray(H,W,3)] 면 (B, 3, H, W) 정규화. 그 외
         # 형식은 caller 가 미리 batch dict 로 변환했다는 가정 하에 그대로 merge.
+        # policy image feature 의 target (H, W) 로 resize — raw capture
+        # (640×480 등) 와 policy expect (256×256 등) 불일치 보정.
+        _img_hw = None
+        try:
+            _ifeat = getattr(getattr(self.policy, "config", None), "image_features", {}) or {}
+            if _ifeat:
+                _shp = list(_ifeat.values())[0].shape  # (C, H, W)
+                _img_hw = (int(_shp[1]), int(_shp[2]))
+        except Exception:
+            _img_hw = None
+
         obs = candidate.observations
         if isinstance(obs, dict):
             for cam, frame in obs.items():
                 if isinstance(frame, np.ndarray) and frame.ndim == 3:
+                    arr = frame
+                    # HWC → target (H, W) resize (필요 시).
+                    if _img_hw is not None and arr.shape[:2] != _img_hw:
+                        import cv2
+                        arr = cv2.resize(
+                            arr, (_img_hw[1], _img_hw[0]),
+                            interpolation=cv2.INTER_AREA,
+                        )
                     # HWC uint8/float → BCHW float32 (0~1).
-                    t = torch.from_numpy(frame.astype(np.float32) / 255.0)
+                    t = torch.from_numpy(np.ascontiguousarray(arr).astype(np.float32) / 255.0)
                     t = t.permute(2, 0, 1).unsqueeze(0).expand(B, -1, -1, -1)
                     key = f"observation.images.{cam}" if not str(cam).startswith("observation.") else cam
                     batch[key] = t

@@ -157,16 +157,22 @@ class LeRobotVLAInformativenessScorer:
                     "mode='dct' requires candidate.dct_target — "
                     "use curobo_candidate_gen.candidates_from_trajectory_list."
                 )
-            z_cand = np.asarray(candidate.dct_target, dtype=np.float32)
-            action_tensor = torch.from_numpy(z_cand).unsqueeze(0)  # (1, L0, dof)
-            # policy 의 device 로 맞춤 — batch 의 다른 tensor 들과 일관성 유지.
-            # mock policy (parameters() 미보유) 는 silent skip.
+            # policy device — action_tensor 와 forward_kwargs['time'] 둘 다
+            # 이 device 로 맞춰야 smolvla forward 의 x_t = time*noise +
+            # (1-time)*actions 에서 device mismatch 가 안 난다.
+            # mock policy (parameters() 미보유) 는 None → cpu 유지.
+            _dev = None
             try:
                 _param = next(self.policy.parameters(), None)
                 if _param is not None:
-                    action_tensor = action_tensor.to(_param.device)
+                    _dev = _param.device
             except (AttributeError, TypeError, StopIteration):
-                pass
+                _dev = None
+
+            z_cand = np.asarray(candidate.dct_target, dtype=np.float32)
+            action_tensor = torch.from_numpy(z_cand).unsqueeze(0)  # (1, L0, dof)
+            if _dev is not None:
+                action_tensor = action_tensor.to(_dev)
             try:
                 from lerobot.constants import ACTION  # type: ignore
 
@@ -176,9 +182,10 @@ class LeRobotVLAInformativenessScorer:
             # single-step force.
             effective_R = 1
             if self.sigma is not None:
-                forward_kwargs["time"] = torch.tensor(
-                    [float(self.sigma)], dtype=torch.float32
-                )
+                _time = torch.tensor([float(self.sigma)], dtype=torch.float32)
+                if _dev is not None:
+                    _time = _time.to(_dev)
+                forward_kwargs["time"] = _time
         elif self.mode != "default":
             raise ValueError(f"unknown mode={self.mode!r} (expected 'default' or 'dct')")
 

@@ -146,7 +146,8 @@ def main(argv: list[str]) -> int:
     for a in argv:
         p = Path(a)
         if p.is_dir():
-            paths.extend(sorted(p.glob("*.npz")))
+            # episode 별 하위폴더(ep001/, ep002/, ...)까지 재귀 탐색.
+            paths.extend(sorted(p.rglob("*.npz")))
         elif p.suffix == ".npz":
             paths.append(p)
         else:

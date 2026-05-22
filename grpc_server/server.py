@@ -149,6 +149,12 @@ class PreselectiveAcquirerServicer(
                 _pk = f"observation.images.{_pk}"
             self._camera_rename[str(_rk)] = _pk
 
+        # candidate dump — episode 별 폴더 분리용. server 는 Phase2 episode
+        # 번호를 직접 모르므로, episode 첫 transit(move_and_open) 을 경계로
+        # 카운트한다 (server 시작 후 순번 ep001, ep002, ...).
+        self._dump_ep_counter = 0
+        self._dump_prev_skill = ""
+
         # Phase2Candidate (T, H) chunking 파라미터 — curobo_candidate_gen 의 input.
         # T 는 trajectory 길이 N 에서 자동 계산 (stride=1). max_T_eval 은 cost cap.
         self._candidate_cfg = CurobogenConfig(
@@ -330,11 +336,19 @@ class PreselectiveAcquirerServicer(
                     from method3.phase2_mi_selection.candidate_dump import (
                         dump_phase2_candidates,
                     )
+                    # episode 경계 — move_and_open(episode 첫 transit) 이
+                    # 직전과 달리 새로 나오면 새 episode 로 카운트.
+                    if (skill_id == "move_and_open"
+                            and self._dump_prev_skill != "move_and_open"):
+                        self._dump_ep_counter += 1
+                    self._dump_prev_skill = skill_id
+                    _ep_label = f"ep{self._dump_ep_counter:03d}"
                     _dump = dump_phase2_candidates(
                         self.curobo, cands, selection,
                         skill_id=skill_id, seed_xyz=seed_xyz,
                         start_qpos=start_qpos, goal_qpos=goal_qpos,
                         tau_MI=self.selector.cfg.tau_MI,
+                        episode=_ep_label,
                     )
                     print(f"[server] candidate dump → {_dump}", flush=True)
                 except Exception as _de:

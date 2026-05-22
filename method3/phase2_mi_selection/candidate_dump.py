@@ -194,10 +194,11 @@ def dump_phase2_candidates(
             return np.zeros(K, dtype=float)
         return np.array([float(getattr(r, attr)) for r in reports], dtype=float)
 
-    Path(dump_dir).mkdir(parents=True, exist_ok=True)
+    # episode 별 하위폴더로 분리 (episode 비면 dump_dir 직속).
+    sub_dir = Path(dump_dir) / episode if episode else Path(dump_dir)
+    sub_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
-    tag = f"{episode + '_' if episode else ''}{skill_id}_{stamp}"
-    path = str(Path(dump_dir) / f"{tag}.npz")
+    path = str(sub_dir / f"{skill_id}_{stamp}.npz")
 
     np.savez(
         path,

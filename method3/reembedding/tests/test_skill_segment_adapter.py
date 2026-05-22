@@ -42,6 +42,9 @@ def test_adapter_uses_segment_count(fake_sidecar, monkeypatch):
             self._observation_key = "observation.images.top"
             self._dataset = self  # _dataset[idx] 로 접근
 
+        def __len__(self):
+            return 200  # fake dataset 길이 — _ds_len = len(self._base._dataset) 에서 사용
+
         def __getitem__(self, idx):
             # frame stub.
             return {}
@@ -70,17 +73,18 @@ def test_adapter_uses_segment_count(fake_sidecar, monkeypatch):
     assert len(adapter) == 3
     entry = adapter.get(0)
     assert isinstance(entry, RawDatasetEntry)
-    assert entry.skill_id == "move"
+    # skill_id = "skill_{skill_index}" (ordinal key), skill.type 은 pointer() 에서 확인.
+    assert entry.skill_id == "skill_0"
     assert entry.episode_id == "episode_01"
     assert entry.time_index == 0
-    # action_chunk = raw_actions[frame_start:frame_end] = [0:20]
-    assert entry.action_chunk.shape == (20, 6)
-    np.testing.assert_allclose(entry.action_chunk, fake_actions[0:20])
+    # action_chunk = raw_actions[frame_start:frame_end][:, :5] — arm-only (gripper 제외).
+    assert entry.action_chunk.shape == (20, 5)
+    np.testing.assert_allclose(entry.action_chunk, fake_actions[0:20, :5])
 
     entry2 = adapter.get(2)
     # frame_start = 60, frame_end = 80
-    assert entry2.action_chunk.shape == (20, 6)
-    np.testing.assert_allclose(entry2.action_chunk, fake_actions[60:80])
+    assert entry2.action_chunk.shape == (20, 5)
+    np.testing.assert_allclose(entry2.action_chunk, fake_actions[60:80, :5])
 
 
 def test_pointer_includes_skill_meta(fake_sidecar, monkeypatch):

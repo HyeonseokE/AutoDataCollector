@@ -19,8 +19,8 @@ _PIPELINE_CONFIG = Path(__file__).resolve().parents[2] / "pipeline_config"
 class TestLoadPhase1Config:
     def test_loads_real_phase1_config(self):
         cfg = load_phase1_config(_PIPELINE_CONFIG / "phase1_config.yaml")
-        assert cfg["mode"] == "buffer_aware"
-        assert cfg["n_candidates"] == 32
+        # phase1_config.yaml 의 subgoal 섹션에 mode 키는 없음 (buffer_aware 고정).
+        assert cfg["n_candidates"] == 64
         assert "reachability" in cfg
         assert cfg["buffer_file"] == "subgoal_buffer.npz"
 
@@ -46,8 +46,8 @@ class TestLoadPhase2Config:
             _PIPELINE_CONFIG / "phase2_config.yaml",
             phase1_raw_dir=tmp_path / "p1", phase2_raw_dir=tmp_path / "p2")
         assert cfg.phase_controller.budget == 100
-        assert cfg.phase_controller.phase1_min == 20
-        assert cfg.phase_controller.phase1_max == 50
+        assert cfg.phase_controller.phase1_min == 30
+        assert cfg.phase_controller.phase1_max == 60
         # §6 — re-embedding 과 Phase2 의 K 가 일치해야 한다.
         assert cfg.phase2_mi.dct_coeffs == cfg.reembedding.dct_coeffs
 

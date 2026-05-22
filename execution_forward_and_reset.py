@@ -3378,10 +3378,19 @@ class ForwardAndResetPipeline(BasePipeline):
                     # Runs in the background so it overlaps the next episode's
                     # codegen; the next rollout awaits it. Local mode encodes
                     # here; gRPC mode streams the episode to the H100 server.
-                    if not should_discard and judge_prediction == "TRUE" and (
-                        getattr(self, "_skill_planner_selector", None) is not None
-                        or getattr(self, "_skill_planner_grpc_client", None) is not None
-                    ):
+                    #
+                    # Phase2 cycle 에서는 IngestEpisode (= 전체 demo frame 의
+                    # frame-level descriptor 누적) 를 *호출하지 않는다*. Phase2 의
+                    # vector DB 성장은 server 의 useful-OOD accept_to_buffer 가
+                    # 정식 경로 (skill-unit DCT, arm-only) — IngestEpisode 의
+                    # frame-level/6축 entry 가 섞이면 z-space·차원이 깨진다.
+                    _is_phase2 = str(getattr(self, "method3_phase", "")).lower() == "phase2"
+                    if (not should_discard and judge_prediction == "TRUE"
+                            and not _is_phase2
+                            and (
+                                getattr(self, "_skill_planner_selector", None) is not None
+                                or getattr(self, "_skill_planner_grpc_client", None) is not None
+                            )):
                         self._start_demo_ingest_async()
 
                     if not should_discard and episode_df is not None:

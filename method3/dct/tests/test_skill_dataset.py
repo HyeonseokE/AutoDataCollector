@@ -54,6 +54,28 @@ class TestRunLengthSegments:
         # frame indices align to total length.
         assert segs[-1][1] == len(s)
 
+    def test_natural_language_boundary_splits_same_type_skills(self):
+        # 분절 경계 설계 결정 (회귀 방지). iter_skill_segments 는 skill.type 가
+        # 아니라 skill.natural_language run-length 로 분절한다. 연속된 동일
+        # skill.type (Lift / Move-above / Place 가 모두 'move') 이라도 nl 이
+        # 다르면 별개 skill 호출 — 각각 한 세그먼트가 돼야 한다.
+        skill_type = ["move"] * 9
+        skill_nl = (
+            ["Lift the red block"] * 3
+            + ["Move red block above the blue dish"] * 3
+            + ["Place red block on the blue dish"] * 3
+        )
+        # skill.type 기준 — 3 호출이 1 세그먼트로 병합 (구 동작, 버그).
+        assert len(_run_length_segments(skill_type)) == 1
+        # skill.natural_language 기준 — 호출별 3 세그먼트로 분리 (신 동작).
+        segs = _run_length_segments(skill_nl)
+        assert [(s, e) for s, e, _ in segs] == [(0, 3), (3, 6), (6, 9)]
+        assert [key for _, _, key in segs] == [
+            "Lift the red block",
+            "Move red block above the blue dish",
+            "Place red block on the blue dish",
+        ]
+
 
 def test_sidecar_roundtrip(tmp_path):
     """build_dct_targets 의 parquet 출력을 load_dct_targets 가 정확히 복원."""

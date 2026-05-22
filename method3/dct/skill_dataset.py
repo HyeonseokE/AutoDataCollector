@@ -1,10 +1,10 @@
 """skill 단위 trajectory → DCT feature 추출 + sidecar 저장.
 
 사용자 명시 paradigm step [1]:
-  Phase1 LeRobot v3 dataset 의 skill boundary 를 활용해 episode 별 skill
-  segment 를 추출 → 각 segment 의 (T_skill, action_dim) action trajectory
-  를 ``traj_to_dct`` 로 (L0, action_dim) DCT feature 로 변환 → sidecar
-  parquet 으로 저장.
+  Phase1 LeRobot v3 dataset 의 skill 경계 (skill.natural_language 전이 =
+  skill 호출 단위) 로 episode 별 skill segment 를 추출 → 각 segment 의
+  (T_skill, action_dim) action trajectory 를 ``traj_to_dct`` 로
+  (L0, action_dim) DCT feature 로 변환 → sidecar parquet 으로 저장.
 
 VLA 학습 sample 단위 (step [1][2]):
   (episode_id, skill_index) — 한 skill = 한 sample.
@@ -13,9 +13,10 @@ VLA 학습 sample 단위 (step [1][2]):
 
 sidecar parquet schema:
   episode_id (str)
-  skill_index (int)        — 0-based within episode
-  skill_type (str)         — skill.type column 값
-  instruction (str)        — episode-level task 또는 skill.natural_language
+  skill_index (int)        — 0-based within episode (skill 호출 단위)
+  skill_type (str)         — 세그먼트 시작 frame 의 skill.type (partition key)
+  instruction (str)        — 세그먼트 시작 frame 의 skill.natural_language
+                             (없으면 episode-level task)
   frame_start (int)        — global frame index, exclusive 의 시작
   frame_end (int)          — exclusive
   dct_target (list[float]) — (L0 * action_dim,) flatten
@@ -110,8 +111,11 @@ def iter_skill_segments(
 ) -> Iterator[SkillSegment]:
     """LeRobot v3 dataset → (episode, skill) 단위 iteration (parquet 직접 access).
 
-    raw ``data/chunk-*/file-*.parquet`` 에서 action / skill.type 만 읽어
-    video decode 우회. 10분 → 수초.
+    raw ``data/chunk-*/file-*.parquet`` 에서 action / skill.type /
+    skill.natural_language 만 읽어 video decode 우회. 10분 → 수초.
+
+    분절 경계는 skill.natural_language run-length (= skill 호출 단위) 다.
+    skill.type 은 partition key 로 SkillSegment.skill_type 에 유지된다.
 
     Args:
         dataset_path: LeRobot dataset repo_id (HF_LEROBOT_HOME 기준 resolve)
@@ -184,11 +188,26 @@ def iter_skill_segments(
         ep_skill = skill_types_all[f0:f1]
         ep_actions = actions[f0:f1]
 
-        segments = _run_length_segments(ep_skill)
-        for skill_idx, (s, e, sk) in enumerate(segments):
+        # 분절 경계 = skill.natural_language run-length (= skill 호출 단위).
+        # recorder 가 set_skill_info 호출마다 skill.natural_language 를 새로
+        # stamp 하므로 nl 전이가 곧 skill 호출 경계다. skill.type 로 run-length
+        # 하면 연속된 동일 type (예: Lift→Move-above→Place 가 모두 'move') 이
+        # 한 세그먼트로 병합돼 한 DCT target 에 instruction 이 섞인다 — VLA
+        # 학습의 (obs, instruction) → DCT 쌍이 깨진다. nl 컬럼이 없는 dataset
+        # 은 skill.type 로 fallback. skill_type 정보는 partition key 로 계속
+        # 유지하며, 세그먼트 시작 frame 의 skill.type 값을 SkillSegment 에 싣는다.
+        if skill_nl is not None:
+            ep_boundary = [str(v) if v else "" for v in skill_nl[f0:f1]]
+        else:
+            ep_boundary = ep_skill
+
+        segments = _run_length_segments(ep_boundary)
+        for skill_idx, (s, e, _seg_key) in enumerate(segments):
             seg_actions = ep_actions[s:e]
-            # instruction: skill.natural_language 가 있으면 segment 시작값,
-            # 없으면 task_index → task_lookup.
+            # skill_type — partition key. 분절은 nl 기준이지만 skill.type
+            # 정보는 유지: 세그먼트 시작 frame 의 skill.type 값.
+            skill_type = ep_skill[s] if s < len(ep_skill) else "move"
+            # instruction — segment 시작값. nl 우선, 없으면 task_index → task.
             if skill_nl is not None:
                 v = skill_nl[f0 + s]
                 instruction = str(v) if v else ""
@@ -200,7 +219,7 @@ def iter_skill_segments(
             yield SkillSegment(
                 episode_id=episode_id,
                 skill_index=skill_idx,
-                skill_type=sk,
+                skill_type=skill_type,
                 instruction=instruction,
                 frame_start=f0 + s,
                 frame_end=f0 + e,

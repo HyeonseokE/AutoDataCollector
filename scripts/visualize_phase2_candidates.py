@@ -57,6 +57,9 @@ def visualize(npz_path: str, out_path: str | None = None) -> str:
     tau = float(d["tau_MI"])
     accepted = bool(d["accepted"])
     episode = str(d["episode"]) if "episode" in d.files else ""
+    gt_ee = (np.asarray(d["gt_ee_path"], dtype=float)
+             if "gt_ee_path" in d.files else np.zeros((0, 3)))
+    gt_episode = str(d["gt_episode"]) if "gt_episode" in d.files else ""
 
     _color = {"chosen": _C_CHOSEN, "eligible": _C_ELIGIBLE,
               "under": _C_UNDER, "reject": _C_REJECT}
@@ -89,6 +92,13 @@ def visualize(npz_path: str, out_path: str | None = None) -> str:
         if seed.shape[0] >= 3:
             ax.scatter(seed[0], seed[1], seed[2], color="#2ca02c", s=110,
                        marker="*", label="subgoal (seed)")
+        # Phase1 ground-truth trajectory — P_phase1 DB 의 DCT_50 을 복원한,
+        # 이 subgoal 에 대응하는 Phase1 episode 의 실제 실행 EE 경로.
+        # 128 curobo 후보·chosen 이 g.t. 대비 어떻게 퍼졌는지 비교 기준.
+        if gt_ee.ndim == 2 and len(gt_ee) > 0:
+            ax.plot(gt_ee[:, 0], gt_ee[:, 1], gt_ee[:, 2], color="#9467bd",
+                    lw=2.8, alpha=0.95, zorder=6, linestyle="-",
+                    label=f"g.t. Phase1{' ' + gt_episode if gt_episode else ''}")
         ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_zlabel("z (m)")
     else:
         ax.text2D(0.5, 0.5, "EE 경로 없음 (FK 미수행)",

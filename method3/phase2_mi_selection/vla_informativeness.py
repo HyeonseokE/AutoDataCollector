@@ -242,6 +242,48 @@ class LeRobotBatchBuilder:
 
     policy: object  # LeRobot policy 인스턴스 — tokenizer / config 접근용
 
+    def _get_tokenizer(self):
+        """vlm tokenizer 를 lazy load + 캐시.
+
+        탐색 순서:
+          1. policy 가 이미 보유한 tokenizer (vlm_with_expert.processor.tokenizer
+             등) — 재사용.
+          2. config.vlm_model_name 으로 AutoTokenizer.from_pretrained
+             (processor_smolvla.TokenizerProcessorStep 와 동일 소스).
+        실패 시 None.
+        """
+        cached = getattr(self, "_tokenizer_cache", None)
+        if cached is not None:
+            return cached
+        tok = None
+        # 1) policy 내부 tokenizer 경로 탐색
+        for path in (
+            ("vlm_with_expert", "processor", "tokenizer"),
+            ("model", "vlm_with_expert", "processor", "tokenizer"),
+            ("language_tokenizer",),
+            ("tokenizer",),
+        ):
+            obj = self.policy
+            for attr in path:
+                obj = getattr(obj, attr, None)
+                if obj is None:
+                    break
+            if obj is not None and callable(obj):
+                tok = obj
+                break
+        # 2) config.vlm_model_name 으로 새로 load
+        if tok is None:
+            cfg = getattr(self.policy, "config", None)
+            vlm_name = getattr(cfg, "vlm_model_name", None)
+            if vlm_name:
+                try:
+                    from transformers import AutoTokenizer
+                    tok = AutoTokenizer.from_pretrained(vlm_name)
+                except Exception as e:
+                    print(f"  [LeRobotBatchBuilder] AutoTokenizer load failed: {e}", flush=True)
+        object.__setattr__(self, "_tokenizer_cache", tok)
+        return tok
+
     def __call__(self, candidate: Phase2Candidate) -> dict:
         try:
             import torch
@@ -269,20 +311,32 @@ class LeRobotBatchBuilder:
             batch["observation.state"] = torch.from_numpy(proprios)
             batch["action"] = torch.from_numpy(actions)
 
-        # Instruction tokenize — policy 가 language_tokenizer 또는 같은 이름의
-        # attribute 를 노출하면 사용. 없으면 instruction 키를 raw str 로 둠.
+        # Instruction tokenize — smolvla processor_smolvla.py 의 TokenizerProcessorStep
+        # 재현: task 에 newline 추가 → vlm tokenizer 로 (max_length, padding) 토큰화 →
+        # OBS_LANGUAGE_TOKENS / OBS_LANGUAGE_ATTENTION_MASK 키로 batch 에 주입.
+        # scorer 는 policy.forward 를 직접 호출 (preprocessor pipeline skip) 하므로
+        # 본 builder 가 그 step 을 대신한다.
         instr = candidate.instruction or ""
-        tokenizer = getattr(self.policy, "language_tokenizer", None) or getattr(
-            self.policy, "tokenizer", None)
-        if tokenizer is not None and instr:
+        if instr:
             try:
-                tok = tokenizer(instr, return_tensors="pt", padding=True, truncation=True)
-                ids = tok["input_ids"]  # (1, L)
-                mask = tok.get("attention_mask", torch.ones_like(ids))
-                batch.setdefault("observation.language_tokens", ids.expand(B, -1))
-                batch.setdefault("observation.language_attention_mask", mask.expand(B, -1))
-            except Exception:
-                pass
+                from lerobot.utils.constants import (
+                    OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK,
+                )
+                tok = self._get_tokenizer()
+                if tok is not None:
+                    cfg = getattr(self.policy, "config", None)
+                    max_len = int(getattr(cfg, "tokenizer_max_length", 48) or 48)
+                    instr_nl = instr if instr.endswith("\n") else instr + "\n"
+                    enc = tok(
+                        instr_nl, return_tensors="pt",
+                        padding="max_length", max_length=max_len, truncation=True,
+                    )
+                    ids = enc["input_ids"]  # (1, L)
+                    mask = enc.get("attention_mask", torch.ones_like(ids))
+                    batch[OBS_LANGUAGE_TOKENS] = ids.expand(B, -1)
+                    batch[OBS_LANGUAGE_ATTENTION_MASK] = mask.expand(B, -1)
+            except Exception as _e:
+                print(f"  [LeRobotBatchBuilder] language tokenize failed: {_e}", flush=True)
 
         # Observations — dict[cam, ndarray(H,W,3)] 면 (B, 3, H, W) 정규화. 그 외
         # 형식은 caller 가 미리 batch dict 로 변환했다는 가정 하에 그대로 merge.

@@ -130,6 +130,14 @@ class LeRobotVLAInformativenessScorer:
     sigma: float | None = None
 
     def score(self, candidate: Phase2Candidate) -> float:
+        """단일 candidate 의 U_VLA. dct mode 는 batched 경로(``score_batch``)로 위임.
+
+        default mode 는 R-stochastic noise sampling 으로 candidate 1개를 평가한다.
+        """
+        if self.mode == "dct":
+            return float(self.score_batch([candidate])[0])
+        if self.mode != "default":
+            raise ValueError(f"unknown mode={self.mode!r} (expected 'default' or 'dct')")
         try:
             import torch
         except ImportError as e:
@@ -147,48 +155,7 @@ class LeRobotVLAInformativenessScorer:
         if not isinstance(batch, dict):
             batch = dict(batch)
 
-        forward_kwargs: dict = {}
         effective_R = int(max(1, self.R))
-
-        if self.mode == "dct":
-            # paradigm step [4]: action 자리에 candidate.dct_target 을 inject.
-            if candidate.dct_target is None:
-                raise ValueError(
-                    "mode='dct' requires candidate.dct_target — "
-                    "use curobo_candidate_gen.candidates_from_trajectory_list."
-                )
-            # policy device — action_tensor 와 forward_kwargs['time'] 둘 다
-            # 이 device 로 맞춰야 smolvla forward 의 x_t = time*noise +
-            # (1-time)*actions 에서 device mismatch 가 안 난다.
-            # mock policy (parameters() 미보유) 는 None → cpu 유지.
-            _dev = None
-            try:
-                _param = next(self.policy.parameters(), None)
-                if _param is not None:
-                    _dev = _param.device
-            except (AttributeError, TypeError, StopIteration):
-                _dev = None
-
-            z_cand = np.asarray(candidate.dct_target, dtype=np.float32)
-            action_tensor = torch.from_numpy(z_cand).unsqueeze(0)  # (1, L0, dof)
-            if _dev is not None:
-                action_tensor = action_tensor.to(_dev)
-            try:
-                from lerobot.constants import ACTION  # type: ignore
-
-                batch[ACTION] = action_tensor
-            except Exception:
-                batch["action"] = action_tensor
-            # single-step force.
-            effective_R = 1
-            if self.sigma is not None:
-                _time = torch.tensor([float(self.sigma)], dtype=torch.float32)
-                if _dev is not None:
-                    _time = _time.to(_dev)
-                forward_kwargs["time"] = _time
-        elif self.mode != "default":
-            raise ValueError(f"unknown mode={self.mode!r} (expected 'default' or 'dct')")
-
         losses: list[float] = []
         was_training = getattr(self.policy, "training", False)
         try:
@@ -197,7 +164,7 @@ class LeRobotVLAInformativenessScorer:
             with torch.no_grad():
                 for _ in range(effective_R):
                     # forward(batch, reduction="mean") → (loss_tensor, info_dict)
-                    out = self.policy.forward(batch, reduction="mean", **forward_kwargs)
+                    out = self.policy.forward(batch, reduction="mean")
                     loss_t = out[0] if isinstance(out, tuple) else out
                     losses.append(float(loss_t.detach().cpu().item()))
         finally:
@@ -209,6 +176,121 @@ class LeRobotVLAInformativenessScorer:
         if self.agg == "max":
             return float(np.max(losses))
         return float(np.mean(losses))
+
+    def score_batch(self, candidates, batch_size: int = 64) -> np.ndarray:
+        """여러 candidate 의 U_VLA 를 GPU batched forward 로 일괄 계산 (dct mode).
+
+        Phase2 후보 수는 2^N (예: 128) 으로 잡으므로 ``batch_size`` (기본 64) 단위
+        로 묶어 GPU 에서 batched forward 한다 — candidate 1개씩 forward 하던 것
+        대비 큰 속도 이득. 각 candidate 의 U_VLA 는 skill segment 의 *단일*
+        DCT_50 target 에 대한 single-step denoise loss 이므로 batch 의 한 행에
+        대응한다: skill 초기 관측(builder 결과의 첫 window)을 prefix,
+        ``dct_target`` 을 suffix(action 자리)로 stack 하고 ``reduction="none"``
+        으로 per-sample loss (B,) 를 받는다.
+
+        default mode 는 per-candidate ``score`` 로 fallback.
+
+        Returns:
+            ``np.ndarray`` shape (len(candidates),) — 후보별 U_VLA.
+        """
+        try:
+            import torch
+        except ImportError as e:
+            raise RuntimeError(
+                "LeRobotVLAInformativenessScorer requires torch."
+            ) from e
+
+        n = len(candidates)
+        if n == 0:
+            return np.zeros(0, dtype=float)
+        if self.mode != "dct":
+            return np.array([self.score(c) for c in candidates], dtype=float)
+
+        builder = self.batch_builder or _default_batch_builder
+        # action 키 — lerobot constant 우선, 없으면 well-known 이름.
+        try:
+            from lerobot.constants import ACTION as _ACTION_KEY  # type: ignore
+        except Exception:
+            _ACTION_KEY = "action"
+        # policy device — batched 텐서를 모두 이 device 로 (mock policy 는 None).
+        _dev = None
+        try:
+            _param = next(self.policy.parameters(), None)
+            if _param is not None:
+                _dev = _param.device
+        except (AttributeError, TypeError, StopIteration):
+            _dev = None
+
+        out = np.zeros(n, dtype=float)
+        was_training = getattr(self.policy, "training", False)
+        try:
+            if hasattr(self.policy, "eval"):
+                self.policy.eval()
+            with torch.no_grad():
+                for start in range(0, n, max(1, int(batch_size))):
+                    chunk = candidates[start:start + max(1, int(batch_size))]
+                    rows: list[dict] = []
+                    for c in chunk:
+                        if c.dct_target is None:
+                            raise ValueError(
+                                "mode='dct' requires candidate.dct_target — use "
+                                "curobo_candidate_gen.candidates_from_trajectory_list."
+                            )
+                        b = builder(c)
+                        if b is None:
+                            raise ValueError(
+                                "batch_builder returned None — candidate may be "
+                                "missing observations/proprio."
+                            )
+                        if not isinstance(b, dict):
+                            b = dict(b)
+                        # skill 초기 관측 — builder 가 쌓은 T windows 중 첫 행만.
+                        # (image/instruction 은 전 window 동일, proprio 는 첫
+                        # window = skill 시작 상태. dct_target 은 아래에서 inject.)
+                        rows.append({
+                            k: (v[:1] if hasattr(v, "shape")
+                                and getattr(v, "ndim", 0) >= 1 else v)
+                            for k, v in b.items()
+                        })
+                    # 행들을 batch 차원으로 cat → (chunk_n, ...).
+                    batch: dict = {}
+                    for k in rows[0]:
+                        vs = [r[k] for r in rows]
+                        batch[k] = (torch.cat(vs, dim=0)
+                                    if hasattr(vs[0], "shape") else vs[0])
+                    # dct_target → action 자리 (chunk_n, L0, dof).
+                    z = np.stack([
+                        np.asarray(c.dct_target, dtype=np.float32) for c in chunk
+                    ])
+                    batch[_ACTION_KEY] = torch.from_numpy(z)
+                    # device 정렬.
+                    if _dev is not None:
+                        batch = {
+                            k: (v.to(_dev) if hasattr(v, "to") else v)
+                            for k, v in batch.items()
+                        }
+                    # single-step time = sigma, batch 차원 (chunk_n,).
+                    forward_kwargs: dict = {}
+                    if self.sigma is not None:
+                        _time = torch.full(
+                            (len(chunk),), float(self.sigma), dtype=torch.float32
+                        )
+                        if _dev is not None:
+                            _time = _time.to(_dev)
+                        forward_kwargs["time"] = _time
+                    # reduction="none" → per-sample loss (chunk_n,).
+                    out_t = self.policy.forward(
+                        batch, reduction="none", **forward_kwargs
+                    )
+                    loss_t = out_t[0] if isinstance(out_t, tuple) else out_t
+                    loss_np = np.asarray(
+                        loss_t.detach().cpu().numpy(), dtype=float
+                    ).reshape(-1)
+                    out[start:start + len(chunk)] = loss_np[:len(chunk)]
+        finally:
+            if was_training and hasattr(self.policy, "train"):
+                self.policy.train(True)
+        return out
 
 
 def make_default_scorer() -> VLAInformativenessScorer:
@@ -338,10 +420,16 @@ class LeRobotBatchBuilder:
                         instr_nl, return_tensors="pt",
                         padding="max_length", max_length=max_len, truncation=True,
                     )
-                    ids = enc["input_ids"]  # (1, L)
+                    ids = enc["input_ids"]  # (1, L) — token id 는 Long 유지
                     mask = enc.get("attention_mask", torch.ones_like(ids))
                     batch[OBS_LANGUAGE_TOKENS] = ids.expand(B, -1)
-                    batch[OBS_LANGUAGE_ATTENTION_MASK] = mask.expand(B, -1)
+                    # attention mask 는 bool 이어야 한다 — smolvla forward 의
+                    # make_att_2d_masks 가 pad_masks 를 곱/AND 하고, 그 결과가
+                    # eager_attention_forward 의 torch.where condition 으로 쓰인다.
+                    # tokenizer 는 int64 mask 를 주므로(정식 preprocessor 는 bool
+                    # 변환) 여기서 명시 변환하지 않으면 condition 이 Long 이 되어
+                    # "where expected condition to be a boolean tensor" 로 죽는다.
+                    batch[OBS_LANGUAGE_ATTENTION_MASK] = mask.expand(B, -1).bool()
             except Exception as _e:
                 print(f"  [LeRobotBatchBuilder] language tokenize failed: {_e}", flush=True)
 

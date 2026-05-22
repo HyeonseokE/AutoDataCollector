@@ -374,6 +374,13 @@ class ForwardAndResetPipeline(BasePipeline):
                 self._attach_phase2_skill_hook()
             except Exception as e:
                 print(f"[Method3 phase2] re-attach skill hook failed: {e}")
+        # Phase2 subgoal replay re-attach — _setup_phase2_session 이 _skills
+        # 생성 전에 돌았으면(lazy-init) 여기서 부착된다.
+        if getattr(self, "_phase2_subgoal_replay", None) is not None:
+            try:
+                self._attach_phase2_subgoal_replay()
+            except Exception as e:
+                print(f"[Method3 phase2] re-attach subgoal replay failed: {e}")
 
         # 공유 카메라 주입 (detect_objects에서 사용)
         if self.camera:
@@ -589,7 +596,8 @@ class ForwardAndResetPipeline(BasePipeline):
         self._subgoal_phase = {"forward": False, "reset": False}
         if getattr(self, "method3_phase", "phase1") == "phase2":
             print("[Method3] phase=phase2 → Phase1 subgoal selector skipped "
-                  "(P_phase1 load / MI selector setup deferred to _setup_phase2_session)")
+                  "(P_phase1 load / MI selector / subgoal replay 는 "
+                  "_setup_phase2_session 에서 설치)")
             return
         if not self.recording_config:
             return
@@ -861,6 +869,14 @@ class ForwardAndResetPipeline(BasePipeline):
         보고함. 그래서 호출 후 `_resume_kept_true_episodes = None` 으로 비워
         finalize 의 reconcile 블록이 silent skip 되게 한다 (중복 로그 방지).
         """
+        # Phase2 는 Phase1 subgoal buffer 를 read-only 로 replay 한다. reconcile
+        # (stale episode drop) 은 Phase1 누적 정합용 — Phase2 resume 에서 돌면
+        # phase2/ 가 비어 kept_true_episodes=∅ 이 되고, Phase1 도달 subgoal 기록을
+        # 전부 stale 로 오판해 retain_episodes 가 날린다 (replay 데이터 소스 파괴).
+        if str(getattr(self, "method3_phase", "phase1")).lower() == "phase2":
+            print("[Perturbation] resume reconcile SKIPPED — method3_phase=phase2 "
+                  "(Phase1 subgoal buffer 는 replay 전용으로 보존)")
+            return
         _kept = getattr(self, "_resume_kept_true_episodes", None)
         if _kept is None:
             return
@@ -1082,6 +1098,75 @@ class ForwardAndResetPipeline(BasePipeline):
         # vector DB 에 flush 까지 한다 (§14).
         self._phase2_g_seed_buffer = self._load_phase2_g_seed_buffer(session_dir)
         self._attach_phase2_skill_hook()
+
+        # 방법론: Phase2 는 Phase1 이 도달했던 subgoal 을 그대로 경유하고 경로
+        # (trajectory) 만 curobo plan_batch 로 다양화한다. session 의
+        # subgoal_buffer.npz 를 읽어 episode 별 replay selector 를 설치한다.
+        self._setup_phase2_subgoal_replay(session_dir)
+
+    def _setup_phase2_subgoal_replay(self, session_dir: str | None) -> None:
+        """Phase2 — Phase1 도달 subgoal 을 episode 별로 replay 하도록 설치.
+
+        Phase1 은 buffer-aware 섭동으로 subgoal 을 *옮겨* 상태 다양성을 키웠고,
+        그 도달 위치를 ``<session>/subgoal_buffer.npz`` 에 episode 별로 기록했다.
+        Phase2 는 그 기록된 경유점을 그대로 통과해야 하므로(경로만 다양화),
+        ``Phase2SubgoalReplay`` 를 ``set_subgoal_selector`` 훅에 꽂는다 — Phase1
+        subgoal selector 가 들어갈 자리에 replay 가 대신 들어가, move_to_position
+        의 subgoal 분기가 섭동 대신 기록값을 반환한다.
+
+        ``_skills`` 는 lazy 생성이라 본 메서드(``_setup_phase2_session``) 시점엔
+        아직 없을 수 있다. 따라서 replay 객체 *생성* 과 ``_skills`` *부착* 을
+        분리한다 — 부착은 ``_attach_phase2_subgoal_replay`` 가 담당하고,
+        ``_create_skills`` 의 retro-attach 가 _skills 생성 직후 다시 호출한다.
+
+        buffer 파일이 없으면(예: fresh phase2) replay 를 비활성화하고 raw 검출
+        nominal 을 그대로 쓴다 — 단, 그 경우 방법론에서 벗어남을 경고한다.
+        """
+        self._phase2_subgoal_replay = None
+        if not session_dir:
+            return
+        buf_path = Path(session_dir) / "subgoal_buffer.npz"
+        if not buf_path.exists():
+            _Y = "\033[93m"; _R = "\033[0m"
+            print(f"{_Y}[Method3 phase2] subgoal_buffer.npz 없음 ({buf_path}) — "
+                  f"subgoal replay 비활성. Phase2 가 raw 검출 nominal 을 쓰게 되어 "
+                  f"Phase1 도달 경유점과 어긋날 수 있음.{_R}")
+            return
+        try:
+            from method3.phase2_mi_selection.subgoal_replay import Phase2SubgoalReplay
+            replay = Phase2SubgoalReplay(buf_path)
+        except Exception as e:
+            print(f"[Method3 phase2] subgoal replay 생성 실패: {e}")
+            import traceback; traceback.print_exc()
+            return
+        self._phase2_subgoal_replay = replay
+        print(f"[Method3 phase2] subgoal replay READY — "
+              f"{replay.n_episodes()} episodes 기록, skills={replay.skill_ids()}")
+        # _skills 가 이미 있으면 즉시 부착; 아직 lazy-init 전이면 _create_skills
+        # 의 retro-attach 가 부착한다.
+        self._attach_phase2_subgoal_replay()
+
+    def _attach_phase2_subgoal_replay(self) -> None:
+        """``_phase2_subgoal_replay`` 를 ``_skills`` 의 subgoal selector 훅에 부착.
+
+        ``_skills`` 가 아직 없으면 silent no-op (retro-attach 가 나중에 호출).
+        ``set_subgoal_selector`` 는 단순 재할당이라 중복 호출돼도 idempotent.
+        replay 분기도 ``move_to_position`` 의 ``_perturbation_rng`` 가 필요하므로
+        pending seed 가 있으면 함께 시딩한다.
+        """
+        replay = getattr(self, "_phase2_subgoal_replay", None)
+        skills = getattr(self, "_skills", None)
+        if replay is None or skills is None:
+            return
+        try:
+            skills.set_subgoal_selector(replay)
+            pending = getattr(self, "_pending_perturbation_seed", None)
+            if pending is not None:
+                skills.set_perturbation_rng(pending)
+            print("[Method3 phase2] subgoal replay → _skills 부착 완료 "
+                  "(Phase1 도달 경유점 고정, 경로만 curobo 로 다양화)")
+        except Exception as e:
+            print(f"[Method3 phase2] subgoal replay 부착 실패: {e}")
 
     def _build_phase2_selector(self):
         """phase2_config.yaml.mi_selection 으로 Phase2MISelector 인스턴스화.
@@ -1977,6 +2062,17 @@ class ForwardAndResetPipeline(BasePipeline):
             has_skill = getattr(self._skills, "_skill_planner_client", None) is not None
             if has_subgoal or has_skill:
                 self._skills.set_perturbation_rng(ep_seed)
+
+        # Phase2 — episode 별 Phase1 도달 subgoal replay 컨텍스트 전환.
+        # current_episode 는 episode 루프가 이 호출 직전에 설정한다 → episode_NN
+        # 의 기록 subgoal 로 replay 커서를 리셋한다.
+        _replay = getattr(self, "_phase2_subgoal_replay", None)
+        if _replay is not None:
+            try:
+                from method3.episode_lifecycle import episode_id as _mk_ep_id
+                _replay.set_episode(_mk_ep_id(int(self.current_episode)))
+            except Exception as _e:
+                print(f"[Method3 phase2] subgoal replay set_episode 실패: {_e}")
 
     def _get_pipeline_camera(self):
         """PipelineCamera lazy init."""

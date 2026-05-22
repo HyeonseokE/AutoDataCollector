@@ -1729,9 +1729,15 @@ class LeRobotSkills:
                             np.asarray(current_ee, dtype=float),
                             chosen_xyz.copy(),
                         )
-                        _mode = "cold-start RNG" if _sel.cold_start else "buffer-aware argmax"
+                        if getattr(self._subgoal_selector, "is_phase2_replay", False):
+                            _tag = "Subgoal-Phase2"
+                            _mode = "replayed seed subgoal"
+                        else:
+                            _tag = "Subgoal-Phase1"
+                            _mode = ("cold-start RNG" if _sel.cold_start
+                                     else "buffer-aware argmax")
                         self._log(
-                            f"  [Subgoal-Phase1] skill=move_initial → "
+                            f"  [{_tag}] skill=move_initial → "
                             f"cand#{_sel.chosen_index} ({_mode}); "
                             f"xyz=[{chosen_xyz[0]:.3f}, "
                             f"{chosen_xyz[1]:.3f}, {chosen_xyz[2]:.3f}]"
@@ -2058,9 +2064,18 @@ class LeRobotSkills:
             )
             target_position = np.asarray(_sel.chosen_goal, dtype=float)
             _subgoal_perturbed = True
-            _mode = "cold-start RNG" if _sel.cold_start else "buffer-aware argmax"
+            # Phase2 replay selector 는 is_phase2_replay 마커를 노출한다 —
+            # Phase1 섭동(argmax/cold-start)과 Phase2 기록 replay 를 구분해 로깅.
+            if getattr(self._subgoal_selector, "is_phase2_replay", False):
+                _tag = "Subgoal-Phase2"
+                _mode = ("replayed seed subgoal" if _sel.chosen_index != 0
+                         else "no record → nominal fallback")
+            else:
+                _tag = "Subgoal-Phase1"
+                _mode = ("cold-start RNG" if _sel.cold_start
+                         else "buffer-aware argmax")
             self._log(
-                f"  [Subgoal-Phase1] skill={_skill_id} → cand#{_sel.chosen_index} "
+                f"  [{_tag}] skill={_skill_id} → cand#{_sel.chosen_index} "
                 f"({_mode}); target=[{target_position[0]:.3f}, "
                 f"{target_position[1]:.3f}, {target_position[2]:.3f}]"
             )

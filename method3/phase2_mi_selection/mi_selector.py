@@ -324,8 +324,17 @@ class Phase2MISelector:
         ]
 
         if vla_scorer is not None and eligible:
-            for i in eligible:
-                u_vla[i] = float(vla_scorer.score(candidates[i]))
+            # GPU batched U_VLA — eligible 후보를 batch 단위로 묶어 한 번에
+            # forward (candidate 1개씩 forward 하던 것 대비 큰 속도 이득).
+            # score_batch 미지원 scorer 는 per-candidate score 로 fallback.
+            elig_cands = [candidates[i] for i in eligible]
+            _score_batch = getattr(vla_scorer, "score_batch", None)
+            if callable(_score_batch):
+                u_scores = _score_batch(elig_cands)
+            else:
+                u_scores = [vla_scorer.score(c) for c in elig_cands]
+            for j, i in enumerate(eligible):
+                u_vla[i] = float(u_scores[j])
 
         # report 에 정규화 score · U_VLA 를 채워 dataclass 재생성.
         reports = [

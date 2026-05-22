@@ -243,12 +243,12 @@ class PreselectiveAcquirerServicer(
 
         # 2. TrajectoryCandidate → Phase2Candidate.
         #    encoder 와 candidate 변환은 lock 안에서 (encoder thread-unsafe).
-        # instruction 은 skill-conditioned format 으로 통일 — 학습 / DB build /
-        # Phase2 inference 모두 같은 분포 (method3/dct/instruction_format SoT).
-        from method3.dct.instruction_format import format_skill_instruction
-        raw_instruction = str(request.instruction or "")
-        skill_id = str(request.skill_id or "move_to")
-        instruction = format_skill_instruction(skill_id, raw_instruction)
+        # instruction 은 skill-conditioned format ({skill_type}: {task}) — 학습 /
+        # DB build / Phase2 inference 모두 같은 분포. client(grpc_planner_adapter)
+        # 가 이미 format 해서 보낸다. skill_id 는 ordinal partition 키(skill_0..)
+        # 라 VLA prefix 로 쓰면 안 되므로 server 는 재포맷하지 않는다.
+        skill_id = str(request.skill_id or "skill_0")
+        instruction = str(request.instruction or "")
         state_arr = np.asarray(state, dtype=float)
         # seed_subgoal anchor — client 가 보낸 goal_qpos 의 EE xyz 가 가장 자연.
         # FK 없으면 goal_qpos 첫 3 element 를 placeholder (downstream 영향 작음).

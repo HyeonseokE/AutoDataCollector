@@ -89,16 +89,17 @@ class GrpcPlannerClient:
         n: int,
         seed: int | None = None,
         rng: Any | None = None,  # accepted for signature parity; ignored
-        skill_id: str | None = None,  # ← caller 가 명시 전달 가능 (RecordingContext 의존 회피)
+        skill_id: str | None = None,  # ← caller 가 명시 전달 (episode-내 ordinal skill_k)
+        skill_type: str | None = None,  # ← caller 가 명시 전달 (VLA instruction prefix 용)
     ) -> list[_RemoteTrajectoryCandidate]:
         """Send context to server, receive ONE chosen trajectory.
 
         Images are shipped so the server's frozen VLA encoder can compute the
         FAISS key embedding; the encoder tolerates an empty dict.
         """
-        instruction = ""
+        _episode_task = ""
         try:
-            instruction = str(getattr(self._provider, "instruction", "") or "")
+            _episode_task = str(getattr(self._provider, "instruction", "") or "")
         except Exception:
             pass
         try:
@@ -106,15 +107,24 @@ class GrpcPlannerClient:
         except Exception:
             images = {}
 
-        # skill_id 결정 — caller 명시 인자 > RecordingContext._current_skill_type
-        # > self._skill_id (default "move_to"). P_phase1 의 skill_id 와 일치해야
-        # cold-start 우회 (gripper_close/open/move/move_and_*/move_free/move_initial).
+        # skill_id = episode-내 ordinal partition 키 (skill_0..) — caller
+        # (move_to_position)가 명시 전달. P_phase1 의 skill_{skill_index} 와 같은
+        # 키 공간이라야 MI 가 정합.
+        effective_skill_id = skill_id or self._skill_id
+        # VLA instruction = {skill_type}: {episode_task} — 학습(SkillDCTDataset)·
+        # DB build 와 동일 format. server 는 skill_id 가 ordinal 이라 재포맷 못 하므로
+        # client 가 여기서 format 해 보낸다. skill_type 은 caller 전달, fallback 은
+        # RecordingContext._current_skill_type.
+        _runtime_skill = ""
         try:
             from record_dataset.context import RecordingContext as _RC
             _runtime_skill = _RC._current_skill_type or ""
         except Exception:
-            _runtime_skill = ""
-        effective_skill_id = skill_id or _runtime_skill or self._skill_id
+            pass
+        from method3.dct.instruction_format import format_skill_instruction
+        instruction = format_skill_instruction(
+            skill_type or _runtime_skill, _episode_task
+        )
 
         # *current robot state* (servo position 6-dim, range ±100) — DB build
         # proprio (observation.state) 와 같은 unit. provider 가 노출하면 사용,

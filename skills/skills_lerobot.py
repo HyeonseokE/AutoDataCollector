@@ -2336,14 +2336,20 @@ class LeRobotSkills:
                 and self._perturbation_rng is not None
                 and trajectory.ik_converged):
             seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
-            self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={skill_type_val})")
+            # Phase2 candidate 의 vector DB partition 키 = episode-내 skill ordinal.
+            # plan_batch 시점엔 이 move 의 _set_skill_recording 이 아직 안 돌아
+            # skill_sequence 에 미반영 → len - _episode_skill_base 가 곧 ordinal.
+            # P_phase1 의 skill_{skill_index} 와 같은 키 공간 → MI 정합.
+            _skill_ordinal = f"skill_{len(self.skill_sequence) - self._episode_skill_base}"
+            self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={_skill_ordinal} [{skill_type_val}])")
             try:
                 cands = self._skill_planner_client.plan_batch(
                     start_qpos=np.asarray(current_joints, dtype=float),
                     goal_qpos=np.asarray(goal_joint_rad, dtype=float),
                     n=self._skill_planner_n_candidates,
                     seed=seed,
-                    skill_id=skill_type_val,
+                    skill_id=_skill_ordinal,
+                    skill_type=skill_type_val,
                 )
                 self._log(f"  [Skill Perturbation] plan_batch DONE — {len(cands)} candidates received")
             except Exception as e:

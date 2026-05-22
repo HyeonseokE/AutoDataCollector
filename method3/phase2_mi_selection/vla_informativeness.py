@@ -266,6 +266,16 @@ class LeRobotVLAInformativenessScorer:
                     z = np.stack([
                         np.asarray(c.dct_target, dtype=np.float32) for c in chunk
                     ])
+                    # candidate dct_target 은 curobo arm-only (5축). VLA 는 6축
+                    # (action_dim, gripper 포함)으로 학습 → 마지막 축을 0 pad.
+                    # U_VLA 는 argmax 용이고 한 skill 의 모든 candidate 가 gripper
+                    # plan 을 공유(curobo 는 arm 만 다양화)하므로, gripper 열을
+                    # 0 으로 둬도 loss 의 gripper 항이 상수 → argmax 불변.
+                    _VLA_ACTION_DOF = 6  # so101 — VLA 학습 action_dim
+                    if z.ndim == 3 and z.shape[-1] < _VLA_ACTION_DOF:
+                        z = np.pad(
+                            z, ((0, 0), (0, 0), (0, _VLA_ACTION_DOF - z.shape[-1])),
+                        )
                     batch[_ACTION_KEY] = torch.from_numpy(z)
                     # device 정렬.
                     if _dev is not None:

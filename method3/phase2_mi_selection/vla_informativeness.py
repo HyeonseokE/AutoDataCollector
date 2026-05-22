@@ -371,4 +371,23 @@ class LeRobotBatchBuilder:
                 else:
                     # already-built tensor or unknown — 그대로 사용.
                     batch[str(cam)] = frame
+
+        # 모든 tensor 를 policy device 로 이동 — scorer 는 policy.forward 를
+        # 직접 호출해 preprocessor 의 DeviceProcessorStep 을 거치지 않으므로,
+        # CPU tensor (torch.from_numpy / tokenizer 결과) 와 cuda policy weight
+        # 의 device mismatch 가 발생한다. 여기서 일괄 .to(device).
+        try:
+            _dev = None
+            _params = getattr(self.policy, "parameters", None)
+            if callable(_params):
+                _dev = next(self.policy.parameters()).device
+            if _dev is None:
+                _dev = getattr(getattr(self.policy, "config", None), "device", None)
+            if _dev is not None:
+                batch = {
+                    k: (v.to(_dev) if torch.is_tensor(v) else v)
+                    for k, v in batch.items()
+                }
+        except Exception as _e:
+            print(f"  [LeRobotBatchBuilder] device move failed: {_e}", flush=True)
         return batch

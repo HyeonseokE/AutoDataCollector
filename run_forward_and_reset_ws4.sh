@@ -4,6 +4,10 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# lerobot 모듈 (src layout, pip install 안 됨 — Python 3.12+ 요구라 lerobot_cap=3.10 호환 X).
+# train script 도 동일 패턴 — client/chain 도 명시적으로 PYTHONPATH 잡는다.
+export PYTHONPATH="$SCRIPT_DIR/lerobot/src:${PYTHONPATH:-}"
+
 # ============================================================
 # 핵심 설정 (Essential Configuration) / 워크스페이스 명시 / 에피소드 갯수 명시
 # ============================================================

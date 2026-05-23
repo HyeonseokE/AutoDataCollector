@@ -92,7 +92,16 @@ def cleanup_dataset_for_resume(
     # 직접 삭제로 dataset 청소가 필요하면 별도 CLI 로 분리할 것.
     # 폴더명 = execution / save 순서 (seed_major / round_robin 둘 다).
     # sorted-by-name 순회 → dataset save 순서와 1:1 매칭.
-    episode_dirs = sorted(session_path.glob("episode_*"))
+    # chain reorg 이후 episode 는 phase1/ / phase2/ 하위로 이동되므로 session
+    # 직속 glob 만으로는 *0개로 잡혀* dataset trim 이 skip 되던 버그가 있었다.
+    # execution_forward_and_reset._iter_episode_dirs 와 동일한 식으로 legacy
+    # (직속) + phase1/ + phase2/ 를 모두 수집한다. phase1 ep_01..40 다음
+    # phase2 ep_41.. 순서가 sorted-by-name 과 일치하므로 dataset idx 매핑이
+    # 깨지지 않는다.
+    _ep_legacy = sorted(session_path.glob("episode_*"))
+    _ep_ph1 = sorted(session_path.glob("phase1/episode_*"))
+    _ep_ph2 = sorted(session_path.glob("phase2/episode_*"))
+    episode_dirs = [p for p in (_ep_legacy + _ep_ph1 + _ep_ph2) if p.is_dir()]
     ep_states = []  # [(ep_num, state)]
     for ep_dir in episode_dirs:
         try:

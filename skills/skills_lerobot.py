@@ -2563,25 +2563,46 @@ class LeRobotSkills:
         # Bezier 로 통째로 대체하여 paradigm 의 lateral/vertical 다양화 의도를
         # 모두 무력화한다. paper-grade Phase2 collection 은 raw curobo wp 그대로
         # 실행해야 의미 있는 selection 효과가 학습 데이터에 반영됨.
-        # 안전성 trade-off: extreme wp 가 잡힌 물체를 표면에 스치거나 떨어뜨릴
-        # 위험이 있지만, 이는 Q2 (Harmful OOD) 의 의도된 결과이기도 하다.
         # GrpcPlannerClient (Phase2 전용) 만 pop_dump_refs 를 갖는다.
+        #
+        # 단 — post-place retreat 만은 예외 (Phase2 mode 라도 clearance-lead
+        # 발동). _saved_pitch 는 release 됐고 _post_place_clearance_z 만 set 된
+        # 상태가 곧 post-place. server-side curobo 는 막 놓은 물체의 collision
+        # 을 모르므로 raw wp 가 옆걸음치며 그 물체를 치고 지나가 dataset 을
+        # 손상시킨다. retreat 단계는 어차피 episode 마무리 — Method3 selection
+        # 효과가 가장 작은 구간이라 Bezier overwrite 의 비용도 낮다.
+        # holding-phase (lift/carry — object 잡고 다양화 가장 의미 있는 구간) 만
+        # raw wp 보존.
         _is_phase2_grpc = (
             self._skill_planner_client is not None
             and hasattr(self._skill_planner_client, "pop_dump_refs")
         )
+        _is_post_place = (
+            getattr(self, "_saved_pitch", None) is None
+            and getattr(self, "_post_place_clearance_z", None) is not None
+        )
+        _skip_clearance_lead_phase2 = _is_phase2_grpc and not _is_post_place
         if (_subgoal_perturbed
                 and _holding_clearance_z is not None
-                and _is_phase2_grpc):
+                and _skip_clearance_lead_phase2):
             self._log(
-                "  [clearance-lead ascent] SKIPPED — Phase2 grpc mode "
+                "  [clearance-lead ascent] SKIPPED — Phase2 grpc holding-phase "
                 "(raw curobo wp 그대로 execute; Method3 selection 의도 보존)"
+            )
+        elif (_subgoal_perturbed
+                and _holding_clearance_z is not None
+                and _is_phase2_grpc
+                and _is_post_place):
+            self._log(
+                "  [clearance-lead ascent] APPLIED — Phase2 post-place retreat "
+                "(server-side curobo 가 놓은 물체 collision 미인지 → Bezier 로 "
+                "위로 띄워 안전 확보)"
             )
         if (_subgoal_perturbed
                 and _holding_clearance_z is not None
                 and trajectory.ik_converged
                 and current_ee[2] < _holding_clearance_z - 0.005
-                and not _is_phase2_grpc):
+                and not _skip_clearance_lead_phase2):
             try:
                 _cl = getattr(active_planner, "calibration_limits", None)
                 _custom_limits = (

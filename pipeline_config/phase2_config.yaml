@@ -54,7 +54,9 @@ mi_selection:
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
   lambda: 3.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
-  tau_MI: 0.0                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI (기본 0 = batch 평균 이상)
+  tau_MI: 0.5                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
+                               # (0.0→0.5: batch z-score 기준 평균 +0.5σ 이상만
+                               # eligible → ~30% — 보수적 MI 필터 후 VLA argmax)
   # accept_threshold 는 tau_MI 의 deprecated alias (구 yaml 호환). tau_MI 가 우선이지만
   # accept_threshold 만 지정해도 자동 매핑된다.
   amb_agg: mean                # §9.4 covered aggregation: mean | max

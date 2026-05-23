@@ -63,7 +63,7 @@ mi_selection:
   s_min_a: 0.001               # §9.3 local support scale floor
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
-  lambda: 3.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
+  lambda: 1.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
   tau_MI: 0.8                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
                                # (1.0→0.8: 1.0 은 너무 빡빡해 eligible 평균
                                # 5/64=8% 에 fallback 9% 발생. M̃_MI 분포가

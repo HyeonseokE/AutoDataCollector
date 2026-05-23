@@ -68,6 +68,12 @@ class GrpcPlannerClient:
         # episode 종료 시 client 가 pop_dump_refs() 로 가져가 server 의 dump
         # (phase2_cands/<selection_id>.npz) 를 scp + 오버레이한다.
         self._dump_refs: list[tuple[str, str]] = []
+        # episode-내 transit move ordinal counter — P_phase1 DB 의 partition
+        # key namespace (skill_0..skill_N) 와 server-side lookup 을 정합시키기
+        # 위한 가장 안정적인 source. plan_batch 마다 increment, pop_dump_refs()
+        # (episode 종료) 가 0 으로 reset 한다. caller 가 plan_batch(skill_id=)
+        # 로 명시 override 하지 않는 한 server 로 보내는 ordinal 키.
+        self._skill_call_index = 0
 
     def pop_dump_refs(self) -> list[tuple[str, str]]:
         """누적된 (selection_id, skill_id) 목록을 반환하고 비운다.
@@ -77,6 +83,9 @@ class GrpcPlannerClient:
         """
         refs = list(self._dump_refs)
         self._dump_refs.clear()
+        # episode 경계 — 다음 episode 의 첫 transit move 가 skill_0 부터 시작
+        # 하도록 ordinal counter 도 함께 reset (P_phase1 DB key 와 정합).
+        self._skill_call_index = 0
         return refs
 
     # ------------------------------------------------------------------
@@ -107,10 +116,17 @@ class GrpcPlannerClient:
         except Exception:
             images = {}
 
-        # skill_id = episode-내 ordinal partition 키 (skill_0..) — caller
-        # (move_to_position)가 명시 전달. P_phase1 의 skill_{skill_index} 와 같은
-        # 키 공간이라야 MI 가 정합.
-        effective_skill_id = skill_id or self._skill_id
+        # skill_id = episode-내 ordinal partition 키 (skill_0..) — P_phase1 의
+        # skill_{skill_index} 와 같은 key namespace 라야 server-side DB lookup
+        # 이 hit 한다. caller 가 명시 ordinal 을 전달하면 그대로 사용 (test/
+        # override), 아니면 내부 counter (pop_dump_refs 에서 episode 마다 reset)
+        # 가 매기는 skill_{N}. NL skill_type 은 별도 skill_type= 인자로 받아
+        # VLA instruction format 에만 쓴다 (DB partition key 와 분리).
+        if skill_id is not None:
+            effective_skill_id = str(skill_id)
+        else:
+            effective_skill_id = f"skill_{self._skill_call_index}"
+        self._skill_call_index += 1
         # VLA instruction = {skill_type}: {episode_task} — 학습(SkillDCTDataset)·
         # DB build 와 동일 format. server 는 skill_id 가 ordinal 이라 재포맷 못 하므로
         # client 가 여기서 format 해 보낸다. skill_type 은 caller 전달, fallback 은

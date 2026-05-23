@@ -2355,7 +2355,12 @@ class LeRobotSkills:
                     goal_qpos=np.asarray(goal_joint_rad, dtype=float),
                     n=self._skill_planner_n_candidates,
                     seed=seed,
-                    skill_id=skill_type_val,
+                    # NL ("move" / "move_and_close" / "move_and_open") 은
+                    # server-side VLA instruction format 용 — DB partition key
+                    # (ordinal skill_0..skill_N) 와 namespace 가 다르다. ordinal
+                    # 키는 GrpcPlannerClient 의 internal counter 가 episode 마다
+                    # 0 부터 매긴다 (pop_dump_refs 가 reset).
+                    skill_type=skill_type_val,
                 )
                 self._log(f"  [Skill Perturbation] plan_batch DONE — {len(cands)} candidates received")
             except Exception as e:

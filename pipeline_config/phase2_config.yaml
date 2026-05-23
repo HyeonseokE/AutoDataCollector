@@ -64,11 +64,12 @@ mi_selection:
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
   lambda: 1.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
-  tau_MI: 0.8                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
-                               # (1.0→0.8: 1.0 은 너무 빡빡해 eligible 평균
-                               # 5/64=8% 에 fallback 9% 발생. M̃_MI 분포가
-                               # heavy left tail 이라 정규분포 예측보다
-                               # eligible 적음. 0.8 로 완화해 평균 ~15% 목표)
+  tau_MI: 0.0                  # §13.2 — Useful-OOD/ID constraint: M̃_MI gate
+                               # (0.8→0.0: 검증된 baseline 복귀 — session_20260523_013722
+                               # 59/60 forward success 시 설정. 이전 변경 이력:
+                               # 0.0→0.5(c41b6c0)→1.0→0.8(fe2d020)→0.0. 분야 관례상
+                               # σ-multiple 직접 적용은 unusual, 분포 좁은 skill 에서
+                               # fallback 폭증 위험. quantile/budget-aware 재설계는 후속)
   # accept_threshold 는 tau_MI 의 deprecated alias (구 yaml 호환). tau_MI 가 우선이지만
   # accept_threshold 만 지정해도 자동 매핑된다.
   amb_agg: mean                # §9.4 covered aggregation: mean | max

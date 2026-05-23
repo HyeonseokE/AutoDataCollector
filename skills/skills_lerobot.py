@@ -2451,22 +2451,22 @@ class LeRobotSkills:
                     active_planner.max_acceleration,
                 )
                 # Phase2 chosen wp 가 extreme 한 우회 path (예: via2 의 Z) 일 때
-                # joint-space 길이 L 이 straight D 의 몇 배가 된다. 원 공식
-                # ``dur = phase1_ts[-1] * (L/D)`` 는 Phase1 의 |dq/dt| 분포
-                # (peak vel) 를 유지하려고 duration 을 L/D 배 늘리지만, extreme
-                # path 에서는 execute 시간이 너무 길어져 paper-grade collection
-                # throughput 이 떨어진다. cap 으로 최대 N배까지만 늘려 균형.
-                #   L/D ≤ cap : 기존과 동일 (Phase1 분포 보존)
-                #   L/D >  cap: peak vel 이 Phase1 의 (L/D)/cap 배까지 허용
-                _DURATION_LD_CAP = 2.0
-                _ld_eff = min(L / D, _DURATION_LD_CAP)
-                dur = float(phase1_ts[-1]) * _ld_eff
+                # 원 공식 ``dur = phase1_ts[-1] * (L/D)`` 는 Phase1 의 peak vel
+                # 을 유지하려고 duration 을 L/D 배 늘려 execute 가 너무 느렸다.
+                # 여기는 L/D scaling 완전 제거 — plan_to_position_multi 의
+                # straight-line trajectory 와 *동일한 duration* 으로 chosen wp
+                # 의 50 점 모두를 execute. peak joint velocity 는 Phase1 의
+                # (L/D) 배까지 올라가므로 motor saturation 시 wp 모양이 일부
+                # 평균화될 수 있음 — forward_log 의 Done(err) 와 Timeout 여부로
+                # 검증 필요. paper Q2 의 의도 (VLA 가 어려워하는 trajectory) 와
+                # 부합 — peak vel 도 학습 데이터의 다양성 일부.
+                dur = float(phase1_ts[-1])
                 trajectory.joint_positions = new_joints
                 trajectory.timestamps = np.linspace(0.0, dur, N)
                 trajectory.ee_positions = None
                 self._log(
                     f"  [Skill Perturbation] dur={dur:.2f}s "
-                    f"(L/D={L/D:.2f}, capped to {_ld_eff:.2f}, "
+                    f"(L/D={L/D:.2f}, scaling DISABLED — straight-line dur, "
                     f"straight={float(phase1_ts[-1]):.2f}s, wp={W.shape[0]})"
                 )
         else:

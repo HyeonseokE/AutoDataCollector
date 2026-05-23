@@ -110,12 +110,14 @@ skill_perturbation:
   curobo_num_trajopt_seeds: 4
   curobo_num_ik_seeds: 16
   curobo_use_cuda_graph: true     # graph capture 1회 → plan latency 50ms→5ms
-  curobo_via_offset_mag: 0.25     # m — via-point 가 직선에서 떨어지는 거리
+  curobo_via_offset_mag: 0.20     # m — via-point 가 직선에서 떨어지는 거리
                                   # (0.22→0.18 절충: 0.22 는 workspace 경계 넘어
                                   # via IK fail 다수 발생 → trajopt 0 valid).
-                                  # 2026-05-24: 0.18→0.25 — 사용자 관찰 "traj 폭
-                                  # 좁다" 응대. lat ±25cm, vert 7.5~30cm 로 확장.
-                                  # IK fail 비율 다시 monitor 필요.
+                                  # 2026-05-24 trial: 0.18→0.25 시도했으나 vert
+                                  # 최대 30cm (=0.25·1.2) 이 workspace 경계 초과
+                                  # → episode_46 부터 plan_batch returned 0 valid
+                                  # candidates × 4 발생. 0.20 으로 절충 (이전 0.18
+                                  # 보다 11% 넓고, vert 최대 24cm 로 안전).
   curobo_junction_smooth_k: 5     # cubic spline blend at via junction
   # K_max — candidate 당 최대 via 개수. 0=direct-only / 1=default / 2+ 더 다양.
   # 3: K=0/1/2/3 vias mix → 직선·1-bend·S자·복잡 path 4종 균일 quota (n=64면

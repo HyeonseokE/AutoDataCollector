@@ -1150,7 +1150,7 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         self._phase2_subgoal_replay = replay
         print(f"[Method3 phase2] subgoal replay READY — "
-              f"{replay.n_episodes()} episodes 기록, skills={replay.skill_ids()}")
+              f"{replay.n_episodes()} episodes 기록 (episode 별 cursor replay)")
         # _skills 가 이미 있으면 즉시 부착; 아직 lazy-init 전이면 _create_skills
         # 의 retro-attach 가 부착한다.
         self._attach_phase2_subgoal_replay()

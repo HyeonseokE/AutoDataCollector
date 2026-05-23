@@ -45,6 +45,16 @@ readiness:
 
 # --- MI-side usefulness + Useful-OOD selection (§8-13, useful_ood_updated) ---
 mi_selection:
+  # ─ Quadrant Validation (Table 6 — paradigm 4사분면 taxonomy 의 학습 효과 검증) ─
+  # paradigm 의 4사분면 selection rule 을 mode 로 분기. Q1 (default) = Method3.
+  #   Q1: argmax U_VLA  s.t.  M̃_MI ≥ +τ_MI   (Useful OOD — Method3 default)
+  #   Q2: argmax U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Harmful OOD — VLA novel + MI not-useful)
+  #   Q3: argmin U_VLA  s.t.  M̃_MI ≥ +τ_MI   (Useful ID  — VLA familiar + MI useful)
+  #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
+  # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
+  # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
+  selection_mode: Q1
+  # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율
   k_min: 2                     # §9.1 covered window 최소 neighbor 수 (3→2 — covered 늘림)

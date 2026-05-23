@@ -256,7 +256,8 @@ def setup_method3_phase2_server(
             vla_scorer = None
 
     print(
-        f"[method3_setup] Phase2MISelector ready — tau_MI={phase2_mi.tau_MI}, "
+        f"[method3_setup] Phase2MISelector ready — "
+        f"selection_mode={phase2_mi.selection_mode}, tau_MI={phase2_mi.tau_MI}, "
         f"k_nn_a={phase2_mi.k_nn_a}, vla_scorer={'on' if vla_scorer else 'off'}"
     )
     return Method3ServerStack(

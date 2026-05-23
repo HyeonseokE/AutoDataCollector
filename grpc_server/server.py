@@ -320,6 +320,7 @@ class PreselectiveAcquirerServicer(
                     f"under_covered={_under}/{len(p2_cands)} "
                     f"eligible={len(selection.eligible_indices)} chosen=#{selection.chosen_index} "
                     f"accepted={selection.accepted} u_vla={selection.u_vla_chosen} "
+                    f"mode={self.selector.cfg.selection_mode} "
                     f"tau_MI={self.selector.cfg.tau_MI} "
                     f"| M̃_MI[min,max,mean]={_stats(_mn)} "
                     f"M_MI[min,max,mean]={_stats(_m)} "

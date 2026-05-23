@@ -97,6 +97,14 @@ class Phase2MIConfig:
     lambda_: float = 1.0          # §11 ΔH_A|S 가중
     tau_MI: float = 0.0           # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
     accept_threshold: Optional[float] = None  # deprecated alias of tau_MI (yaml 호환)
+    # Quadrant Validation 실험 (Table 6 — paradigm 의 4사분면 taxonomy 의 학습
+    # 효과를 *외부 지표* 로 검증하기 위해 selection rule 을 mode 로 분기).
+    #   Q1 (default = Method3): argmax U_VLA  s.t.  M̃_MI ≥ +τ_MI   (Useful OOD)
+    #   Q2:                     argmax U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Harmful OOD)
+    #   Q3:                     argmin U_VLA  s.t.  M̃_MI ≥ +τ_MI   (Useful ID)
+    #   Q4:                     argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID)
+    # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
+    selection_mode: str = "Q1"
     amb_agg: str = "mean"         # §9.4 covered aggregation: "mean" | "max"
     min_covered_windows: int = 1  # §9.1 T_min — 미만이면 under-covered
     debug_verbose: bool = False
@@ -115,6 +123,12 @@ class Phase2MIConfig:
         # 기존 yaml 들이 accept_threshold 만 지정하던 호환 경로를 보존.
         if self.accept_threshold is not None:
             self.tau_MI = float(self.accept_threshold)
+        # selection_mode validation (Table 6 Quadrant Validation).
+        if self.selection_mode not in ("Q1", "Q2", "Q3", "Q4"):
+            raise ValueError(
+                f"selection_mode must be one of Q1/Q2/Q3/Q4, "
+                f"got {self.selection_mode!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -347,11 +361,21 @@ class Phase2MISelector:
         # 비용 절약 (cost-aware: stage 1 통과한 것에만 R-stochastic eval 수행).
         u_vla = np.zeros(len(candidates), dtype=np.float64)
 
-        # Stage 2 — eligible: M̃_MI ≥ τ_MI ∧ not under_covered.
-        eligible = [
-            i for i, r in enumerate(reports)
-            if m_mi_norm[i] >= cfg.tau_MI and not r.under_covered
-        ]
+        # Stage 2 — eligible: selection_mode 별 분기 (Table 6 Quadrant Validation).
+        #   Q1/Q3 (positive side):  M̃_MI ≥ +τ_MI  (Useful OOD / Useful ID)
+        #   Q2/Q4 (negative side):  M̃_MI ≤ -τ_MI  (Harmful OOD / Redundant ID)
+        # under_covered 후보는 모든 mode 에서 제외 (Phase2 신뢰성 보장).
+        _mode = cfg.selection_mode
+        if _mode in ("Q1", "Q3"):
+            eligible = [
+                i for i, r in enumerate(reports)
+                if m_mi_norm[i] >= cfg.tau_MI and not r.under_covered
+            ]
+        else:  # Q2, Q4
+            eligible = [
+                i for i, r in enumerate(reports)
+                if m_mi_norm[i] <= -cfg.tau_MI and not r.under_covered
+            ]
 
         if vla_scorer is not None and eligible:
             # GPU batched U_VLA — eligible 후보를 batch 단위로 묶어 한 번에
@@ -395,20 +419,39 @@ class Phase2MISelector:
             for i, r in enumerate(reports)
         ]
 
-        # Stage 3 — eligible 안에서 max U_VLA (없으면 fallback to max M_MI).
+        # Stage 3 — mode 별 chosen 선택 (Table 6 Quadrant Validation).
+        #   Q1, Q2: argmax U_VLA  (VLA-novel 우선)
+        #   Q3, Q4: argmin U_VLA  (VLA-familiar 우선)
+        # fallback (eligible=∅):
+        #   Q1, Q3 (positive side): argmax M_MI    (가장 useful 한 candidate)
+        #   Q2, Q4 (negative side): argmin M_MI    (가장 not-useful 한 candidate)
+        _side = "≥+τ_MI" if _mode in ("Q1", "Q3") else "≤-τ_MI"
         if eligible:
             if vla_scorer is not None:
-                chosen = max(eligible, key=lambda i: u_vla[i])
-                rule = "argmax U_VLA s.t. M̃_MI≥τ_MI"
+                if _mode in ("Q1", "Q2"):
+                    chosen = max(eligible, key=lambda i: u_vla[i])
+                    rule = f"argmax U_VLA s.t. M̃_MI{_side}  [{_mode}]"
+                else:  # Q3, Q4
+                    chosen = min(eligible, key=lambda i: u_vla[i])
+                    rule = f"argmin U_VLA s.t. M̃_MI{_side}  [{_mode}]"
             else:
-                chosen = max(eligible, key=lambda i: m_mi[i])
-                rule = "argmax M_MI s.t. M̃_MI≥τ_MI  (vla_scorer=None)"
+                # vla_scorer=None backward-compat — U_VLA 대신 M_MI 정렬.
+                if _mode in ("Q1", "Q3"):
+                    chosen = max(eligible, key=lambda i: m_mi[i])
+                    rule = f"argmax M_MI s.t. M̃_MI{_side}  (vla_scorer=None) [{_mode}]"
+                else:  # Q2, Q4
+                    chosen = min(eligible, key=lambda i: m_mi[i])
+                    rule = f"argmin M_MI s.t. M̃_MI{_side}  (vla_scorer=None) [{_mode}]"
             accepted = True
         else:
-            # fallback — eligible 이 비면 argmax M_MI 반환하되 accept=False.
-            chosen = int(np.argmax(m_mi))
+            # fallback — eligible 이 비면 mode 별로 argmax/argmin M_MI.
+            if _mode in ("Q1", "Q3"):
+                chosen = int(np.argmax(m_mi))
+                rule = f"fallback argmax M_MI (no eligible) [{_mode}]"
+            else:  # Q2, Q4
+                chosen = int(np.argmin(m_mi))
+                rule = f"fallback argmin M_MI (no eligible) [{_mode}]"
             accepted = False
-            rule = "fallback argmax M_MI (no eligible)"
 
         u_chosen: Optional[float] = float(u_vla[chosen]) if vla_scorer is not None else None
         self._dbg(

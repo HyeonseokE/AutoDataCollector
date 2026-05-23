@@ -30,8 +30,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from traj_analysis import loader, fk_ee, resample, viz_spatial, viz_embedding, metrics  # noqa: E402
 
 
-STATE_KEY = "observation.state.radian_urdf0"
-ACTION_KEY = "action.radian_urdf0"
+STATE_KEY = "observation.state"
+ACTION_KEY = "action"
 
 
 def _ep_ids(trajs, offset: int = 0) -> np.ndarray:
@@ -154,6 +154,13 @@ def main():
     a_raw = loader.load_episode_trajectories(args.auto_repo,  keys=[STATE_KEY, ACTION_KEY])
     h_state = h_raw[STATE_KEY]; h_action = h_raw[ACTION_KEY]
     a_state = a_raw[STATE_KEY]; a_action = a_raw[ACTION_KEY]
+    # observation.state / action are stored in DEGREES (so101 motor reading).
+    # FK (URDF) expects RADIAN, and outputs are named "*_rad" — convert here.
+    # The 6th column (gripper) isn't used by FK but we convert for naming consistency.
+    h_state = [np.deg2rad(s).astype(np.float32) for s in h_state]
+    a_state = [np.deg2rad(s).astype(np.float32) for s in a_state]
+    h_action = [np.deg2rad(a).astype(np.float32) for a in h_action]
+    a_action = [np.deg2rad(a).astype(np.float32) for a in a_action]
     h_sum = loader.summarize(h_state, "human")
     a_sum = loader.summarize(a_state, "auto")
     print(f"  human: {h_sum['num_episodes']} ep, {h_sum['total_frames']} frames, "

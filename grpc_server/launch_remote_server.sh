@@ -299,16 +299,18 @@ if [ "${1:-}" = "stop" ]; then
   rm -rf "$LOG_DIR/cm" 2>/dev/null
   # 5) 원격 — *반드시* 도달해야 GPU 풀린다. 마지막 명령 ``true`` 로 exit 0 보장.
   if [ -n "$REMOTE_HOST" ]; then
-    info "killing remote tmux session: $TMUX_SESSION + server process"
+    info "killing remote tmux session: $TMUX_SESSION + server process (port=$REMOTE_PORT)"
+    # tmux kill-session 도 prefix match — '=' 로 exact 강제. pkill 도 port
+    # 명시해서 다른 task 의 grpc_server 가 같이 안 죽도록 한다.
     if ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
-        "tmux kill-session -t '$TMUX_SESSION' 2>/dev/null; \
-         pkill -9 -f 'grpc_server.server' 2>/dev/null; \
+        "tmux kill-session -t '=$TMUX_SESSION' 2>/dev/null; \
+         pkill -9 -f 'grpc_server.server.*--port $REMOTE_PORT' 2>/dev/null; \
          rm -f /tmp/phase2_server.log; \
          true" 2>/dev/null; then
-      info "remote stop signal sent (tmux + server killed)"
+      info "remote stop signal sent (tmux + server[port=$REMOTE_PORT] killed)"
     else
       warn "remote stop ssh exit != 0 (connect issue?). 수동:"
-      warn "  ssh $REMOTE_HOST 'tmux kill-session -t $TMUX_SESSION; pkill -9 -f grpc_server.server'"
+      warn "  ssh $REMOTE_HOST 'tmux kill-session -t =$TMUX_SESSION; pkill -9 -f \"grpc_server.server.*--port $REMOTE_PORT\"'"
     fi
   else
     warn "REMOTE_HOST not set — skipping remote stop"
@@ -381,8 +383,10 @@ fi
 # ============================================================
 bold "step 2/4  start remote server"
 
+# tmux has-session -t NAME 은 prefix match (예: phase2_server 가 phase2_server_sort
+# 와 match → 다른 task tmux 를 자기 것으로 오인). exact match 위해 '=' prefix 사용.
 session_exists=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
-    "tmux has-session -t '$TMUX_SESSION' 2>/dev/null && echo yes || echo no")
+    "tmux has-session -t '=$TMUX_SESSION' 2>/dev/null && echo yes || echo no")
 
 if [ "$session_exists" = "yes" ]; then
   info "remote tmux '$TMUX_SESSION' already running — reusing"

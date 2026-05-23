@@ -161,7 +161,7 @@ class ResetWorkspace(BaseWorkspace):
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
         max_attempts: int = 500,
-        max_iou: float = 0.5,
+        max_iou: float = 0.80,
         exclusion_zones: Optional[List[dict]] = None,
         resetspace: Optional[str] = None,
     ) -> Optional[List[float]]:
@@ -176,7 +176,7 @@ class ResetWorkspace(BaseWorkspace):
             obj_bbox_px: 이 객체의 bbox 픽셀 크기 (w_px, h_px). None이면 (30, 30) 사용.
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
-            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.5)
+            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.80)
             exclusion_zones: 제외 영역 리스트 (robot base_link frame).
                        [{"center": [x, y], "radius": float}, ...]
                        예: free state EE 주변 8cm 제외.
@@ -496,7 +496,7 @@ def generate_random_positions(
                     pix2robot = None
 
     # 장애물 리스트 (픽셀 bbox 기반)
-    # allow_overlap: True → IoU ≤ 0.5 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
+    # allow_overlap: True → IoU ≤ 0.80 허용 (grippable), False → 겹침 불허 + margin (non-grippable)
     occupied = []
 
     # 1) Non-grippable 객체 (고정 장애물, 겹침 불허 + margin)
@@ -515,7 +515,7 @@ def generate_random_positions(
             "allow_overlap": False,  # 겹침 불허
         })
 
-    # 2) Grippable 객체의 현재 위치 (IoU ≤ 0.5 허용)
+    # 2) Grippable 객체의 현재 위치 (IoU ≤ 0.80 허용)
     for name, info in grippable_objects.items():
         if info is None:
             continue
@@ -528,10 +528,10 @@ def generate_random_positions(
             "center_px": center_px,
             "bbox_w": bbox_px[0],
             "bbox_h": bbox_px[1],
-            "allow_overlap": True,  # IoU ≤ 0.5 허용
+            "allow_overlap": True,  # IoU ≤ 0.80 허용
         })
 
-    # 3) 초기 위치 + 과거 시드 위치 (IoU ≤ 0.5 허용)
+    # 3) 초기 위치 + 과거 시드 위치 (IoU ≤ 0.80 허용)
     for name, info in initial_positions.items():
         if info is None:
             continue
@@ -545,7 +545,7 @@ def generate_random_positions(
             "center_px": center_px,
             "bbox_w": bbox_px[0],
             "bbox_h": bbox_px[1],
-            "allow_overlap": True,  # IoU ≤ 0.5 허용
+            "allow_overlap": True,  # IoU ≤ 0.80 허용
         })
 
     # 4) 현재 위치의 물체 (고정 장애물, 겹침 불허 + margin)

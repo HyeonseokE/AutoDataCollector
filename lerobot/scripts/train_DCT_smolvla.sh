@@ -25,8 +25,20 @@ cd "$REPO_DIR"
 
 # -------- conda env --------
 CONDA_ENV="${CONDA_ENV:-lerobot}"
+# Auto-detect conda profile (miniconda3 / anaconda3 / CONDA_PREFIX 기반)
+_CONDA_SH=""
+for _p in "$HOME/miniconda3/etc/profile.d/conda.sh" \
+          "$HOME/anaconda3/etc/profile.d/conda.sh" \
+          "${CONDA_PREFIX:+$CONDA_PREFIX/etc/profile.d/conda.sh}" \
+          "/opt/conda/etc/profile.d/conda.sh"; do
+    if [ -n "$_p" ] && [ -f "$_p" ]; then _CONDA_SH="$_p"; break; fi
+done
+if [ -z "$_CONDA_SH" ]; then
+    echo "ERROR: conda.sh not found. Set CONDA_PREFIX or install conda." >&2
+    exit 1
+fi
 # shellcheck disable=SC1091
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
+source "$_CONDA_SH"
 conda activate "$CONDA_ENV"
 export PYTHONNOUSERSITE=1
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

@@ -114,7 +114,19 @@ mkdir -p "$(dirname "$SKILL_DCT_PARQUET")"
 
 # conda env (lerobot_cap) — train script 와 동일.
 CONDA_ENV="${CONDA_ENV:-lerobot_cap}"
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
+# Auto-detect conda profile (miniconda3 / anaconda3 / CONDA_PREFIX 기반)
+_CONDA_SH=""
+for _p in "$HOME/miniconda3/etc/profile.d/conda.sh" \
+          "$HOME/anaconda3/etc/profile.d/conda.sh" \
+          "${CONDA_PREFIX:+$CONDA_PREFIX/etc/profile.d/conda.sh}" \
+          "/opt/conda/etc/profile.d/conda.sh"; do
+    if [ -n "$_p" ] && [ -f "$_p" ]; then _CONDA_SH="$_p"; break; fi
+done
+if [ -z "$_CONDA_SH" ]; then
+    err "conda.sh not found (checked miniconda3/anaconda3/CONDA_PREFIX/opt). Set CONDA_PREFIX or install conda."
+    exit 1
+fi
+source "$_CONDA_SH"
 conda activate "$CONDA_ENV"
 
 if python -m method3.dct.build_skill_dct \
@@ -150,7 +162,7 @@ else
         "DATASET_REPO_ID=$DATASET"
         "SKILL_DCT_PARQUET=$SKILL_DCT_PARQUET"
         "JOB_NAME=$TRAIN_JOB"
-        "CONDA_ENV=lerobot_cap"
+        "CONDA_ENV=${TRAIN_CONDA_ENV:-lerobot}"
     )
     if [ -n "$STEPS_OVERRIDE" ]; then
         _train_envs+=("STEPS=$STEPS_OVERRIDE")
@@ -168,7 +180,7 @@ else
     # latest checkpoint 자동 검색 — mtime desc 의 첫 번째
     VLA_CKPT="$(find "lerobot/outputs/train/$TRAIN_JOB/checkpoints" \
         -type d -name pretrained_model 2>/dev/null \
-        | xargs -I {} stat -c '%Y %n' {} 2>/dev/null \
+        | xargs -I {} stat -c '%Y {}' 2>/dev/null \
         | sort -rn | head -1 | awk '{print $2}')"
     if [ -z "$VLA_CKPT" ] || [ ! -d "$VLA_CKPT" ]; then
         err "Step 2 ok 이지만 latest checkpoint 못 찾음 (탐색: lerobot/outputs/train/$TRAIN_JOB/checkpoints/*/pretrained_model)"

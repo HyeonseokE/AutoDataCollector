@@ -122,7 +122,7 @@ class DryRunSkills:
         object_position = np.array(object_position)
         object_height = object_position[2]
 
-        MIN_PICK_Z = -0.025  # match skills_lerobot.py (25mm below table — loose floor for pick_z_offset)
+        MIN_PICK_Z = -0.025  # match skills_lerobot.py (25mm below table — loose floor for z_offset)
         pick_z = max(object_height - self.pick_offset, MIN_PICK_Z)
         pick_position = np.array([object_position[0], object_position[1], pick_z])
 

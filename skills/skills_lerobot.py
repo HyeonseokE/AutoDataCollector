@@ -154,9 +154,6 @@ class LeRobotSkills:
         self.pick_offset = pick_offset  # Fixed offset from object top for pick/place
         self.RECORDING_FPS = int(recording_fps)  # instance attr shadows class default
         self.skill_sequence = []  # 실행된 스킬 시퀀스 기록 (후처리 라벨링용)
-        # episode 시작 시 connect() 가 snapshot — 현재 skill 의 episode-내
-        # 0-based ordinal = len(skill_sequence) - _episode_skill_base.
-        self._episode_skill_base = 0
         LeRobotSkills._last_instance = self  # 후처리에서 접근 가능하도록
 
         # LeRobot dataset recording callback
@@ -411,9 +408,6 @@ class LeRobotSkills:
         self._log(f"\n{'='*60}")
         self._log("LeRobotSkills: Initializing...")
         self._log(f"{'='*60}")
-        # episode 경계 — generated code 는 매 episode skills.connect() 로 시작.
-        # 이후 skill 들의 episode-내 ordinal 기준점 (Phase2 candidate skill_{k} 키).
-        self._episode_skill_base = len(self.skill_sequence)
 
         # Load configuration
         if not self.robot_config_path.exists():
@@ -540,8 +534,9 @@ class LeRobotSkills:
             self._log(f"  Warning: Free state not found: {free_state_path}")
 
         # Initialize compensator
-        # pick_z_offset 기본값 (보정 파일에서 덮어쓸 수 있음, signed 미터 단위)
-        self.pick_z_offset: float = 0.0
+        # z_offset 기본값 (보정 파일에서 덮어쓸 수 있음, signed 미터 단위).
+        # pick + place 양쪽 z 명령에 동일하게 더해진다.
+        self.z_offset: float = 0.0
         # [REVERT-MARK: pick_xy_offset 2026-05-20] Radial overshoot at pick.
         # Trajectory tracking 분석에서 fingertip 이 항상 base 쪽으로 ~5-10mm
         # 짧게 멈춤이 확인되어 (elbow/wrist_flex deadband + Hold phase plateau),
@@ -564,14 +559,18 @@ class LeRobotSkills:
                     self.gravity_sag = self.compensator.gravity_sag
                     self._log(f"  Gravity sag compensation: gain={self.gravity_sag.gain}, "
                               f"reach_power={self.gravity_sag.reach_power}")
-                # Per-robot pick descent boost (residual sag absorber)
+                # Per-robot z offset (residual sag absorber) — applied to both
+                # pick and place. Reads `z_offset`; falls back to the legacy
+                # `pick_z_offset` key for compensation files not yet renamed.
                 try:
                     with open(compensation_file) as _f:
                         _comp = json.load(_f)
-                    self.pick_z_offset = float(_comp.get("pick_z_offset", 0.0))
-                    if abs(self.pick_z_offset) > 1e-9:
-                        self._log(f"  Pick z offset: {self.pick_z_offset*1000:+.1f}mm "
-                                  f"(applied at execute_pick_object descent)")
+                    self.z_offset = float(
+                        _comp.get("z_offset", _comp.get("pick_z_offset", 0.0))
+                    )
+                    if abs(self.z_offset) > 1e-9:
+                        self._log(f"  Z offset: {self.z_offset*1000:+.1f}mm "
+                                  f"(applied at pick + place descent)")
                     # [REVERT-MARK: pick_xy_offset 2026-05-20]
                     self.pick_xy_offset = float(_comp.get("pick_xy_offset", 0.0))
                     if abs(self.pick_xy_offset) > 1e-9:
@@ -1425,13 +1424,26 @@ class LeRobotSkills:
                         if grasp_px is None and detected_points:
                             _, grasp_px, grasp_py = detected_points[0]
 
-                        # Fallback to bbox center if Turn 2 failed
+                        # Fallback to bbox center if Turn 2 failed.
+                        # Inherit the existing point label from the caller's
+                        # positions dict so codegen's hardcoded key access
+                        # (e.g. positions[name]["points"]["plate center"]) keeps
+                        # working when the runtime re-detect's Turn 2 fails.
+                        # Hardcoding "grasp center" used to break plates whose
+                        # initial detection had labelled the point "plate center".
                         grasp_from_vlm = grasp_px is not None
                         if not grasp_from_vlm:
                             grasp_px = int((xmin + xmax) / 2 * img_w / 1000)
                             grasp_py = int((ymin + ymax) / 2 * img_h / 1000)
-                            detected_points = [("grasp center", grasp_px, grasp_py)]
-                            self._log(f"    {label}: Turn 2 failed, using bbox center ({grasp_px},{grasp_py})")
+                            fallback_name = "grasp center"
+                            if self._exec_positions is not None:
+                                _existing = self._exec_positions.get(label)
+                                if isinstance(_existing, dict):
+                                    _existing_points = _existing.get("points")
+                                    if isinstance(_existing_points, dict) and _existing_points:
+                                        fallback_name = next(iter(_existing_points.keys()))
+                            detected_points = [(fallback_name, grasp_px, grasp_py)]
+                            self._log(f"    {label}: Turn 2 failed, using bbox center ({grasp_px},{grasp_py}) as '{fallback_name}'")
 
                         # pix2robot 변환 (depth가 있으면 물체 높이 포함)
                         if self.pix2robot is not None:
@@ -2336,20 +2348,14 @@ class LeRobotSkills:
                 and self._perturbation_rng is not None
                 and trajectory.ik_converged):
             seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
-            # Phase2 candidate 의 vector DB partition 키 = episode-내 skill ordinal.
-            # plan_batch 시점엔 이 move 의 _set_skill_recording 이 아직 안 돌아
-            # skill_sequence 에 미반영 → len - _episode_skill_base 가 곧 ordinal.
-            # P_phase1 의 skill_{skill_index} 와 같은 키 공간 → MI 정합.
-            _skill_ordinal = f"skill_{len(self.skill_sequence) - self._episode_skill_base}"
-            self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={_skill_ordinal} [{skill_type_val}])")
+            self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={skill_type_val})")
             try:
                 cands = self._skill_planner_client.plan_batch(
                     start_qpos=np.asarray(current_joints, dtype=float),
                     goal_qpos=np.asarray(goal_joint_rad, dtype=float),
                     n=self._skill_planner_n_candidates,
                     seed=seed,
-                    skill_id=_skill_ordinal,
-                    skill_type=skill_type_val,
+                    skill_id=skill_type_val,
                 )
                 self._log(f"  [Skill Perturbation] plan_batch DONE — {len(cands)} candidates received")
             except Exception as e:
@@ -2444,9 +2450,15 @@ class LeRobotSkills:
                     (_cl.lower_limits_radians, _cl.upper_limits_radians)
                     if _cl is not None else None
                 )
-                # via: target xy, held near hover — descend only VIA_DESCENT_FRAC
-                # of the way down so xy is corrected almost entirely up high.
-                VIA_DESCENT_FRAC = 0.15
+                # via: target xy, held at ~70% of original height (=descend only
+                # VIA_DESCENT_FRAC of the way down). With VIA_DESCENT_FRAC=0.30
+                # the Bezier curve passes near (target_xy, 70%-high z) at its
+                # midpoint — xy is essentially aligned by then, and the latter
+                # half of the trajectory is mostly pure z descent. More
+                # pronounced staging than the previous 0.15 (which kept via
+                # near 85% high; xy convergence was earlier but z stayed nearly
+                # untouched for too long, producing a sharper kink at via).
+                VIA_DESCENT_FRAC = 0.30
                 via_z = current_ee[2] + VIA_DESCENT_FRAC * (
                     ik_target_position[2] - current_ee[2]
                 )
@@ -2943,11 +2955,11 @@ class LeRobotSkills:
         object_height = object_position[2]
 
         MIN_PICK_Z = -0.025  # Minimum pick height (25mm below table) — loose floor that
-                             # lets per-robot pick_z_offset (signed, set in compensation file)
+                             # lets per-robot z_offset (signed, set in compensation file)
                              # take full effect for thin objects. The motor's natural reach
                              # floor + arm compliance still prevent grinding into the table.
-        # pick_z = (object_top - pick_offset) + pick_z_offset (per-robot residual sag absorber, usually negative)
-        pick_z_raw = object_height - self.pick_offset + self.pick_z_offset
+        # pick_z = (object_top - pick_offset) + z_offset (per-robot residual sag absorber)
+        pick_z_raw = object_height - self.pick_offset + self.z_offset
         pick_z = max(pick_z_raw, MIN_PICK_Z)
         # [REVERT-MARK: pick_xy_offset 2026-05-20] Radial overshoot in xy.
         # Push the pick xy outward by pick_xy_offset metres along the radial
@@ -2966,7 +2978,7 @@ class LeRobotSkills:
         self._log(f"  Object height: {object_height*100:.1f}cm")
         if pick_z_raw < MIN_PICK_Z:
             self._log(f"  [Pick Z-Fix] {pick_z_raw*100:.1f}cm < min {MIN_PICK_Z*100:.1f}cm, clamping to {MIN_PICK_Z*100:.1f}cm")
-        offset_str = f", z_offset={self.pick_z_offset*1000:+.1f}mm" if abs(self.pick_z_offset) > 1e-9 else ""
+        offset_str = f", z_offset={self.z_offset*1000:+.1f}mm" if abs(self.z_offset) > 1e-9 else ""
         self._log(f"  Pick point: {pick_z*100:.1f}cm ({self.pick_offset*100:.1f}cm from top{offset_str})")
 
         # NOTE: gripper_frame_link 위치를 URDF 에서 fingertip 자체로 옮겼으므로
@@ -3048,12 +3060,15 @@ class LeRobotSkills:
             # Placing on table: use target z (object's own height) as reference
             # place_position[2] = object's own height when on table
             # place_z = object height - pick_offset (same as how we'd pick it from table)
+            # + z_offset: per-robot residual sag absorber, same value used at pick.
             place_z = max(
-                place_position[2] - self.pick_offset + PLACE_EXTRA_DESCENT_M,
+                place_position[2] - self.pick_offset + PLACE_EXTRA_DESCENT_M + self.z_offset,
                 MIN_PLACE_Z,
             )
         else:
-            # Placing on another object: use saved pick_z offset from surface
+            # Placing on another object: use saved pick_z offset from surface.
+            # _pick_z already incorporates z_offset (set inside execute_pick_object),
+            # so it is NOT re-added here — doing so would double-count the offset.
             pick_z = getattr(self, '_pick_z', self.pick_offset)
             place_z = target_surface_height + pick_z
             if place_z < MIN_PLACE_Z:

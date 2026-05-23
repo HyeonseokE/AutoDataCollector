@@ -124,7 +124,7 @@ def pull_object(
     # - 이유: SO-101 모터는 핸들 z 영역에서 commanded z 보다 ~1.5cm 위에서
     #   saturate 함. handle z 그대로 명령하면 그리퍼가 핸들 위 1.5cm 에서
     #   닫혀 공기를 잡음. execute_pick_object 가 항상 잘 grasp 한 이유는
-    #   pick_offset (2.5cm) + pick_z_offset (-0.5cm) = 3cm 추가 하강 명령이
+    #   pick_offset (2.5cm) + z_offset (-0.5cm) = 3cm 추가 하강 명령이
     #   이 saturation 을 자연스럽게 보상하기 때문.
     # - 같은 보상을 pull 에도 적용 — skills.pick_offset (default 2.5cm) 만큼
     #   더 내려가게 명령. 모터 saturation 으로 실제 도달은 핸들 z 부근에서

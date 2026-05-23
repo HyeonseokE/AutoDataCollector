@@ -1150,7 +1150,7 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         self._phase2_subgoal_replay = replay
         print(f"[Method3 phase2] subgoal replay READY — "
-              f"{replay.n_episodes()} episodes 기록 (episode 별 cursor replay)")
+              f"{replay.n_episodes()} episodes 기록, skills={replay.skill_ids()}")
         # _skills 가 이미 있으면 즉시 부착; 아직 lazy-init 전이면 _create_skills
         # 의 retro-attach 가 부착한다.
         self._attach_phase2_subgoal_replay()
@@ -1445,16 +1445,11 @@ class ForwardAndResetPipeline(BasePipeline):
             """ξ* index 반환. None 이면 skills_lerobot 의 RNG fallback."""
             if not cands:
                 return None
-            # candidate 의 vector DB partition 키 = episode-내 skill ordinal
-            # (skill_0, skill_1, ...). _hook 은 move_to_position 실행 중
-            # (plan_batch 직후, 해당 move 의 _set_skill_recording 이전) 에
-            # 호출되므로 skill_sequence 에 현재 move 가 아직 미반영 →
-            # len - _episode_skill_base 가 곧 현재 move 의 ordinal.
-            # P_phase1 (skill_{skill_index}) 과 같은 키 공간 → MI 정합.
-            _sk = getattr(self, "_skills", None)
-            _ord = (len(_sk.skill_sequence) - getattr(_sk, "_episode_skill_base", 0)
-                    ) if _sk is not None else 0
-            skill_id = f"skill_{_ord}"
+            # 현재 skill_id 는 skills_lerobot 호출자 가 hook 시그니처에 안 실어줌.
+            # acquisition 단계에서 skill 별 acquisition 정책이 필요해지면 별도 hook
+            # 으로 분리하되, 지금은 "default" skill bucket 으로 단일 키 사용 —
+            # vector DB 가 한 bucket 으로 동작하면서 selection rule 자체는 정상.
+            skill_id = "default"
 
             # anchor: 현재 goal_joint_rad 의 EE xyz 추출은 비싸므로 일단 그대로
             # 단순화 — anchor 가 없어도 candidate 의 action 다양성으로 selection
@@ -3169,10 +3164,12 @@ class ForwardAndResetPipeline(BasePipeline):
                             self.generated_code = self.cached_forward_code
                             print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET}")
                         else:
+                            # 캐시 재사용 불가 — 이번 에피소드 장면이 캐시와 다름
+                            # (예: 객체가 이미 제자리에 있어 grasp point 누락).
+                            # 이 에피소드만 재생성하고 기존 캐시는 유지 (덮어쓰지 않음).
+                            # 그렇지 않으면 비정형 장면의 퇴화 코드가 캐시를 오염시킴.
                             missing = set(self.cached_forward_keys) - set(self.detected_positions.keys())
-                            print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET}")
-                            self.cached_forward_code = None
-                            self.cached_forward_keys = []
+                            print(f"  {YELLOW}[CodeReuse] Scene mismatch (missing={missing}), regenerating for this episode only (cache kept){RESET}")
                             self.generated_code = self.generate_forward_code(
                                 instruction, self.detected_positions,
                                 image_path=str(initial_path),
@@ -3274,10 +3271,9 @@ class ForwardAndResetPipeline(BasePipeline):
                         print(f"  {GREEN}[CodeReuse] Using cached code (keys matched){RESET}")
                     else:
                         if self.cached_forward_code is not None:
+                            # 캐시 재사용 불가 — 이번 에피소드만 재생성, 기존 캐시는 유지.
                             missing = set(self.cached_forward_keys) - set(self.detected_positions.keys())
-                            print(f"  {YELLOW}[CodeReuse] Key mismatch ({missing}), regenerating{RESET}")
-                            self.cached_forward_code = None
-                            self.cached_forward_keys = []
+                            print(f"  {YELLOW}[CodeReuse] Scene mismatch (missing={missing}), regenerating for this episode only (cache kept){RESET}")
                         print(f"\n{YELLOW}" + self._log(f"Generating forward code via LLM ({self.llm_model}, single-turn)...", step="Step 3/6") + f"{RESET}")
                         self.generated_code = self.generate_forward_code(
                             instruction,

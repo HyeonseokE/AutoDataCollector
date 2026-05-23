@@ -213,6 +213,45 @@ def cleanup_dataset_for_resume(
         dataset_indices_to_delete.extend(excess_indices)
         _dprint(f"[Cleanup] {len(excess_indices)} excess episodes at tail → DELETE (indices {excess_indices})")
 
+    # Corrupted-episode guard — video 프레임 수 ≠ metadata length 인 episode 감지.
+    # delete_episodes() 는 *살아남는* episode 를 video reindex 할 때
+    # `src_ep["length"] == to_frame - from_frame` 를 assert 한다. corrupted
+    # episode 가 survivor 에 있으면 그 한 개 때문에 cleanup 전체가 crash.
+    # corrupted episode 는 어차피 reindex 불가 → 삭제 목록에 강제 편입한다
+    # (delete 대상은 reindex 를 안 거치므로 crash 회피).
+    try:
+        import pandas as _pd
+        import glob as _glob
+        _ep_files = sorted(_glob.glob(
+            str(dataset_path / "meta" / "episodes" / "chunk-*" / "*.parquet")
+        ))
+        if _ep_files:
+            _edf = _pd.concat([_pd.read_parquet(f) for f in _ep_files],
+                              ignore_index=True)
+            _fps = dataset.meta.fps
+            _corrupt = []
+            for _, _r in _edf.iterrows():
+                _idx = int(_r["episode_index"])
+                _length = int(_r["length"])
+                for _vk in dataset.meta.video_keys:
+                    _t0 = _r.get(f"videos/{_vk}/from_timestamp")
+                    _t1 = _r.get(f"videos/{_vk}/to_timestamp")
+                    if _t0 is not None and _t1 is not None:
+                        _vf = round((float(_t1) - float(_t0)) * _fps)
+                        if _vf != _length:
+                            _corrupt.append(_idx)
+                            break
+            _corrupt_new = [i for i in _corrupt
+                            if i not in dataset_indices_to_delete]
+            if _corrupt_new:
+                print(f"[Cleanup] {len(_corrupt_new)} corrupted episode(s) "
+                      f"(video frames ≠ metadata length) → force-deleting: "
+                      f"{_corrupt_new}")
+                dataset_indices_to_delete.extend(_corrupt_new)
+    except Exception as _e:
+        print(f"[Cleanup] corrupted-episode scan skipped: {_e}")
+
+    dataset_indices_to_delete = sorted(set(dataset_indices_to_delete))
     stats["deleted_indices"] = sorted(dataset_indices_to_delete)
 
     if not dataset_indices_to_delete:

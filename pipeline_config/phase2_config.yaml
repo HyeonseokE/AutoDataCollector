@@ -244,7 +244,9 @@ remote:
   identity_file: ""                      # 예: "~/.ssh/id_ed25519"  (~ 자동 expand)
 
   # [필수] 원격 서버 운영
-  project_path: "/home/csiwoo/CORL2026/AutoDataCollector"
+  # task/sort 전용 worktree — pnp 와 git 충돌 회피 (한 번 setup:
+  #   ssh h100 'cd /home/csiwoo/CORL2026/AutoDataCollector && git worktree add ../AutoDataCollector-sort task/sort')
+  project_path: "/home/csiwoo/CORL2026/AutoDataCollector-sort"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
   gpu_id: 2                              # 같은 GPU 2 공유 (sort + pnp 양쪽 SmolVLA, H100 80GB)
   tmux_session: "phase2_server_sort"     # task/sort branch — pnp 머신과 분리

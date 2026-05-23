@@ -68,7 +68,10 @@ Usage:
 import json
 import logging
 import math
+import pickle
 import re
+import struct
+import subprocess
 import sys
 import time
 import traceback
@@ -191,6 +194,254 @@ class InterruptController:
             time.sleep(poll)
 
 
+_TK_PREVIEW_SCRIPT = r"""
+import pickle
+import struct
+import sys
+import threading
+import tkinter as tk
+
+from PIL import Image, ImageTk
+
+
+def read_exact(stream, size):
+    chunks = []
+    remaining = size
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+window_name = sys.argv[1]
+fps = float(sys.argv[2])
+latest = {"frame": None, "closed": False, "photo": None, "shown_first_frame": False}
+lock = threading.Lock()
+
+
+def reader():
+    try:
+        stream = sys.stdin.buffer
+        while True:
+            header = read_exact(stream, 4)
+            if header is None:
+                break
+            size = struct.unpack("!I", header)[0]
+            if size == 0:
+                break
+            payload = read_exact(stream, size)
+            if payload is None:
+                break
+            frame = pickle.loads(payload)
+            with lock:
+                latest["frame"] = frame
+    finally:
+        with lock:
+            latest["closed"] = True
+
+
+root = tk.Tk()
+root.title(window_name)
+root.geometry("640x480+60+60")
+root.attributes("-topmost", True)
+root.lift()
+root.focus_force()
+label = tk.Label(root)
+label.pack()
+period_ms = max(1, int(1000.0 / max(fps, 1.0)))
+
+
+def close():
+    with lock:
+        latest["closed"] = True
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+root.protocol("WM_DELETE_WINDOW", close)
+
+
+def update():
+    with lock:
+        frame = latest["frame"]
+        latest["frame"] = None
+        closed = latest["closed"]
+
+    if frame is not None:
+        image = Image.fromarray(frame if frame.ndim == 2 else frame[..., :3])
+        latest["photo"] = ImageTk.PhotoImage(image=image)
+        label.configure(image=latest["photo"])
+        if not latest["shown_first_frame"]:
+            root.geometry(f"{image.width}x{image.height}+60+60")
+            root.lift()
+            root.focus_force()
+            latest["shown_first_frame"] = True
+
+    if closed:
+        close()
+        return
+
+    root.after(period_ms, update)
+
+
+threading.Thread(target=reader, daemon=True).start()
+root.after(0, update)
+root.mainloop()
+"""
+
+
+class PauseCameraWindow:
+    """Small local preview window shown while the robot is parked."""
+
+    def __init__(self, robot: "RobotWrapper", camera: str, shutdown_event: Event, fps: float = 15.0):
+        self.robot = robot
+        self.camera = camera
+        self.shutdown_event = shutdown_event
+        self.fps = fps
+        self.window_name = f"Pause stream: {camera}"
+        self._stop_event = Event()
+        self._thread: Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = Thread(target=self._run, daemon=True, name="PauseCameraWindow")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+    def _select_frame(self, obs: dict) -> np.ndarray | None:
+        candidates = [
+            self.camera,
+            f"{OBS_IMAGES}.{self.camera}",
+            f"observation.images.{self.camera}",
+        ]
+        for key in candidates:
+            if key in obs:
+                return self._to_rgb(obs[key])
+
+        suffix = f".{self.camera}"
+        for key, value in obs.items():
+            if key.endswith(suffix) or key.endswith(f"images.{self.camera}"):
+                return self._to_rgb(value)
+        return None
+
+    @staticmethod
+    def _to_rgb(frame) -> np.ndarray:
+        if isinstance(frame, torch.Tensor):
+            frame = frame.detach().cpu().numpy()
+        frame = np.asarray(frame)
+        if frame.ndim == 4:
+            frame = frame[0]
+        if frame.ndim == 3 and frame.shape[0] in (1, 3, 4) and frame.shape[-1] not in (1, 3, 4):
+            frame = np.transpose(frame, (1, 2, 0))
+        if frame.dtype != np.uint8:
+            max_v = float(np.nanmax(frame)) if frame.size else 1.0
+            if max_v <= 1.5:
+                frame = frame * 255.0
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        if frame.ndim == 2:
+            return frame
+        if frame.shape[-1] == 4:
+            frame = frame[..., :3]
+        return frame.copy()
+
+    def _run(self) -> None:
+        try:
+            self._run_opencv()
+        except Exception as exc:
+            logger.warning(f"[PAUSE_STREAM] OpenCV preview unavailable ({exc}); trying Tkinter subprocess")
+            try:
+                self._run_tkinter()
+            except Exception as tk_exc:
+                logger.warning(f"[PAUSE_STREAM] Tkinter preview stopped ({tk_exc})")
+
+    def _run_opencv(self) -> None:
+        import cv2
+
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        period = 1.0 / max(self.fps, 1.0)
+        while not self.shutdown_event.is_set() and not self._stop_event.is_set():
+            started = time.perf_counter()
+            obs = self.robot.get_observation()
+            frame = self._select_frame(obs)
+            if frame is not None:
+                if frame.ndim == 3:
+                    frame = frame[..., ::-1]
+                cv2.imshow(self.window_name, frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                self._stop_event.set()
+                break
+            time.sleep(max(0.0, period - (time.perf_counter() - started)))
+        cv2.destroyWindow(self.window_name)
+
+    def _run_tkinter(self) -> None:
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", _TK_PREVIEW_SCRIPT, self.window_name, str(self.fps)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info(f"[PAUSE_STREAM] Tkinter preview subprocess started pid={process.pid}")
+        period = 1.0 / max(self.fps, 1.0)
+        sent_first_frame = False
+
+        try:
+            while (
+                not self.shutdown_event.is_set()
+                and not self._stop_event.is_set()
+                and process.poll() is None
+            ):
+                started = time.perf_counter()
+                obs = self.robot.get_observation()
+                frame = self._select_frame(obs)
+                if frame is not None:
+                    try:
+                        payload = pickle.dumps(frame, protocol=pickle.HIGHEST_PROTOCOL)
+                        assert process.stdin is not None
+                        process.stdin.write(struct.pack("!I", len(payload)))
+                        process.stdin.write(payload)
+                        process.stdin.flush()
+                        if not sent_first_frame:
+                            logger.info(
+                                f"[PAUSE_STREAM] Sent first frame to preview window "
+                                f"(shape={getattr(frame, 'shape', None)})"
+                            )
+                            sent_first_frame = True
+                    except (BrokenPipeError, OSError):
+                        break
+                time.sleep(max(0.0, period - (time.perf_counter() - started)))
+        finally:
+            try:
+                if process.stdin is not None:
+                    process.stdin.write(struct.pack("!I", 0))
+                    process.stdin.close()
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1.0)
+            if process.returncode not in (None, 0, -2):
+                logger.warning(f"[PAUSE_STREAM] Tkinter preview subprocess exited with code {process.returncode}")
+
+
 def resolve_free_state_path(cfg: "RTCDemoConfig") -> Path:
     """Locate the free_state JSON for the robot being controlled.
 
@@ -265,11 +516,16 @@ def keyboard_listener(
     fps: float,
     move_duration: float,
     shutdown_event: Event,
+    pause_stream: PauseCameraWindow | None = None,
 ):
     """Block on stdin; each Enter toggles park (flush + free_state) / resume."""
     logger.info("[INTERRUPT] Press Enter to park at free_state; Enter again to resume")
     while not shutdown_event.is_set():
-        line = sys.stdin.readline()
+        try:
+            line = sys.stdin.readline()
+        except OSError as exc:
+            logger.info(f"[INTERRUPT] Keyboard listener stopped; stdin unavailable ({exc})")
+            break
         if line == "":  # EOF — stdin closed
             break
         if shutdown_event.is_set():
@@ -288,9 +544,13 @@ def keyboard_listener(
                     logger.error(f"[INTERRUPT] free_state move failed ({e}); robot held in place.")
             else:
                 logger.warning("[INTERRUPT] No free_state file resolved; robot held in place.")
+            if pause_stream is not None:
+                pause_stream.start()
             logger.info("[INTERRUPT] Parked. Press Enter to resume (first chunk will be discarded).")
         else:
             # 2nd Enter: resume — discard the first new chunk, then run normally.
+            if pause_stream is not None:
+                pause_stream.stop()
             interrupt.arm_discard(1)
             interrupt.set_running()
             logger.info("[INTERRUPT] Resumed.")
@@ -325,6 +585,20 @@ class RTCDemoConfig(HubMixin):
     # Get new actions horizon. The amount of executed steps after which will be requested new actions.
     # It should be higher than inference delay + execution horizon.
     action_queue_size_to_get_new_actions: int = 50
+
+    # Smooth non-RTC chunk boundaries for absolute action targets.
+    chunk_transition_steps: int = field(
+        default=4,
+        metadata={"help": "Blend this many steps at the start of each appended chunk"},
+    )
+    action_max_delta: float | None = field(
+        default=None,
+        metadata={"help": "Optional per-step action delta clamp after chunk-boundary blending"},
+    )
+    stop_and_infer: bool = field(
+        default=False,
+        metadata={"help": "Run sequentially: infer one chunk only after the previous chunk finishes"},
+    )
 
     # Task to execute
     task: str = field(default="", metadata={"help": "Task to execute"})
@@ -378,6 +652,20 @@ class RTCDemoConfig(HubMixin):
     save_chunks_max: int = field(
         default=15,
         metadata={"help": "Number of action chunks to save before stopping collection"},
+    )
+
+    # Small local OpenCV window shown while parked via Enter.
+    pause_stream_enabled: bool = field(
+        default=False,
+        metadata={"help": "Show a small local camera preview window while parked"},
+    )
+    pause_stream_camera: str = field(
+        default="top",
+        metadata={"help": "Camera key to preview while parked"},
+    )
+    pause_stream_fps: float = field(
+        default=15.0,
+        metadata={"help": "Preview window refresh rate"},
     )
 
     def __post_init__(self):
@@ -537,12 +825,14 @@ def get_actions(
 
                 preproceseded_obs = preprocessor(obs_with_policy_features)
 
-                # Generate actions WITH RTC
-                actions = policy.predict_action_chunk(
-                    preproceseded_obs,
-                    inference_delay=inference_delay,
-                    prev_chunk_left_over=prev_actions,
-                )
+                if cfg.rtc.enabled:
+                    actions = policy.predict_action_chunk(
+                        preproceseded_obs,
+                        inference_delay=inference_delay,
+                        prev_chunk_left_over=prev_actions,
+                    )
+                else:
+                    actions = policy.predict_action_chunk(preproceseded_obs)
 
                 # Drop this chunk if a park happened while inference was running
                 # (the buffer was flushed — merging now would repopulate it).
@@ -614,6 +904,162 @@ def get_actions(
                 f"[GET_ACTIONS] Crash mid-collection. Last snapshot ({len(saved_chunks)} chunks) at {chunk_save_path}"
             )
         logger.error(f"[GET_ACTIONS] Fatal exception in get_actions thread: {e}")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
+
+
+def _prepare_policy_observation(
+    robot: RobotWrapper,
+    robot_observation_processor,
+    dataset_features,
+    policy_device,
+    cfg: RTCDemoConfig,
+) -> dict[str, Tensor]:
+    obs = robot.get_observation()
+    obs_processed = robot_observation_processor(obs)
+    obs_with_policy_features = build_dataset_frame(dataset_features, obs_processed, prefix="observation")
+
+    for name in obs_with_policy_features:
+        obs_with_policy_features[name] = torch.from_numpy(obs_with_policy_features[name])
+        if "image" in name:
+            obs_with_policy_features[name] = obs_with_policy_features[name].type(torch.float32) / 255
+            obs_with_policy_features[name] = obs_with_policy_features[name].permute(2, 0, 1).contiguous()
+        obs_with_policy_features[name] = obs_with_policy_features[name].unsqueeze(0)
+        obs_with_policy_features[name] = obs_with_policy_features[name].to(policy_device)
+
+    obs_with_policy_features["task"] = [cfg.task]
+    obs_with_policy_features["robot_type"] = robot.robot.name if hasattr(robot.robot, "name") else ""
+    return obs_with_policy_features
+
+
+def stop_and_infer_control(
+    policy,
+    robot: RobotWrapper,
+    robot_observation_processor,
+    robot_action_processor,
+    shutdown_event: Event,
+    interrupt: InterruptController,
+    cfg: RTCDemoConfig,
+):
+    """Sequential inference loop: execute a full chunk, then infer the next one."""
+    try:
+        import os as _os
+
+        logger.info("[STOP_AND_INFER] Starting sequential chunk execution")
+        fps = cfg.fps
+        action_interval = 1.0 / fps
+        dataset_features = hw_to_dataset_features(robot.observation_features(), "observation")
+        policy_device = policy.config.device
+
+        logger.info(f"[STOP_AND_INFER] Loading preprocessor/postprocessor from {cfg.policy.pretrained_path}")
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=cfg.policy,
+            pretrained_path=cfg.policy.pretrained_path,
+            dataset_stats=None,
+            preprocessor_overrides={
+                "device_processor": {"device": cfg.policy.device},
+            },
+        )
+        logger.info("[STOP_AND_INFER] Preprocessor/postprocessor loaded successfully with embedded stats")
+
+        saved_chunks = []
+        chunk_save_done = False
+        chunk_save_path = None
+        if cfg.save_chunks:
+            _os.makedirs(cfg.save_chunks_dir, exist_ok=True)
+            chunk_save_path = _os.path.join(
+                cfg.save_chunks_dir,
+                f"chunks_{time.strftime('%Y%m%d_%H%M%S')}_stop_and_infer.npz",
+            )
+            logger.info(f"[STOP_AND_INFER] Will incrementally save chunks to {chunk_save_path}")
+
+        action_keys = robot.action_features()
+        action_count = 0
+        chunk_count = 0
+        smoothing_queue = ActionQueue(cfg.rtc)
+        smoothing_queue.transition_steps = cfg.chunk_transition_steps
+        smoothing_queue.max_action_delta = cfg.action_max_delta
+
+        start_time = time.time()
+        while not shutdown_event.is_set() and (
+            time.time() - start_time - interrupt.parked_total()
+        ) < cfg.duration:
+            interrupt.wait_while_parked(shutdown_event)
+            if shutdown_event.is_set():
+                break
+
+            current_time = time.perf_counter()
+            obs = _prepare_policy_observation(
+                robot, robot_observation_processor, dataset_features, policy_device, cfg
+            )
+            preprocessed_obs = preprocessor(obs)
+
+            if cfg.rtc.enabled:
+                actions = policy.predict_action_chunk(
+                    preprocessed_obs,
+                    inference_delay=0,
+                    prev_chunk_left_over=None,
+                )
+            else:
+                actions = policy.predict_action_chunk(preprocessed_obs)
+
+            postprocessed_actions = postprocessor(actions).squeeze(0)
+            postprocessed_actions = smoothing_queue._smooth_action_boundary(postprocessed_actions.clone())
+
+            inference_latency = time.perf_counter() - current_time
+            inference_delay = math.ceil(inference_latency / action_interval)
+            logger.info(
+                f"[STOP_AND_INFER] Chunk {chunk_count}: inferred {len(postprocessed_actions)} actions "
+                f"in {inference_latency:.3f}s (~{inference_delay} steps). Executing full chunk now."
+            )
+
+            if cfg.save_chunks and not chunk_save_done:
+                saved_chunks.append({
+                    "actions": postprocessed_actions.cpu().numpy().copy(),
+                    "timestamp": time.time(),
+                    "inference_delay": inference_delay,
+                })
+                _flush_action_chunks(
+                    saved_chunks,
+                    robot,
+                    fps,
+                    chunk_save_path,
+                    reason="stop-and-infer-incremental",
+                    verbose=False,
+                )
+                if len(saved_chunks) >= cfg.save_chunks_max:
+                    logger.info(
+                        f"[STOP_AND_INFER] Reached save_chunks_max={cfg.save_chunks_max}, "
+                        f"final file at {chunk_save_path}"
+                    )
+                    chunk_save_done = True
+
+            for action in postprocessed_actions:
+                if shutdown_event.is_set() or interrupt.parked.is_set():
+                    break
+                started = time.perf_counter()
+                action = action.cpu()
+                smoothing_queue.last_action = action.clone()
+                action_dict = {key: action[i].item() for i, key in enumerate(action_keys)}
+                action_processed = robot_action_processor((action_dict, None))
+                robot.send_action(action_processed)
+                action_count += 1
+                dt_s = time.perf_counter() - started
+                time.sleep(max(0, (action_interval - dt_s) - 0.001))
+
+            chunk_count += 1
+
+        if cfg.save_chunks and saved_chunks:
+            logger.info(
+                f"[STOP_AND_INFER] Final: {len(saved_chunks)} chunks saved to {chunk_save_path}"
+            )
+
+        logger.info(
+            f"[STOP_AND_INFER] Sequential loop shutting down. "
+            f"Chunks={chunk_count}, actions={action_count}"
+        )
+    except Exception as e:
+        logger.error(f"[STOP_AND_INFER] Fatal exception: {e}")
         logger.error(traceback.format_exc())
         sys.exit(1)
 
@@ -740,6 +1186,7 @@ def demo_cli(cfg: RTCDemoConfig):
     robot = None
     get_actions_thread = None
     actor_thread = None
+    keyboard_thread = None
 
     policy_class = get_policy_class(cfg.policy.type)
 
@@ -762,14 +1209,17 @@ def demo_cli(cfg: RTCDemoConfig):
     else:
         policy = policy_class.from_pretrained(cfg.policy.pretrained_path, config=config)
 
-    # Turn on RTC
+    # Configure RTC. Some policies, such as GR00T, do not implement the RTC
+    # processor and should run normally when RTC is disabled.
     policy.config.rtc_config = cfg.rtc
 
-    # Init RTC processort, as by default if RTC disabled in the config
-    # The processor won't be created
-    policy.init_rtc_processor()
-
-    assert policy.name in ["smolvla", "pi05", "pi0"], "Only smolvla, pi05, and pi0 are supported for RTC"
+    if cfg.rtc.enabled:
+        assert policy.name in ["smolvla", "pi05", "pi0", "groot"], (
+            "Only smolvla, pi05, pi0, and groot are supported for RTC"
+        )
+        # Init RTC processor, as by default if RTC disabled in the config
+        # the processor won't be created.
+        policy.init_rtc_processor()
 
     policy = policy.to(cfg.device)
     policy.eval()
@@ -790,6 +1240,8 @@ def demo_cli(cfg: RTCDemoConfig):
 
     # Create action queue for communication between threads
     action_queue = ActionQueue(cfg.rtc)
+    action_queue.transition_steps = cfg.chunk_transition_steps
+    action_queue.max_action_delta = cfg.action_max_delta
 
     # Enter-key park/resume controller, shared across all worker threads
     interrupt = InterruptController()
@@ -801,6 +1253,60 @@ def demo_cli(cfg: RTCDemoConfig):
     except Exception as e:
         free_state_path = None
         logger.warning(f"[INTERRUPT] free_state unavailable ({e}); Enter-park will only freeze.")
+
+    pause_stream = None
+    if cfg.pause_stream_enabled:
+        pause_stream = PauseCameraWindow(
+            robot=robot_wrapper,
+            camera=cfg.pause_stream_camera,
+            shutdown_event=shutdown_event,
+            fps=cfg.pause_stream_fps,
+        )
+        logger.info(f"[PAUSE_STREAM] Will show camera '{cfg.pause_stream_camera}' in a local window on Enter-park")
+
+    if cfg.stop_and_infer:
+        logger.info("[MAIN] stop_and_infer=true: running sequential chunk mode")
+        keyboard_thread = Thread(
+            target=keyboard_listener,
+            args=(
+                interrupt,
+                action_queue,
+                robot_wrapper,
+                free_state_path,
+                cfg.fps,
+                cfg.free_state_move_duration,
+                shutdown_event,
+                pause_stream,
+            ),
+            daemon=True,
+            name="KeyboardListener",
+        )
+        keyboard_thread.start()
+        logger.info("Started keyboard listener thread")
+
+        try:
+            stop_and_infer_control(
+                policy,
+                robot_wrapper,
+                robot_observation_processor,
+                robot_action_processor,
+                shutdown_event,
+                interrupt,
+                cfg,
+            )
+        except KeyboardInterrupt:
+            logger.info("KeyboardInterrupt received, shutting down...")
+        finally:
+            logger.info("Demo duration reached or shutdown requested")
+            shutdown_event.set()
+            if pause_stream is not None:
+                pause_stream.stop()
+            if keyboard_thread and keyboard_thread.is_alive():
+                keyboard_thread.join(timeout=2)
+            robot.disconnect()
+            logger.info("Robot disconnected")
+            logger.info("Cleanup completed")
+        return
 
     # Start chunk requester thread
     get_actions_thread = Thread(
@@ -841,6 +1347,7 @@ def demo_cli(cfg: RTCDemoConfig):
             cfg.fps,
             cfg.free_state_move_duration,
             shutdown_event,
+            pause_stream,
         ),
         daemon=True,
         name="KeyboardListener",

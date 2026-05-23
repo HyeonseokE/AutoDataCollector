@@ -266,11 +266,18 @@ def push_object_handle_close(
     HANDLE_PUSH_TORQUE_LIMIT = 500   # 0-1000, Step 2 (linear push) 동안만 적용
                                      # 너무 낮으면 motor 가 못 푸시 / 못 holds; 500 이 적정선
 
+    # 핸들 z 보다 3cm 낮은 지점에서 밀기 — robot0 새 캘리브에서 핸들 z 그대로
+    # 밀면 너무 위쪽 (핸들 상단/위) 을 치는 문제 보정. 하드코딩 (per-robot
+    # 튜닝 필요해지면 compensation 파일로 옮길 것).
+    PUSH_HEIGHT_OFFSET = -0.03
+
     start_pos = np.array(start_position, dtype=float)
     actual_push_distance = float(distance) + CLOSE_OVERSHOOT
     end_pos = [float(start_pos[0]) + actual_push_distance, float(start_pos[1]), float(start_pos[2])]
+    push_height = float(start_pos[2]) + PUSH_HEIGHT_OFFSET
     skills._log(f"\n[execute_push close] input distance={float(distance)*100:.1f}cm, "
-                f"+overshoot {CLOSE_OVERSHOOT*100:.0f}cm = actual push {actual_push_distance*100:.1f}cm")
+                f"+overshoot {CLOSE_OVERSHOOT*100:.0f}cm = actual push {actual_push_distance*100:.1f}cm"
+                f" | push_height={push_height*100:.1f}cm (handle_z{PUSH_HEIGHT_OFFSET*100:+.0f}cm)")
 
     # compliance_torque=HANDLE_PUSH_TORQUE_LIMIT 를 push_object 에 위임.
     # push_object 가 Step 2 (linear push) 직전에 set, 직후 restore — Step 1 (descent)
@@ -279,7 +286,7 @@ def push_object_handle_close(
         skills,
         start_position=start_pos,
         end_position=end_pos,
-        push_height=float(start_pos[2]),
+        push_height=push_height,
         run_up_distance=0.0,
         duration=duration,
         object_name=object_name,

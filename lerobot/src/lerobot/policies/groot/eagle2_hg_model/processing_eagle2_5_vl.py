@@ -220,6 +220,7 @@ class Eagle25VLProcessor(ProcessorMixin):
                     image_inputs = self.image_processor(
                         images=[image_list[idx_in_list]],
                         videos=None,
+                        return_tensors="pt",
                         **output_kwargs["images_kwargs"],
                     )
                     num_all_tiles = image_inputs["pixel_values"].shape[0]
@@ -231,6 +232,7 @@ class Eagle25VLProcessor(ProcessorMixin):
                     video_inputs = self.image_processor(
                         images=None,
                         videos=[video_list[idx_in_list]],
+                        return_tensors="pt",
                         **output_kwargs["videos_kwargs"],
                     )
                     num_all_tiles = video_inputs["pixel_values"].shape[0]
@@ -461,6 +463,7 @@ class Eagle25VLProcessor(ProcessorMixin):
     # override to load video-config from a separate config file
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        kwargs.setdefault("fix_mistral_regex", True)
         processor = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         # if return_unused_kwargs a tuple is returned where the second element is 'unused_kwargs'

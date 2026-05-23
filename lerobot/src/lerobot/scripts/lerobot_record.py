@@ -69,6 +69,7 @@ lerobot-record \
 
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
@@ -173,6 +174,15 @@ class DatasetRecordConfig:
     episode_time_s: int | float = 60
     # Number of seconds for resetting the environment after each episode.
     reset_time_s: int | float = 60
+    # Whether to record the reset phase instead of only using it to prepare the next episode.
+    record_reset: bool = False
+    # If True, save the reset phase as its own episode instead of appending it to the forward episode.
+    reset_as_episode: bool = False
+    # Optional separate dataset for reset episodes. If omitted, reset episodes are saved in the main dataset.
+    reset_repo_id: str | None = None
+    reset_root: str | Path | None = None
+    # Optional task label to use for reset frames when record_reset is enabled.
+    reset_task: str | None = None
     # Number of episodes to record.
     num_episodes: int = 50
     # Encode frames in the dataset into video
@@ -441,6 +451,10 @@ def record_loop(
         timestamp = time.perf_counter() - start_episode_t
 
 
+def _has_episode_frames(dataset: LeRobotDataset) -> bool:
+    return dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0
+
+
 @parser.wrap()
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
@@ -474,6 +488,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     )
 
     dataset = None
+    reset_dataset = None
     listener = None
 
     try:
@@ -494,6 +509,26 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
                 )
             sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
+
+            if cfg.dataset.record_reset and cfg.dataset.reset_as_episode and cfg.dataset.reset_repo_id:
+                reset_dataset = LeRobotDataset(
+                    cfg.dataset.reset_repo_id,
+                    root=cfg.dataset.reset_root,
+                    batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                    vcodec=cfg.dataset.vcodec,
+                    streaming_encoding=cfg.dataset.streaming_encoding,
+                    encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                    encoder_threads=cfg.dataset.encoder_threads,
+                )
+
+                if hasattr(robot, "cameras") and len(robot.cameras) > 0:
+                    reset_dataset.start_image_writer(
+                        num_processes=cfg.dataset.num_image_writer_processes,
+                        num_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+                    )
+                sanity_check_dataset_robot_compatibility(
+                    reset_dataset, robot, cfg.dataset.fps, dataset_features
+                )
         else:
             # Create empty dataset or load existing saved episodes
             sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
@@ -512,6 +547,25 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
                 encoder_threads=cfg.dataset.encoder_threads,
             )
+
+            if cfg.dataset.record_reset and cfg.dataset.reset_as_episode and cfg.dataset.reset_repo_id:
+                sanity_check_dataset_name(cfg.dataset.reset_repo_id, cfg.policy)
+                reset_dataset = LeRobotDataset.create(
+                    cfg.dataset.reset_repo_id,
+                    cfg.dataset.fps,
+                    root=cfg.dataset.reset_root,
+                    robot_type=robot.name,
+                    features=dataset_features,
+                    use_videos=cfg.dataset.video,
+                    image_writer_processes=cfg.dataset.num_image_writer_processes,
+                    image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera
+                    * len(robot.cameras),
+                    batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                    vcodec=cfg.dataset.vcodec,
+                    streaming_encoding=cfg.dataset.streaming_encoding,
+                    encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                    encoder_threads=cfg.dataset.encoder_threads,
+                )
 
         # Load pretrained policy
         policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
@@ -539,7 +593,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 "Streaming encoding is disabled. If you have capable hardware, consider enabling it for way faster episode saving. --dataset.streaming_encoding=true --dataset.encoder_threads=2 # --dataset.vcodec=auto. More info in the documentation: https://huggingface.co/docs/lerobot/streaming_video_encoding"
             )
 
-        with VideoEncodingManager(dataset):
+        with ExitStack() as stack:
+            stack.enter_context(VideoEncodingManager(dataset))
+            if reset_dataset is not None:
+                stack.enter_context(VideoEncodingManager(reset_dataset))
+
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
@@ -561,11 +619,65 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     display_compressed_images=display_compressed_images,
                 )
 
-                # Execute a few seconds without recording to give time to manually reset the environment
-                # Skip reset for the last episode to be recorded
-                if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                ):
+                if cfg.dataset.record_reset and cfg.dataset.reset_as_episode:
+                    reset_target_dataset = reset_dataset if reset_dataset is not None else dataset
+
+                    if events["rerecord_episode"]:
+                        log_say("Re-record episode", cfg.play_sounds)
+                        events["rerecord_episode"] = False
+                        events["exit_early"] = False
+                        dataset.clear_episode_buffer()
+                        continue
+
+                    if not _has_episode_frames(dataset):
+                        if events["stop_recording"]:
+                            break
+                        continue
+
+                    dataset.save_episode()
+
+                    if not events["stop_recording"]:
+                        while True:
+                            log_say(
+                                f"Recording reset episode {reset_target_dataset.num_episodes}",
+                                cfg.play_sounds,
+                            )
+
+                            record_loop(
+                                robot=robot,
+                                events=events,
+                                fps=cfg.dataset.fps,
+                                teleop_action_processor=teleop_action_processor,
+                                robot_action_processor=robot_action_processor,
+                                robot_observation_processor=robot_observation_processor,
+                                teleop=teleop,
+                                dataset=reset_target_dataset,
+                                control_time_s=cfg.dataset.reset_time_s,
+                                single_task=cfg.dataset.reset_task or cfg.dataset.single_task,
+                                display_data=cfg.display_data,
+                                display_compressed_images=display_compressed_images,
+                            )
+
+                            if not events["rerecord_episode"]:
+                                break
+
+                            log_say("Re-record reset episode", cfg.play_sounds)
+                            events["rerecord_episode"] = False
+                            events["exit_early"] = False
+                            reset_target_dataset.clear_episode_buffer()
+
+                        if _has_episode_frames(reset_target_dataset):
+                            reset_target_dataset.save_episode()
+
+                    recorded_episodes += 1
+                    continue
+
+                # Execute the reset phase. By default this is only teleop control to prepare the
+                # next episode; optionally append it to the same episode buffer.
+                should_run_reset = cfg.dataset.record_reset or (
+                    recorded_episodes < cfg.dataset.num_episodes - 1
+                )
+                if not events["stop_recording"] and (should_run_reset or events["rerecord_episode"]):
                     log_say("Reset the environment", cfg.play_sounds)
 
                     record_loop(
@@ -576,9 +688,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         robot_action_processor=robot_action_processor,
                         robot_observation_processor=robot_observation_processor,
                         teleop=teleop,
+                        dataset=dataset if cfg.dataset.record_reset else None,
                         control_time_s=cfg.dataset.reset_time_s,
-                        single_task=cfg.dataset.single_task,
+                        single_task=cfg.dataset.reset_task or cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        display_compressed_images=display_compressed_images,
                     )
 
                 if events["rerecord_episode"]:
@@ -588,6 +702,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     dataset.clear_episode_buffer()
                     continue
 
+                if not _has_episode_frames(dataset):
+                    if events["stop_recording"]:
+                        break
+                    continue
+
                 dataset.save_episode()
                 recorded_episodes += 1
     finally:
@@ -595,6 +714,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         if dataset:
             dataset.finalize()
+        if reset_dataset is not None:
+            reset_dataset.finalize()
 
         if robot.is_connected:
             robot.disconnect()
@@ -606,6 +727,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
         if cfg.dataset.push_to_hub:
             dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+            if reset_dataset is not None:
+                reset_dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
 
         log_say("Exiting", cfg.play_sounds)
     return dataset

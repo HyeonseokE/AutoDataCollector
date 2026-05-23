@@ -39,12 +39,15 @@ from pathlib import Path
 from typing import TypeVar
 
 import torch
+from safetensors.torch import load_file
 from torch import Tensor
 
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.policies.groot.configuration_groot import GrootConfig
 from lerobot.policies.groot.groot_n1 import GR00TN15
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.rtc.modeling_rtc import RTCProcessor
+from lerobot.policies.utils import log_model_loading_keys
 from lerobot.utils.constants import ACTION, OBS_IMAGES
 
 T = TypeVar("T", bound="GrootPolicy")
@@ -95,6 +98,15 @@ class GrootPolicy(PreTrainedPolicy):
     def reset(self):
         """Reset policy state when environment resets."""
         self._action_queue = deque([], maxlen=self.config.n_action_steps)
+
+    def init_rtc_processor(self):
+        """Initialize RTC guidance for GR00T's flow-matching action head."""
+        self.rtc_processor = None
+        if self.config.rtc_config is not None and self.config.rtc_config.enabled:
+            self.rtc_processor = RTCProcessor(self.config.rtc_config)
+
+        if hasattr(self._groot_model, "action_head"):
+            self._groot_model.action_head.rtc_processor = self.rtc_processor
 
     @classmethod
     def from_pretrained(
@@ -219,6 +231,30 @@ class GrootPolicy(PreTrainedPolicy):
         policy.eval()
         return policy
 
+    @classmethod
+    def _load_as_safetensor(cls, model: T, model_file: str, map_location: str, strict: bool) -> T:
+        """Load GR00T checkpoints with compatibility for Eagle vision key names."""
+        state_dict = load_file(model_file, device=map_location)
+
+        old_prefix = "_groot_model.backbone.eagle_model.vision_model.vision_model."
+        new_prefix = "_groot_model.backbone.eagle_model.vision_model."
+        remapped_state_dict = {}
+        remapped_count = 0
+
+        for key, value in state_dict.items():
+            if old_prefix in key:
+                key = key.replace(old_prefix, new_prefix)
+                remapped_count += 1
+            remapped_state_dict[key] = value
+
+        if remapped_count:
+            print(f"Remapped {remapped_count} GR00T Eagle vision keys for checkpoint compatibility")
+
+        missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
+        log_model_loading_keys(missing_keys, unexpected_keys)
+
+        return model
+
     def get_optim_params(self) -> dict:
         return self.parameters()
 
@@ -251,7 +287,7 @@ class GrootPolicy(PreTrainedPolicy):
         return loss, loss_dict
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
         """Predict a chunk of actions for inference by delegating to Isaac-GR00T.
 
         Returns a tensor of shape (B, n_action_steps, action_dim).
@@ -273,7 +309,7 @@ class GrootPolicy(PreTrainedPolicy):
 
         # Use bf16 autocast for inference to keep memory low and match backbone dtype
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=self.config.use_bf16):
-            outputs = self._groot_model.get_action(groot_inputs)
+            outputs = self._groot_model.get_action(groot_inputs, **kwargs)
 
         actions = outputs.get("action_pred")
 

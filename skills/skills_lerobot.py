@@ -136,7 +136,7 @@ class LeRobotSkills:
         use_compensation: bool = True,
         use_deceleration: bool = True,
         verbose: bool = True,
-        pick_offset: float = 0.025,  # Pick/place offset from object top (meters, 2.5cm)
+        pick_offset: float = 0.0,  # Pick/place offset from object top (meters). 2026-05-23: 0.025 → 0.0 (over-descent excessive on robot0 new calibration).
         recording_callback: callable = None,  # LeRobot dataset recording callback
         camera=None,  # Shared camera instance for object detection (RealSenseD435)
         detect_model: str = "gemini-3.1-flash-lite",  # VLM model for detect_objects
@@ -2935,6 +2935,20 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
 
+    def _apply_pick_xy_offset(self, x: float, y: float) -> Tuple[float, float]:
+        # Push (x, y) outward along the base→object radial direction by
+        # ``self.pick_xy_offset`` (signed metres). Shared between
+        # execute_pick_object and pull_object so both compensate the Hold-phase
+        # radial saturation identically. No-op when offset is 0 or reach ≈ 0.
+        if abs(self.pick_xy_offset) < 1e-9:
+            return float(x), float(y)
+        _x, _y = float(x), float(y)
+        _reach = math.hypot(_x, _y)
+        if _reach < 1e-3:
+            return _x, _y
+        _scale = 1.0 + self.pick_xy_offset / _reach
+        return _x * _scale, _y * _scale
+
     def execute_pick_object(
         self,
         object_position: Union[List[float], np.ndarray],
@@ -2967,16 +2981,9 @@ class LeRobotSkills:
         pick_z_raw = object_height - self.pick_offset + self.z_offset
         pick_z = max(pick_z_raw, MIN_PICK_Z)
         # [REVERT-MARK: pick_xy_offset 2026-05-20] Radial overshoot in xy.
-        # Push the pick xy outward by pick_xy_offset metres along the radial
-        # direction (base→object) to compensate the controller's systematic
-        # ~5-10mm radial undershoot at Hold-phase plateau. No-op when offset=0.
-        _pick_x, _pick_y = float(object_position[0]), float(object_position[1])
-        if abs(self.pick_xy_offset) > 1e-9:
-            _reach = math.hypot(_pick_x, _pick_y)
-            if _reach > 1e-3:
-                _scale = 1.0 + self.pick_xy_offset / _reach
-                _pick_x *= _scale
-                _pick_y *= _scale
+        _pick_x, _pick_y = self._apply_pick_xy_offset(
+            object_position[0], object_position[1]
+        )
         pick_position = [_pick_x, _pick_y, pick_z]
 
         self._log(f"\n[Execute Pick Object]")
@@ -3064,18 +3071,18 @@ class LeRobotSkills:
         if is_table:
             # Placing on table: use target z (object's own height) as reference
             # place_position[2] = object's own height when on table
-            # place_z = object height - pick_offset (same as how we'd pick it from table)
-            # + z_offset: per-robot residual sag absorber, same value used at pick.
+            # place_z = object height - pick_offset + z_offset (mirror of pick formula
+            # at execute_pick_object; keeps pick/place z symmetric so per-robot residual
+            # bias is absorbed identically in both directions).
             place_z = max(
-                place_position[2] - self.pick_offset + PLACE_EXTRA_DESCENT_M + self.z_offset,
+                place_position[2] - self.pick_offset + self.z_offset + PLACE_EXTRA_DESCENT_M,
                 MIN_PLACE_Z,
             )
         else:
-            # Placing on another object: use saved pick_z offset from surface.
-            # _pick_z already incorporates z_offset (set inside execute_pick_object),
-            # so it is NOT re-added here — doing so would double-count the offset.
+            # Placing on another object: use saved pick_z offset from surface,
+            # plus per-robot z_offset (same residual-bias absorber as pick).
             pick_z = getattr(self, '_pick_z', self.pick_offset)
-            place_z = target_surface_height + pick_z
+            place_z = target_surface_height + pick_z + self.z_offset
             if place_z < MIN_PLACE_Z:
                 self._log(f"  [Place Z-Fix] {place_z*100:.1f}cm < min {MIN_PLACE_Z*100:.0f}cm, clamping to {MIN_PLACE_Z*100:.0f}cm")
                 place_z = MIN_PLACE_Z

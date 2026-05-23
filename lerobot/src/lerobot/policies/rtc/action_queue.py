@@ -62,6 +62,9 @@ class ActionQueue:
         self.original_queue = None  # Original actions for RTC
         self.lock = Lock()
         self.last_index = 0
+        self.last_action = None
+        self.transition_steps = 0
+        self.max_action_delta = None
         self.cfg = cfg
 
     def get(self) -> Tensor | None:
@@ -77,6 +80,7 @@ class ActionQueue:
 
             action = self.queue[self.last_index]
             self.last_index += 1
+            self.last_action = action.clone()
             return action.clone()
 
     def clear(self) -> None:
@@ -87,6 +91,7 @@ class ActionQueue:
         with self.lock:
             self.queue = None
             self.original_queue = None
+            self.last_action = None
             self.last_index = 0
 
     def qsize(self) -> int:
@@ -155,9 +160,8 @@ class ActionQueue:
             action_index_before_inference: Index before inference started, for validation.
         """
         with self.lock:
-            self._check_delays(real_delay, action_index_before_inference)
-
             if self.cfg.enabled:
+                self._check_delays(real_delay, action_index_before_inference)
                 self._replace_actions_queue(original_actions, processed_actions, real_delay)
                 return
 
@@ -195,16 +199,62 @@ class ActionQueue:
         """
         if self.queue is None:
             self.original_queue = original_actions.clone()
-            self.queue = processed_actions.clone()
+            self.queue = self._smooth_action_boundary(processed_actions.clone())
             return
 
         self.original_queue = torch.cat([self.original_queue, original_actions.clone()])
         self.original_queue = self.original_queue[self.last_index :]
 
-        self.queue = torch.cat([self.queue, processed_actions.clone()])
-        self.queue = self.queue[self.last_index :]
+        remaining_queue = self.queue[self.last_index :]
+        smoothed_actions = self._smooth_action_boundary(processed_actions.clone(), remaining_queue)
+        self.queue = torch.cat([remaining_queue, smoothed_actions])
 
         self.last_index = 0
+
+    def _smooth_action_boundary(
+        self, processed_actions: Tensor, remaining_queue: Tensor | None = None
+    ) -> Tensor:
+        """Make newly appended absolute targets continuous with the current queue."""
+        if processed_actions.numel() == 0:
+            return processed_actions
+
+        anchor = None
+        if remaining_queue is not None and len(remaining_queue) > 0:
+            anchor = remaining_queue[-1]
+        elif self.last_action is not None:
+            anchor = self.last_action
+
+        if anchor is None:
+            return processed_actions
+
+        original = processed_actions.clone()
+
+        transition_steps = max(0, int(self.transition_steps or 0))
+        if transition_steps > 0:
+            n = min(transition_steps, len(processed_actions))
+            for i in range(n):
+                alpha = float(i + 1) / float(n)
+                processed_actions[i] = anchor * (1.0 - alpha) + processed_actions[i] * alpha
+
+        if self.max_action_delta is not None:
+            max_delta = float(self.max_action_delta)
+            prev = anchor
+            for i in range(len(processed_actions)):
+                delta = torch.clamp(processed_actions[i] - prev, min=-max_delta, max=max_delta)
+                processed_actions[i] = prev + delta
+                prev = processed_actions[i]
+
+        max_change = torch.max(torch.abs(processed_actions - original)).item()
+        if max_change > 1e-4:
+            before_jump = torch.max(torch.abs(original[0] - anchor)).item()
+            after_jump = torch.max(torch.abs(processed_actions[0] - anchor)).item()
+            logger.info(
+                f"[ACTION_QUEUE] Smoothed chunk boundary: first_step_jump {before_jump:.3f} -> "
+                f"{after_jump:.3f}, max_adjustment={max_change:.3f}, "
+                f"transition_steps={transition_steps}, max_action_delta={self.max_action_delta}"
+            )
+
+        return processed_actions
 
     def _check_delays(self, real_delay: int, action_index_before_inference: int | None = None):
         """Validate that computed delays match expectations.

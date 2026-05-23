@@ -90,6 +90,15 @@ class GrootConfig(PreTrainedConfig):
     # Whether to use the full model for LORA
     lora_full_model: bool = False
 
+    # Backward-compatible training-only fields saved by some GR00T checkpoints.
+    # They are not used during inference, but keeping them here lets older/newer
+    # checkpoint configs load without requiring a local config rewrite.
+    llm_lora_rank: int = 0
+    llm_lora_alpha: int = 32
+    llm_lora_dropout: float = 0.05
+    vision_lr: float = 1e-5
+    llm_lora_lr: float = 5e-5
+
     # Training parameters (matching groot_finetune_script.py)
     optimizer_lr: float = 1e-4
     optimizer_betas: tuple[float, float] = (0.95, 0.999)

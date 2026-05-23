@@ -113,6 +113,9 @@ bold "Step 1/4 — build skill segment DCT parquet"
 mkdir -p "$(dirname "$SKILL_DCT_PARQUET")"
 
 # conda env (lerobot_cap) — train script 와 동일.
+# `set -u` (set -euo pipefail 의 -u) 와 conda activate 의 deactivate hook 이
+# 충돌 (_CONDA_PYTHON_SYSCONFIGDATA_NAME_USED 등 미설정 변수 unset 시 종료).
+# 잠시 -u 해제 후 활성화하고 복구.
 CONDA_ENV="${CONDA_ENV:-lerobot_cap}"
 # Auto-detect conda profile (miniconda3 / anaconda3 / CONDA_PREFIX 기반)
 _CONDA_SH=""
@@ -126,8 +129,10 @@ if [ -z "$_CONDA_SH" ]; then
     err "conda.sh not found (checked miniconda3/anaconda3/CONDA_PREFIX/opt). Set CONDA_PREFIX or install conda."
     exit 1
 fi
+set +u
 source "$_CONDA_SH"
 conda activate "$CONDA_ENV"
+set -u
 
 if python -m method3.dct.build_skill_dct \
         --dataset "$DATASET" \

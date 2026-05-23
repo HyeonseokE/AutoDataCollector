@@ -13,15 +13,17 @@ push_object 와 대칭 구조. 내부적으로 move_linear 를 핵심 동작으�
     2. gripper_close     — 핸들 그래스핑
     3. move_linear       — start → end 직선 끌기 (z 고정, maintain_pitch=True)
     4. gripper_open      — 핸들 release (open_after=True 시)
-    5. move_to_position  — approach_height 로 상승 (복귀)
+
+    Retreat 단계는 의도적으로 없음. caller 가 이어서 move_to_initial_state()
+    또는 다음 skill 을 호출해 핸들 영역에서 빠져나가는 게 표준 패턴.
 
                     approach_height (외부)
-    ─────●                                          ●
-         │ Step 1                            Step 5 │
-         │  하강                                상승 │
-         ●─grasp─●─────→──────────────────────●─open●  z = start.z
+    ─────●
+         │ Step 1
+         │  하강
+         ●─grasp─●─────→──────────────────────●─open  z = start.z
         (Step 2  (Step 3: linear pull            (Step 4
-         close)   maintain_pitch=True)             open)
+         close)   maintain_pitch=True)             open — 끝)
 
 Usage:
     from skills.skills_lerobot import LeRobotSkills
@@ -90,7 +92,13 @@ def pull_object(
         bool: True 면 끌기 동작 성공
     """
     start_pos = np.array(start_position, dtype=float)
-    # end = start + (-distance, 0, 0)  — -x 방향
+    # Apply radial xy offset (same compensation as execute_pick_object): push
+    # the grasp xy outward by skills.pick_xy_offset along the base→handle
+    # direction so the Hold-phase radial undershoot lands on the handle, not
+    # short of it. No-op when offset = 0. End/pull_distance unchanged.
+    _sx, _sy = skills._apply_pick_xy_offset(start_pos[0], start_pos[1])
+    start_pos = np.array([_sx, _sy, start_pos[2]], dtype=float)
+    # end = start + (-distance, 0, 0)  — -x 방향 (corrected start 기준)
     end_pos = np.array([start_pos[0] - float(distance), start_pos[1], start_pos[2]], dtype=float)
     approach_height = APPROACH_HEIGHT
     open_after = True   # drawer/door open 케이스 — 항상 release
@@ -146,6 +154,7 @@ def pull_object(
         disable_sag=True,
         target_name=object_name,
         skill_description=f"{desc_prefix}: descend to grasp",
+        is_transit=False,
     ):
         skills._log("ERROR: Failed to descend to grasp position (IK / workspace)")
         return False
@@ -203,22 +212,10 @@ def pull_object(
             skill_description=f"{desc_prefix}: release handle",
         )
 
-    # Step 5: approach_height 로 상승 + retreat 후반 30% 구간에 gripper close
-    # (pick-and-place 패턴 미러 — retreat 중 그리퍼 닫혀 안전 자세로 복귀).
-    # open_after=False (잡은 채 다음 동작) 인 경우엔 gripper_action 생략.
-    skills._log(f"\n[Step 5] Retreat to approach height ({approach_height*100:.0f}cm)"
-                f"{' + close gripper' if open_after else ' (gripper held)'}")
-    retreat_kwargs = dict(
-        position=[end_pos[0], end_pos[1], approach_height],
-        maintain_pitch=False,
-        target_name=object_name,
-        skill_description=f"{desc_prefix}: retreat after pull"
-                          f"{' and close gripper' if open_after else ''}",
-    )
-    if open_after:
-        retreat_kwargs["gripper_action"] = "close"
-        retreat_kwargs["gripper_start_fraction"] = 0.7
-    skills.move_to_position(**retreat_kwargs)
+    # Retreat 단계 없음 — caller 가 다음에 move_to_initial_state 를 호출하는
+    # 게 표준 패턴이라 pull_object 내부에서 중복 retreat 을 만들지 않는다.
+    # 기존 approach_height retreat 은 Phase1 perturbation 이 핸들 z 영역으로
+    # subgoal 을 끌어내려 그리퍼가 다시 걸리는 문제가 있었음.
 
     skills._log(f"\n[pull_object] Complete (pull_success={pull_success})")
     return pull_success

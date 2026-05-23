@@ -207,7 +207,12 @@ def _build_eagle_processor(tokenizer_assets_repo: str = DEFAULT_TOKENIZER_ASSETS
             "Vendor files are copied during model creation. Create the policy/model first, "
             "or call ensure_eagle_cache_ready() before building processors."
         )
-    proc = AutoProcessor.from_pretrained(str(cache_dir), trust_remote_code=True, use_fast=True)
+    proc = AutoProcessor.from_pretrained(
+        str(cache_dir),
+        trust_remote_code=True,
+        use_fast=True,
+        fix_mistral_regex=True,
+    )
     proc.tokenizer.padding_side = "left"
     return proc
 
@@ -220,6 +225,7 @@ class GrootPackInputsStep(ProcessorStep):
     max_state_dim: int = 64
     max_action_dim: int = 32
     language_key: str = "task"
+    visual_keys: list[str] | None = None
     formalize_language: bool = False
     embodiment_tag: str = "new_embodiment"
     embodiment_mapping: dict[str, int] = field(
@@ -272,7 +278,10 @@ class GrootPackInputsStep(ProcessorStep):
             return torch.where(mask, mapped, torch.zeros_like(mapped))
 
         # 1) Video (B, T=1, V, H, W, C) uint8
-        img_keys = sorted([k for k in obs if k.startswith(OBS_IMAGES)])
+        if self.visual_keys:
+            img_keys = [key for key in self.visual_keys if key in obs]
+        else:
+            img_keys = sorted([k for k in obs if k.startswith(OBS_IMAGES)])
         if not img_keys and OBS_IMAGE in obs:
             img_keys = [OBS_IMAGE]
         if img_keys:
@@ -583,10 +592,6 @@ class GrootActionUnpackUnnormalizeStep(ProcessorStep):
         if not isinstance(action, torch.Tensor):
             return transition
 
-        # Select last timestep and slice to env dimension
-        if action.dim() == 3:
-            action = action[:, -1, :]
-        # Now action is (B, D_model)
         if self.env_action_dim and action.shape[-1] >= self.env_action_dim:
             action = action[..., : self.env_action_dim]
 

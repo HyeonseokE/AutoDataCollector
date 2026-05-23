@@ -46,7 +46,7 @@ subgoal:
   # --- subgoal 위치 제약 (§4.2 reachable/safe) ---
   # null 이면 해당 검사 비활성. 테이블 충돌 방지하려면 z_min 설정.
   reachability:
-    z_min: null                # subgoal z 하한 (m)
+    z_min: null                # subgoal z 하한 (m) — transit이 pot/lid 위로 brush 못하게 floor 강제
     z_max: null                # subgoal z 상한 (m)
     x_bounds: null             # workspace AABB x [min, max]
     y_bounds: null             # workspace AABB y [min, max]

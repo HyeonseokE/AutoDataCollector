@@ -24,6 +24,8 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_DIR"
 
 # -------- conda env --------
+# `set -u` (set -euo pipefail) 와 conda deactivate hook 의 unset 변수 충돌
+# (_CONDA_PYTHON_SYSCONFIGDATA_NAME_USED 등) 회피.
 CONDA_ENV="${CONDA_ENV:-lerobot}"
 # Auto-detect conda profile (miniconda3 / anaconda3 / CONDA_PREFIX 기반)
 _CONDA_SH=""
@@ -40,6 +42,7 @@ fi
 # shellcheck disable=SC1091
 source "$_CONDA_SH"
 conda activate "$CONDA_ENV"
+set -u
 export PYTHONNOUSERSITE=1
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 

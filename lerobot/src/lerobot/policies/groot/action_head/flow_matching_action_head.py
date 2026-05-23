@@ -212,6 +212,7 @@ class FlowmatchingActionHead(nn.Module):
             )
         self.num_timestep_buckets = config.num_timestep_buckets
         self.config = config
+        self.rtc_processor = None
         self.set_trainable_parameters(config.tune_projector, config.tune_diffusion_model)
 
     def set_trainable_parameters(self, tune_projector: bool, tune_diffusion_model: bool):
@@ -347,7 +348,14 @@ class FlowmatchingActionHead(nn.Module):
         return BatchFeature(data=output_dict)
 
     @torch.no_grad()
-    def get_action(self, backbone_output: BatchFeature, action_input: BatchFeature) -> BatchFeature:
+    def get_action(
+        self,
+        backbone_output: BatchFeature,
+        action_input: BatchFeature,
+        inference_delay: int = 0,
+        prev_chunk_left_over: torch.Tensor | None = None,
+        execution_horizon: int | None = None,
+    ) -> BatchFeature:
         backbone_output = self.process_backbone_output(backbone_output)
 
         # Get vision and language embeddings.
@@ -374,28 +382,40 @@ class FlowmatchingActionHead(nn.Module):
             t_cont = t / float(num_steps)  # e.g. goes 0, 1/N, 2/N, ...
             t_discretized = int(t_cont * self.num_timestep_buckets)
 
-            # Embed noised action trajectory.
-            timesteps_tensor = torch.full(size=(batch_size,), fill_value=t_discretized, device=device)
-            action_features = self.action_encoder(actions, timesteps_tensor, embodiment_id)
-            # Maybe add position embedding.
-            if self.config.add_pos_embed:
-                pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
-                pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
-                action_features = action_features + pos_embs
+            def denoise_step(noised_actions):
+                # Embed noised action trajectory.
+                timesteps_tensor = torch.full(size=(batch_size,), fill_value=t_discretized, device=device)
+                action_features = self.action_encoder(noised_actions, timesteps_tensor, embodiment_id)
+                # Maybe add position embedding.
+                if self.config.add_pos_embed:
+                    pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
+                    pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
+                    action_features = action_features + pos_embs
 
-            # Join vision, language, state and action embedding along sequence dimension.
-            future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-            sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+                # Join vision, language, state and action embedding along sequence dimension.
+                future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
+                sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
 
-            # Run model forward.
-            model_output = self.model(
-                hidden_states=sa_embs,
-                encoder_hidden_states=vl_embs,
-                timestep=timesteps_tensor,
-            )
-            pred = self.action_decoder(model_output, embodiment_id)
+                # Run model forward.
+                model_output = self.model(
+                    hidden_states=sa_embs,
+                    encoder_hidden_states=vl_embs,
+                    timestep=timesteps_tensor,
+                )
+                pred = self.action_decoder(model_output, embodiment_id)
+                return pred[:, -self.action_horizon :]
 
-            pred_velocity = pred[:, -self.action_horizon :]
+            if self.rtc_processor is not None:
+                pred_velocity = self.rtc_processor.denoise_step(
+                    x_t=actions,
+                    prev_chunk_left_over=prev_chunk_left_over,
+                    inference_delay=inference_delay,
+                    time=t_cont,
+                    original_denoise_step_partial=denoise_step,
+                    execution_horizon=execution_horizon,
+                )
+            else:
+                pred_velocity = denoise_step(actions)
 
             # Update actions using euler integration.
             actions = actions + dt * pred_velocity

@@ -303,7 +303,7 @@ target_positions = {{
 
 ```python
 # === STEP 1: Move 1st object (object_A) to its target ===
-approach_height = 0.10
+approach_height = 0.15
 cur = current_positions["object_A"]["position"]
 tgt = target_positions["object_A"]["position"]
 skills.set_subtask("move object_A to target")
@@ -355,7 +355,7 @@ def execute_reset_task():
     skills.connect()
 
     try:
-        approach_height = 0.10
+        approach_height = 0.15
 
         skills.move_to_initial_state()
 
@@ -392,7 +392,7 @@ if __name__ == "__main__":
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-7. Use `approach_height = 0.10` for all approach/lift movements
+7. Use `approach_height = 0.15` for all approach/lift movements
 8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 9. Use `is_table=True` when placing on table
 10. Always include try/finally for proper cleanup
@@ -514,16 +514,37 @@ target_positions = {{
 | `execute_pick_object(object_position, ...)` | Descend to pick, close gripper, save pitch | object_position, object_name |
 | `execute_place_object(place_position, ...)` | Descend to place with saved pitch, open gripper | place_position, is_table, gripper_open_ratio, target_name |
 | `execute_pull(start, distance, ...)` | **OPENING** drawer/door — pulls -x by `distance` m. Grasp + drag + release + retreat | start_position, distance, object_name |
-| `execute_push(start, distance, ...)` | **CLOSING** drawer/door — pushes +x by `distance + 3cm` (margin). Push (gripper open) + retreat | start_position, distance, object_name |
+| `execute_push(start, distance, ...)` | **CLOSING** drawer/door — pushes +x by `distance + 3cm` (margin). Linear push + retreat (does NOT change gripper state) | start_position, distance, object_name |
 
 **execute_pick_object**: Pass the object position as-is. The function internally handles the grasp height offset.
 **execute_place_object**: Pass the target position as-is. The function internally calculates the correct release height.
   - is_table=True: place on table, is_table=False: place on another object
   - **ALWAYS use `gripper_open_ratio=0.7`**
 
-**execute_pull** (OPENING drawer/door): pass `start_position` (handle grasp point) and `distance` (meters, extracted from instruction). Direction fixed -x. Approach with `gripper_action="open"`. Skill: descend → grasp → drag → release → retreat.
+**execute_pull** (OPENING drawer/door): pass `start_position` (handle grasp point) and `distance` (meters, extracted from instruction). Direction fixed -x. Skill: descend → grasp → drag → release → retreat.
+  - **MANDATORY preceding call**: `skills.move_to_position([h[0], h[1], 0.20], gripper_action="open", ...)` — gripper MUST be open before pull (skill closes during grasp). Caller's responsibility.
 
-**execute_push** (CLOSING drawer/door): pass `start_position` (current handle position, after drawer is open — re-detect) and `distance` (meters; same value as the open distance). The skill internally pushes `distance + 3cm` for full closure. Direction fixed +x. Approach with `gripper_action="open"` (open jaws push from inside). Skill: descend → linear push → retreat.
+**execute_push** (CLOSING drawer/door): pass `start_position` (current handle position, after drawer is open — re-detect) and `distance` (meters; same value as the open distance). The skill internally pushes `distance + 3cm` for full closure. Direction fixed +x. Skill: descend → linear push → retreat. **The skill does NOT touch the gripper.**
+  - **MANDATORY preceding call**: `skills.move_to_position([h[0], h[1], 0.20], gripper_action="open", ...)` — open jaws straddle the handle and push from inside. Without this the closed/stale gripper will drag/jam against the handle.
+
+```python
+# CLOSE drawer template (reset). NEVER call execute_push without the approach+open first.
+open_handle = current_positions["drawer handle"]["position"]  # re-detect if needed
+CLOSE_DISTANCE = 0.07  # match the open distance; skill adds +3cm internally
+skills.move_to_position(
+    [open_handle[0], open_handle[1], 0.20],
+    target_name="drawer handle",
+    gripper_action="open", gripper_start_fraction=0.3,
+    skill_description="Approach handle and open gripper",
+    verification_question="Is the gripper above the handle and open?",
+)
+skills.execute_push(
+    open_handle, distance=CLOSE_DISTANCE,
+    object_name="drawer",
+    skill_description="Push drawer closed",
+    verification_question="Is the drawer fully closed?",
+)
+```
 
 ### **SUBTASK + RE-DETECTION PATTERN** (MANDATORY at every subtask boundary)
 
@@ -544,7 +565,7 @@ target_positions = {{
 
 ```python
 # === STEP 1: Move 1st object (object_A) to its target ===
-approach_height = 0.10
+approach_height = 0.15
 cur = current_positions["object_A"]["position"]
 tgt = target_positions["object_A"]["position"]
 skills.set_subtask("move object_A to target")
@@ -598,7 +619,7 @@ def execute_reset_task():
     skills.connect()
 
     try:
-        approach_height = 0.10
+        approach_height = 0.15
 
         skills.move_to_initial_state()
 
@@ -684,7 +705,7 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-7. Use `approach_height = 0.10` (10cm) for all approach/lift movements
+7. Use `approach_height = 0.15` (15cm) for all approach/lift movements
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place
 9. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 10. Use `is_table=True` when placing on table

@@ -75,11 +75,15 @@ def place_lid(
     target_surface_height = float(place_position[2])
 
     MIN_PLACE_Z = 0.005  # 최소 안착 높이 (테이블 마진)
+    # 추가 하강: pick 시 z_offset 보정으로 pick_z 가 평소보다 높게 저장되는데,
+    # place_lid 는 그 값을 surface 위에 더하므로 lid 가 rim 위 공중에서 release 됨.
+    # surface 에 직접 안착시키려면 그만큼 빼서 보정. (signed, 음수 = 추가 하강)
+    PLACE_LID_EXTRA_DESCENT_M = -0.04
     pick_z = getattr(skills, "_pick_z", skills.pick_offset)
-    place_z = max(target_surface_height + pick_z, MIN_PLACE_Z)
-    if target_surface_height + pick_z < MIN_PLACE_Z:
+    place_z = max(target_surface_height + pick_z + PLACE_LID_EXTRA_DESCENT_M, MIN_PLACE_Z)
+    if target_surface_height + pick_z + PLACE_LID_EXTRA_DESCENT_M < MIN_PLACE_Z:
         skills._log(
-            f"  [Place Lid Z-Fix] {(target_surface_height + pick_z)*100:.1f}cm "
+            f"  [Place Lid Z-Fix] {(target_surface_height + pick_z + PLACE_LID_EXTRA_DESCENT_M)*100:.1f}cm "
             f"< min {MIN_PLACE_Z*100:.0f}cm, clamping to {MIN_PLACE_Z*100:.0f}cm"
         )
 
@@ -111,7 +115,11 @@ def place_lid(
     if saved_pitch is not None:
         skills._log(f"  Restoring pitch: {np.degrees(saved_pitch):.1f}°")
 
-    # 1. Descend to place position (interaction subgoal — must not be perturbed)
+    # 1. Descend to place position (interaction subgoal — must not be perturbed).
+    # xy_lead_descent: continuous Bezier that closes the xy offset left by the
+    # perturbed approach transit before z reaches the rim (vertical contact),
+    # so the lid lands on the pot centre instead of off-edge (mirrors
+    # execute_place_object's descent).
     descend_label = f"place lid on {target_name}" if target_name else "place lid"
     if not skills.move_to_position(
         descend_position,
@@ -120,6 +128,7 @@ def place_lid(
         skill_description=skill_description,
         verification_question=verification_question,
         is_transit=False,
+        xy_lead_descent=True,
     ):
         skills._log("Error: Failed to reach lid place position")
         return False

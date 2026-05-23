@@ -161,7 +161,7 @@ class ResetWorkspace(BaseWorkspace):
         obj_bbox_px: Optional[Tuple[int, int]] = None,
         pix2robot=None,
         max_attempts: int = 500,
-        max_iou: float = 0.80,
+        max_iou: float = 0.9,
         exclusion_zones: Optional[List[dict]] = None,
         resetspace: Optional[str] = None,
     ) -> Optional[List[float]]:
@@ -176,7 +176,7 @@ class ResetWorkspace(BaseWorkspace):
             obj_bbox_px: 이 객체의 bbox 픽셀 크기 (w_px, h_px). None이면 (30, 30) 사용.
             pix2robot: Pix2RobotCalibrator 인스턴스 (robot↔pixel 변환)
             max_attempts: 최대 시도 횟수
-            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.80)
+            max_iou: grippable 장애물과 허용 최대 IoU (default: 0.9)
             exclusion_zones: 제외 영역 리스트 (robot base_link frame).
                        [{"center": [x, y], "radius": float}, ...]
                        예: free state EE 주변 8cm 제외.
@@ -236,18 +236,18 @@ class ResetWorkspace(BaseWorkspace):
                 edge_margin = 30
                 hw, hh = obj_w // 2, obj_h // 2
 
-                # [ACTIVE] Old policy (pre-917c757): bbox 전체가 edge_margin 안쪽 강제 → 부피 침범 금지
-                if (cu - hw < edge_margin or cu + hw >= img_w - edge_margin or
-                    cv - hh < edge_margin or cv + hh >= img_h - edge_margin):
-                    continue
+                # [DISABLED] Old policy (pre-917c757): bbox 전체가 edge_margin 안쪽 강제 → 부피 침범 금지
+                # if (cu - hw < edge_margin or cu + hw >= img_w - edge_margin or
+                #     cv - hh < edge_margin or cv + hh >= img_h - edge_margin):
+                #     continue
 
-                # [DISABLED] New policy (917c757+): center 안쪽 + bbox 는 이미지 안쪽만 OK → 부피 침범 허용
-                # if not (edge_margin <= cu < img_w - edge_margin
-                #         and edge_margin <= cv < img_h - edge_margin):
-                #     continue
-                # if (cu - hw < 0 or cu + hw >= img_w
-                #         or cv - hh < 0 or cv + hh >= img_h):
-                #     continue
+                # [ACTIVE] New policy (917c757+): center 안쪽 + bbox 는 이미지 안쪽만 OK → 초록(margin) 부피 침범 허용
+                if not (edge_margin <= cu < img_w - edge_margin
+                        and edge_margin <= cv < img_h - edge_margin):
+                    continue
+                if (cu - hw < 0 or cu + hw >= img_w
+                        or cv - hh < 0 or cv + hh >= img_h):
+                    continue
             elif resetspace is not None and resetspace != "all":
                 # pix2robot 없으면 quadrant 체크 불가 → 스킵
                 continue

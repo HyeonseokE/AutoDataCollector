@@ -71,7 +71,28 @@ class LeRobotPhase1SkillSegmentAdapter:
             skill_id_default=skill_id_default,
             video_backend=video_backend,
         )
-        self.segments = load_dct_targets(skill_dct_parquet)
+        # transit-only filter + per-episode re-index — subgoal_buffer (Phase1
+        # SubgoalSelector.stage_executed) 와 같은 namespace 로 통일. gripper_*
+        # / move_free 같은 non-transit segment 는 buffer 에 stage 되지 않으므로
+        # DB 도 동일하게 빼야 client Phase2SubgoalReplay 의 ordinal lookup 이
+        # 정합한다. 빠진 segment 의 skill_index 자리를 채우기 위해 per-episode
+        # 0-based 로 재할당한다 — client `_skill_ordinal` (transit-call counter)
+        # 와 같은 0..N-1 namespace.
+        from dataclasses import replace as _dc_replace
+        _TRANSIT = {"move", "move_initial", "move_and_open", "move_and_close"}
+        _raw_segments = load_dct_targets(skill_dct_parquet)
+        _filtered: list = []
+        _ep_idx: dict = {}
+        for _seg in _raw_segments:
+            if _seg.skill_type not in _TRANSIT:
+                continue
+            _i = _ep_idx.get(_seg.episode_id, 0)
+            _filtered.append(_dc_replace(_seg, skill_index=_i))
+            _ep_idx[_seg.episode_id] = _i + 1
+        self.segments = _filtered
+        print(f"[reembed-adapter] transit-only filter: {len(_raw_segments)} "
+              f"→ {len(_filtered)} segments ({len(_ep_idx)} episodes, "
+              f"max ordinal={max(_ep_idx.values(), default=0) - 1})")
         self._dataset_path = self._base._dataset_path
         # raw action bulk pre-read — global frame index 정렬.
         self._raw_actions = self._bulk_read_actions(repo_id_or_path)

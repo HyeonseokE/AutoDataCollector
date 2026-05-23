@@ -2534,37 +2534,30 @@ class LeRobotSkills:
         #
         # 이미 clearance_z 이상에서 시작하는 move (대부분의 transit) 는 no-op.
         # via-IK 실패나 예외는 plain trajectory 로 silent fallback.
+        # Phase2 (Method3 selection) 시 — clearance-lead 의 Bezier overwrite 가
+        # server 가 보낸 chosen.waypoints 를 start→via@clearance_z→goal 3-point
+        # Bezier 로 통째로 대체하여 paradigm 의 lateral/vertical 다양화 의도를
+        # 모두 무력화한다. paper-grade Phase2 collection 은 raw curobo wp 그대로
+        # 실행해야 의미 있는 selection 효과가 학습 데이터에 반영됨.
+        # 안전성 trade-off: extreme wp 가 잡힌 물체를 표면에 스치거나 떨어뜨릴
+        # 위험이 있지만, 이는 Q2 (Harmful OOD) 의 의도된 결과이기도 하다.
+        # GrpcPlannerClient (Phase2 전용) 만 pop_dump_refs 를 갖는다.
+        _is_phase2_grpc = (
+            self._skill_planner_client is not None
+            and hasattr(self._skill_planner_client, "pop_dump_refs")
+        )
         if (_subgoal_perturbed
                 and _holding_clearance_z is not None
-                and trajectory.ik_converged
-                and current_ee[2] < _holding_clearance_z - 0.005):
-            # server-side curobo 가 scene_model (table cuboid) 로 wp 의 z-floor
-            # 를 이미 보장하면 — Bezier overwrite 가 chosen wp 를 통째로 덮어
-            # Method3 selection 의 lateral 다양화를 죽인다. wp 의 모든 ee z 가
-            # clearance_z 이상이면 wp 자체로 안전 → overwrite skip.
-            _skip_clearance_lead = False
-            try:
-                _wp_ee = np.array([
-                    active_planner.kinematics.get_ee_position(q)
-                    for q in trajectory.joint_positions
-                ])
-                _wp_min_z = float(np.min(_wp_ee[:, 2]))
-                if _wp_min_z >= _holding_clearance_z - 0.005:
-                    _skip_clearance_lead = True
-                    self._log(
-                        f"  [clearance-lead ascent] SKIP — wp min_z={_wp_min_z:.3f}m "
-                        f"≥ clearance_z={_holding_clearance_z:.3f}m "
-                        f"(server-side scene collision 이 z-floor 보장; "
-                        f"Method3 chosen wp 보존)"
-                    )
-            except Exception:
-                # FK 실패 시 안전하게 기존 Bezier overwrite 로 fallback.
-                pass
+                and _is_phase2_grpc):
+            self._log(
+                "  [clearance-lead ascent] SKIPPED — Phase2 grpc mode "
+                "(raw curobo wp 그대로 execute; Method3 selection 의도 보존)"
+            )
         if (_subgoal_perturbed
                 and _holding_clearance_z is not None
                 and trajectory.ik_converged
                 and current_ee[2] < _holding_clearance_z - 0.005
-                and not _skip_clearance_lead):
+                and not _is_phase2_grpc):
             try:
                 _cl = getattr(active_planner, "calibration_limits", None)
                 _custom_limits = (

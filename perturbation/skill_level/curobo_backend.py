@@ -174,23 +174,6 @@ class CuroboBackend:
         # MotionPlannerCfg.max_batch_size covers BOTH plan_cspace and IK
         # solver paths internally → set to the larger of the two.
         mp_max_batch = max(self._cspace_batch, self._ik_batch)
-        # Scene collision world — base_link 기준 table top z=0 평면.
-        # 이걸 등록해 두지 않으면 trajopt 가 robot self-collision 만 본다.
-        # Phase2 의 perturbation candidate 가 table 아래로 내려가는 path 를
-        # 자유롭게 만들어, holding-phase 에서 잡힌 물체가 table 을 스치는
-        # 결과를 낳는다. dict 직접 전달 (resolve_config dict pass-through):
-        #   dims=(x,y,z) — base_link 기준 사각 표면(2m × 2m × 2cm),
-        #   pose=(x,y,z, qx,qy,qz,qw) — table 중심 z=-0.01m → top surface z=0.
-        # robot base_link 가 table top 에 mount 됐다는 가정 (so101 standard).
-        # 추후 robot 별 base mount 가 다르면 config 로 분리.
-        _scene_model = {
-            "cuboid": {
-                "table": {
-                    "dims": [2.0, 2.0, 0.02],
-                    "pose": [0.0, 0.0, -0.01, 1.0, 0.0, 0.0, 0.0],
-                },
-            },
-        }
         mp_cfg = MotionPlannerCfg.create(
             robot=robot_cfg_abs,
             num_trajopt_seeds=config.num_trajopt_seeds,
@@ -199,7 +182,6 @@ class CuroboBackend:
             use_cuda_graph=config.use_cuda_graph,
             max_batch_size=mp_max_batch,
             max_goalset=self._n_goalset,
-            scene_model=_scene_model,
         )
         self._planner = MotionPlanner(mp_cfg)
         self.joint_names = list(self._planner.joint_names)

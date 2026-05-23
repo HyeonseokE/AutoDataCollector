@@ -2538,6 +2538,33 @@ class LeRobotSkills:
                 and _holding_clearance_z is not None
                 and trajectory.ik_converged
                 and current_ee[2] < _holding_clearance_z - 0.005):
+            # server-side curobo 가 scene_model (table cuboid) 로 wp 의 z-floor
+            # 를 이미 보장하면 — Bezier overwrite 가 chosen wp 를 통째로 덮어
+            # Method3 selection 의 lateral 다양화를 죽인다. wp 의 모든 ee z 가
+            # clearance_z 이상이면 wp 자체로 안전 → overwrite skip.
+            _skip_clearance_lead = False
+            try:
+                _wp_ee = np.array([
+                    active_planner.kinematics.get_ee_position(q)
+                    for q in trajectory.joint_positions
+                ])
+                _wp_min_z = float(np.min(_wp_ee[:, 2]))
+                if _wp_min_z >= _holding_clearance_z - 0.005:
+                    _skip_clearance_lead = True
+                    self._log(
+                        f"  [clearance-lead ascent] SKIP — wp min_z={_wp_min_z:.3f}m "
+                        f"≥ clearance_z={_holding_clearance_z:.3f}m "
+                        f"(server-side scene collision 이 z-floor 보장; "
+                        f"Method3 chosen wp 보존)"
+                    )
+            except Exception:
+                # FK 실패 시 안전하게 기존 Bezier overwrite 로 fallback.
+                pass
+        if (_subgoal_perturbed
+                and _holding_clearance_z is not None
+                and trajectory.ik_converged
+                and current_ee[2] < _holding_clearance_z - 0.005
+                and not _skip_clearance_lead):
             try:
                 _cl = getattr(active_planner, "calibration_limits", None)
                 _custom_limits = (

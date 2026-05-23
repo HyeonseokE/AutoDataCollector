@@ -3,7 +3,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026-CSI/fold_greentowel_in_half_10fps"
+dataset_repo_id: "CoRL2026-CSI/table2/sort_ours_100_table1"
 recording_fps: 10
 robot_type: "so101"
 vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv
@@ -47,7 +47,7 @@ cameras:
     - name: "wrist"
       type: "opencv"
       enabled: true
-      index_or_path: "/dev/video1"
+      index_or_path: "/dev/v4l/by-path/pci-0000:04:00.0-usb-0:2:1.0-video-index0"
       width: 640
       height: 480
       fps: 30

@@ -18,14 +18,14 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260524_113901/checkpoints/001400/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260523_225127/checkpoints/003650/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
-phase1_dataset_path: "CoRL2026-CSI/pnp_ours_100_table1"
+phase1_dataset_path: "CoRL2026-CSI/table2/sort_ours_100_table1"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
-phase1_min: 30                 # B_{1,min} — Phase1 최소 guard
+phase1_min: 40                 # B_{1,min} — Phase1 최소 guard
 phase1_max: 60                 # B_{1,max} — Phase1 최대 guard
 tau_ready: 0.7                 # §15.1 — Phase2-readiness 전환 임계값
 saturation_window: 10          # §15.2 — W (최근 accepted score 평균 window)
@@ -53,9 +53,7 @@ mi_selection:
   #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
   # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
-  selection_mode: Q3   # Useful ID — argmin U_VLA s.t. M̃_MI ≥ +τ_MI
-                       # = "MI-aligned + VLA-familiar": Phase1 분포 정합 cand 중
-                       # VLA 가 가장 자신 있어 하는 것 (negative control of Q1)
+  selection_mode: Q1
   # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율
@@ -66,17 +64,16 @@ mi_selection:
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
   lambda: 1.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
-  tau_MI: 0.0                  # §13.2 — Useful-OOD/ID constraint: M̃_MI gate
-                               # (0.8→0.0: 검증된 baseline 복귀 — session_20260523_013722
-                               # 59/60 forward success 시 설정. 이전 변경 이력:
-                               # 0.0→0.5(c41b6c0)→1.0→0.8(fe2d020)→0.0. 분야 관례상
-                               # σ-multiple 직접 적용은 unusual, 분포 좁은 skill 에서
-                               # fallback 폭증 위험. quantile/budget-aware 재설계는 후속)
+  tau_MI: 0.8                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
+                               # (1.0→0.8: 1.0 은 너무 빡빡해 eligible 평균
+                               # 5/64=8% 에 fallback 9% 발생. M̃_MI 분포가
+                               # heavy left tail 이라 정규분포 예측보다
+                               # eligible 적음. 0.8 로 완화해 평균 ~15% 목표)
   # accept_threshold 는 tau_MI 의 deprecated alias (구 yaml 호환). tau_MI 가 우선이지만
   # accept_threshold 만 지정해도 자동 매핑된다.
   amb_agg: mean                # §9.4 covered aggregation: mean | max
   min_covered_windows: 1       # §9.1 T_min — 미만이면 under-covered
-  debug_verbose: true          # true → [Phase2-MI][debug] per-candidate 로그
+  debug_verbose: false         # true → [Phase2-MI][debug] per-candidate 로그
 
 # --- VLA-side informativeness U_VLA (§12, useful_ood_updated) ---
 # Phase1-trained VLA 의 R-stochastic denoising loss 로 model-side novelty 점수.
@@ -112,24 +109,19 @@ skill_perturbation:
   curobo_num_trajopt_seeds: 4
   curobo_num_ik_seeds: 16
   curobo_use_cuda_graph: true     # graph capture 1회 → plan latency 50ms→5ms
-  curobo_via_offset_mag: 0.15     # m — via-point 가 직선에서 떨어지는 거리
+  curobo_via_offset_mag: 0.25     # m — via-point 가 직선에서 떨어지는 거리
                                   # (0.22→0.18 절충: 0.22 는 workspace 경계 넘어
                                   # via IK fail 다수 발생 → trajopt 0 valid).
-                                  # 2026-05-24 trial: 0.18→0.25 시도했으나 vert
-                                  # 최대 30cm (=0.25·1.2) 이 workspace 경계 초과
-                                  # → episode_46 부터 plan_batch returned 0 valid
-                                  # candidates × 4 발생.
-                                  # 2026-05-24 final: 0.20→0.15 — 사용자 관찰
-                                  # "다양성 너무 큼" 응대. cand pool 의 공간 폭
-                                  # 자체를 좁혀 chosen 의 모양이 더 단조해지게.
-                                  # (lat ±15cm, vert 4.5~18cm).
+                                  # 2026-05-24: 0.18→0.25 — 사용자 관찰 "traj 폭
+                                  # 좁다" 응대. lat ±25cm, vert 7.5~30cm 로 확장.
+                                  # IK fail 비율 다시 monitor 필요.
   curobo_junction_smooth_k: 5     # cubic spline blend at via junction
   # K_max — candidate 당 최대 via 개수. 0=direct-only / 1=default / 2+ 더 다양.
-  # 2: K=0/1/2 vias mix → 직선·1-bend·S자 3종 균일 quota (n=64면 [22,21,21]).
-  # (3 시도 trial: max_vias=3 -> _cspace_batch 192->256 으로 CUDA graph
-  # 재컴파일 시 curobo trajopt 가 64/64 silent fail. via_offset_mag 어떤
-  # 값이든 무관. 2 로 revert — 작동 확인된 baseline.)
-  curobo_max_vias_per_candidate: 2
+  # 3: K=0/1/2/3 vias mix → 직선·1-bend·S자·복잡 path 4종 균일 quota (n=64면
+  # 각 K 마다 16개씩 보장 — f389def 의 uniform quota).
+  # (이전 2: K=3 누적 IK fail 우려로 2 였으나, 우리 코드의 quota fix 가 K=0
+  # 22개 보장 + via_offset_mag 줄여 IK 통과율 회복 후 K=3 도 시도 가능.)
+  curobo_max_vias_per_candidate: 3
   # joint-space 저주파 perturbation (A안) — collision-free curobo 경로에
   # Σ_{k=1}^{K} a_k·sin(kπt) 를 더해 질적으로 다양화. start/goal joint 보존.
   # K=2~3 저주파라 매끄러운 S자/곡선 (고주파 noise 아님). 0 = off.
@@ -179,7 +171,7 @@ camera_rename:
 
 # --- gRPC transport endpoint (client ↔ server 통신) ---
 transport:
-  address: "127.0.0.1:50061"
+  address: "127.0.0.1:50062"
   timeout_s: 60.0
   debug_verbose: true                  # true → [skill_planner_transport] 로그 출력
 
@@ -222,7 +214,7 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  skill_dct_parquet: "results/skill_dct/pnp_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
+  skill_dct_parquet: "results/skill_dct/sort_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
 
 # --- server-local SkillVectorDB 영속화 ---
@@ -254,8 +246,8 @@ remote:
   # [필수] 원격 서버 운영
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES — GPU 2 idle (GPU 0/1/3 다른 사용자 사용 중)
-  tmux_session: "phase2_server_pnp"          # 재시작 시 reuse
+  gpu_id: 2                              # 같은 GPU 2 공유 (sort + pnp 양쪽 SmolVLA, H100 80GB)
+  tmux_session: "phase2_server_sort"     # task/sort branch — pnp 머신과 분리
 
   # [선택] 동작 옵션
   git_pull_before_start: true

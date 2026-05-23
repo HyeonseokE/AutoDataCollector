@@ -1,11 +1,5 @@
 #!/bin/bash
 # Forward + Reset Integrated Pipeline Runner
-# Forward Execution → Judge (Evaluation) → Reset Execution 통합 파이프라인
-#
-# Config 파일들:
-#   - pipeline_config/paid_api_config.yaml     : 유료 API 설정 (USE_SERVER=false)
-#   - pipeline_config/free_api_config.yaml     : vLLM 서버 설정 (USE_SERVER=true)
-#   - pipeline_config/recording_config.yaml    : 레코딩 설정 (RECORD_DATASET=true)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -13,61 +7,6 @@ cd "$SCRIPT_DIR"
 # ============================================================
 # 핵심 설정 (Essential Configuration) / 워크스페이스 명시 / 에피소드 갯수 명시
 # ============================================================
-
-# # Grasping:                                                                  
-# (1, 완료) pick up the red block and place it on the blue plate
-# (2, 완료) distribute chocolate pies to each plate                           
-# (3) -
-
-# # Arrangement:                                                               
-# (1, 완료) place the yellow block between chocolate pies             
-# (2, 완료) arrange yellow, red, and purple blocks in a line from left to right
-# (3, 완료) stack the blocks in the order of red and yellow
-# (3, 완료) stack the blocks in the order of red and yellow, purple
-
-# # Non-grasping:
-# (1, 성공) turn on the microphone by pressing the power button
-# (2, 성공) Push the bowl of cereal 5cm from left to right
-# (3, 성공) Open the trash can lid
-
-# # Deformable:
-# (1, 완료) fold the towel
-# (2) sweep the floor with a towel
-# (3) bend the microphone gooseneck leftward
-
-# # Articulated:
-# (1) open the drawers
-# (2) close the drawers
-# (3) beat the red block with a hammer
-
-# # Insertion/Assembly:
-# (1) assemble the battery pack
-# (2) peg-in-hole
-# (3) clean the desk
-
-# # Rotation:
-# (1) tighten the bolt
-# (2) open the bottle
-# (3) mix the tea
-
-# # Contact-rich:
-# (1) wipe the dish with a sponge
-# (2) sweep the floor with a brush
-# (3) shake the bottle
-
-# INSTRUCTION="make sandwich using the ingredients on the table"
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# INSTRUCTION="fold the green towel"
-# INSTRUCTION="pick up the brown peg and insert it into the hole of the gray structure"
-# INSTRUCTION = "Pick up the banana and place it in the bowl. 
-# You may need to handover the banana from one arm to the other if the initial arm picking the banana cannot reach the bowl. 
-# After picking the banana with one arm, you can handover the banana by first placing it carefully on the table surface and then using the other arm to pick it up. 
-# The placing position must be on the table, as far as possible from other objects but absolutely within the reachable table area of the other arm. 
-# Make sure to move the picking arm out of the way before the receiving arm moves towards grasping the object."
-
-# INSTRUCTION="Assemble the green hinge and red hinge.
-# You need to carefully assemble the green hinge's male part to red hinge's hole part.
-# since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
 # [필수] 로봇 번호 배열 — 순서가 arm 그룹을 결정 (최대 4대):
 #   ROBOT_IDS[0] → left_arm
@@ -78,7 +17,7 @@ cd "$SCRIPT_DIR"
 # 예: (0)       → shared + left_arm
 #     (2 3)     → shared + left_arm(robot2) + right_arm(robot3)
 #     (1 2 3 4) → shared + left_arm + right_arm + top_arm + bottom_arm
-ROBOT_IDS=(6 7)
+ROBOT_IDS=(6)
 
 ## Task_instruction 
 # INSTRUCTION="stack red block at center, then place yellow block on top of red block"
@@ -88,20 +27,20 @@ ROBOT_IDS=(6 7)
 # INSTRUCTION="close the pot’s lid."
 # RESET_INSTRUCTION=""
 
-INSTRUCTION="Fold the towel in half from top to bottom."
-RESET_INSTRUCTION="Unfold the towel from bottom to top to recover its original flat state."
+# INSTRUCTION="Fold the towel in half from top to bottom."
+# RESET_INSTRUCTION="Unfold the towel from bottom to top to recover its original flat state."
 
 
 ## stack red and yellow
 # INSTRUCTION="stack the blocks in the order of red and yellow"
 # RESET_INSTRUCTION=""
 
-## stack RYP blocks
-# INSTRUCTION="stack the blocks in the order of red and yellow, purple."
-# RESET_INSTRUCTION=""
+## sort
+INSTRUCTION="Sort each colored block onto the plate of the matching color."
+RESET_INSTRUCTION=""
 
-## distribute chocolate pies to each plate
-# INSTRUCTION="distribute chocolate pies to each plate."
+# # distribute chocolate pies to each plate
+# INSTRUCTION="Distribute chocolate pies to each plate"
 # RESET_INSTRUCTION=""
 
 ### [dual arm task]
@@ -121,7 +60,7 @@ RESET_INSTRUCTION="Unfold the towel from bottom to top to recover its original f
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=100
-NUM_RANDOM_SEEDS=1 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_RANDOM_SEEDS=20 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
 # [선택] 로봇별 reset 공간 제약 (all, all_wo_center, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
@@ -129,7 +68,7 @@ NUM_RANDOM_SEEDS=1 # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배�
 # all_wo_center: all 에서 이미지 중앙 세로 타원 (160 x 320 px) 영역만 제외
 #                (위↔아래 1열 정렬 같은 task 에서 reset 위치가 중앙 라인에 떨어지지 않게 함)
 # top-left 등:   테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(all) 
+RESETSPACE_PER_ROBOT=(all_wo_center) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -155,11 +94,11 @@ RECORD_DATASET=true
 #            re-embedding 자동 구축. HF repo_id ("user/name") 도 그대로 인식 —
 #            로컬 캐시 miss 면 lerobot 가 다운로드.
 # ============================================================
-PHASE="phase1"
+PHASE="phase2"
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
-RESUME_SESSION="./results/session_20260512_181737"
+RESUME_SESSION="./results/session_20260523_022250"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

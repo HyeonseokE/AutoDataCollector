@@ -75,7 +75,7 @@ readiness:
   k_min: 3                    # covered window 최소 neighbor 수 (§9.1)
   radius_k: 5                 # ρ_m (state-neighborhood radius) 계산용 kNN k
   radius_quantile: 0.7        # ρ_m quantile (§16)
-  auto_stop_on_ready: true    # false → 측정·로그만, 종료는 안 함
+  auto_stop_on_ready: false    # false → 측정·로그만, 종료는 안 함
 
   # ── 2차 조건: Phase2 로 갈 가성비가 있는가 (budget_aware_..._rule.md §3/§5) ──
   # "지금 Phase2 로 넘어가면 episode 하나당 얼마만큼 유용한 데이터를 얻을까"

@@ -587,6 +587,14 @@ class LeRobotSkills:
                     if abs(self.pick_xy_offset) > 1e-9:
                         self._log(f"  Pick xy radial offset: {self.pick_xy_offset*1000:+.1f}mm "
                                   f"(applied at execute_pick_object xy)")
+                    # Per-robot pick_offset override — 9763d6b 가 constructor default
+                    # 를 0.025 → 0.0 으로 바꿨는데 robot 별 calibration 차이로 일부는
+                    # 25mm 하강이 필요하다. 이 키가 보정파일에 있으면 constructor
+                    # 인자/default 를 덮어쓴다.
+                    if "pick_offset" in _comp:
+                        self.pick_offset = float(_comp["pick_offset"])
+                        self._log(f"  Pick offset (per-robot): {self.pick_offset*1000:.1f}mm "
+                                  f"from object top (pick + place descent)")
                 except Exception as _e:
                     self._log(f"  Warning: failed to read pick offsets: {_e}")
 

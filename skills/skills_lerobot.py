@@ -2055,6 +2055,24 @@ class LeRobotSkills:
         _subgoal_perturbed = False
         _holding_clearance_z = None
 
+        # Post-place safety — Subgoal-Phase2 replay 가 (replay buffer 의 해당 skill
+        # record 미존재 등으로) 호출 안 된 transit 에서도 clearance-lead 가 발동
+        # 해야 server-side curobo 가 미인지하는 막 놓은 물체와의 충돌을 막을 수
+        # 있다. _saved_pitch 는 release 됐고 _post_place_clearance_z 만 set 인
+        # 상태가 정확히 post-place 첫 transit (retreat). 아래 selector 진입 여부
+        # 와 무관하게 강제 set + one-shot consume. selector 가 호출되면 elif 의
+        # _post_place_clearance_z 분기는 이미 None 이라 중복 set 안 됨.
+        if (is_transit
+                and getattr(self, "_saved_pitch", None) is None
+                and getattr(self, "_post_place_clearance_z", None) is not None):
+            _holding_clearance_z = float(self._post_place_clearance_z)
+            self._post_place_clearance_z = None
+            self._log(
+                f"  [post-place safety] _holding_clearance_z="
+                f"{_holding_clearance_z:.3f}m forced set "
+                f"(subgoal selector 호출 여부 무관)"
+            )
+
         if (is_transit
                 and self._subgoal_selector is not None
                 and self._perturbation_rng is not None):
@@ -2577,20 +2595,27 @@ class LeRobotSkills:
             self._skill_planner_client is not None
             and hasattr(self._skill_planner_client, "pop_dump_refs")
         )
+        # post-place 인지 — _saved_pitch 없음 (object release 후) + _holding_clearance_z
+        # 가 set 되어있음. _post_place_clearance_z 는 위 강제 set / elif branch 양쪽
+        # 에서 이미 one-shot consume 됐으므로 직접 검사 안 함.
         _is_post_place = (
             getattr(self, "_saved_pitch", None) is None
-            and getattr(self, "_post_place_clearance_z", None) is not None
+            and _holding_clearance_z is not None
         )
         _skip_clearance_lead_phase2 = _is_phase2_grpc and not _is_post_place
-        if (_subgoal_perturbed
-                and _holding_clearance_z is not None
+        # NOTE: _subgoal_perturbed 조건 제거 — Phase2 post-place 처럼 subgoal
+        # selector 가 호출되지 않은 transit 에서도 _holding_clearance_z 만 set
+        # 됐으면 clearance-lead 가 발동해야 한다. Phase1 경로는 어차피 selector
+        # 가 호출되며 _holding_clearance_z 도 동일 path 에서 set 되므로 동작
+        # 변화 없음 (단, _subgoal_perturbed=False + _holding_clearance_z=None
+        # 인 경우는 자연스럽게 skip 됨).
+        if (_holding_clearance_z is not None
                 and _skip_clearance_lead_phase2):
             self._log(
                 "  [clearance-lead ascent] SKIPPED — Phase2 grpc holding-phase "
                 "(raw curobo wp 그대로 execute; Method3 selection 의도 보존)"
             )
-        elif (_subgoal_perturbed
-                and _holding_clearance_z is not None
+        elif (_holding_clearance_z is not None
                 and _is_phase2_grpc
                 and _is_post_place):
             self._log(
@@ -2598,8 +2623,7 @@ class LeRobotSkills:
                 "(server-side curobo 가 놓은 물체 collision 미인지 → Bezier 로 "
                 "위로 띄워 안전 확보)"
             )
-        if (_subgoal_perturbed
-                and _holding_clearance_z is not None
+        if (_holding_clearance_z is not None
                 and trajectory.ik_converged
                 and current_ee[2] < _holding_clearance_z - 0.005
                 and not _skip_clearance_lead_phase2):

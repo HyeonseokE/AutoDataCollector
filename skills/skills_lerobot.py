@@ -2444,30 +2444,32 @@ class LeRobotSkills:
                 safe = np.where(denom < 1e-12, 1.0, denom)
                 alpha = np.where(denom < 1e-12, 0.0, (s_frac - u[j - 1]) / safe)
                 new_joints = W[j - 1] + alpha[:, None] * (W[j] - W[j - 1])
+                # Phase2 chosen wp 의 execute duration 을 caller 가 넘긴 fixed
+                # ``duration`` (= plan_to_position_multi 가 straight-line 에
+                # 쓰는 MOVEMENT_DURATION) 으로 설정. Phase1 dataset 평균 peak
+                # velocity 기반의 phase1_ts[-1] 은 보수적이라 execute 가 너무
+                # 길어졌고 (예: 9.2s/move), 사용자가 원하는 속도는
+                # plan_to_position_multi 와 동일한 fast straight-line dur.
+                # 부작용: peak joint velocity 가 Phase1 의 (L/D)·(phase1_dur/
+                # duration) 배까지 올라가 motor saturation 시 wp 모양이 평균
+                # 화될 수 있음 — forward_log 의 Done(err) 와 Timeout 으로 검증.
+                # paper Q2 의 의도 (VLA 가 어려워하는 trajectory) 와 부합 —
+                # peak vel 도 학습 데이터 다양성의 일부.
+                # phase1_ts 는 비교용 진단 정보만 남기고 dur 결정엔 미사용.
                 straight = smooth_linear_interpolation(q0, q1, N)
                 phase1_ts, _ = time_parameterize_trajectory(
                     straight,
                     active_planner.max_velocity,
                     active_planner.max_acceleration,
                 )
-                # Phase2 chosen wp 가 extreme 한 우회 path (예: via2 의 Z) 일 때
-                # 원 공식 ``dur = phase1_ts[-1] * (L/D)`` 는 Phase1 의 peak vel
-                # 을 유지하려고 duration 을 L/D 배 늘려 execute 가 너무 느렸다.
-                # 여기는 L/D scaling 완전 제거 — plan_to_position_multi 의
-                # straight-line trajectory 와 *동일한 duration* 으로 chosen wp
-                # 의 50 점 모두를 execute. peak joint velocity 는 Phase1 의
-                # (L/D) 배까지 올라가므로 motor saturation 시 wp 모양이 일부
-                # 평균화될 수 있음 — forward_log 의 Done(err) 와 Timeout 여부로
-                # 검증 필요. paper Q2 의 의도 (VLA 가 어려워하는 trajectory) 와
-                # 부합 — peak vel 도 학습 데이터의 다양성 일부.
-                dur = float(phase1_ts[-1])
+                dur = float(duration)
                 trajectory.joint_positions = new_joints
                 trajectory.timestamps = np.linspace(0.0, dur, N)
                 trajectory.ee_positions = None
                 self._log(
                     f"  [Skill Perturbation] dur={dur:.2f}s "
-                    f"(L/D={L/D:.2f}, scaling DISABLED — straight-line dur, "
-                    f"straight={float(phase1_ts[-1]):.2f}s, wp={W.shape[0]})"
+                    f"(caller duration; L/D={L/D:.2f}, "
+                    f"phase1_natural={float(phase1_ts[-1]):.2f}s, wp={W.shape[0]})"
                 )
         else:
             self._log("  [Skill Perturbation] empty batch — using cartesian fallback")

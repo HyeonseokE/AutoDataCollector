@@ -2450,10 +2450,25 @@ class LeRobotSkills:
                     active_planner.max_velocity,
                     active_planner.max_acceleration,
                 )
-                dur = float(phase1_ts[-1]) * (L / D)
+                # Phase2 chosen wp 가 extreme 한 우회 path (예: via2 의 Z) 일 때
+                # joint-space 길이 L 이 straight D 의 몇 배가 된다. 원 공식
+                # ``dur = phase1_ts[-1] * (L/D)`` 는 Phase1 의 |dq/dt| 분포
+                # (peak vel) 를 유지하려고 duration 을 L/D 배 늘리지만, extreme
+                # path 에서는 execute 시간이 너무 길어져 paper-grade collection
+                # throughput 이 떨어진다. cap 으로 최대 N배까지만 늘려 균형.
+                #   L/D ≤ cap : 기존과 동일 (Phase1 분포 보존)
+                #   L/D >  cap: peak vel 이 Phase1 의 (L/D)/cap 배까지 허용
+                _DURATION_LD_CAP = 2.0
+                _ld_eff = min(L / D, _DURATION_LD_CAP)
+                dur = float(phase1_ts[-1]) * _ld_eff
                 trajectory.joint_positions = new_joints
                 trajectory.timestamps = np.linspace(0.0, dur, N)
                 trajectory.ee_positions = None
+                self._log(
+                    f"  [Skill Perturbation] dur={dur:.2f}s "
+                    f"(L/D={L/D:.2f}, capped to {_ld_eff:.2f}, "
+                    f"straight={float(phase1_ts[-1]):.2f}s, wp={W.shape[0]})"
+                )
         else:
             self._log("  [Skill Perturbation] empty batch — using cartesian fallback")
 

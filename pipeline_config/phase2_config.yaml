@@ -74,7 +74,7 @@ mi_selection:
   # accept_threshold 만 지정해도 자동 매핑된다.
   amb_agg: mean                # §9.4 covered aggregation: mean | max
   min_covered_windows: 1       # §9.1 T_min — 미만이면 under-covered
-  debug_verbose: false         # true → [Phase2-MI][debug] per-candidate 로그
+  debug_verbose: true          # true → [Phase2-MI][debug] per-candidate 로그
 
 # --- VLA-side informativeness U_VLA (§12, useful_ood_updated) ---
 # Phase1-trained VLA 의 R-stochastic denoising loss 로 model-side novelty 점수.

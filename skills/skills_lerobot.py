@@ -2389,66 +2389,73 @@ class LeRobotSkills:
             cands = []
             self._log(f"  [Skill Perturbation] SKIP plan_batch ({_diag}) — cartesian fallback")
 
-            if cands:
-                # Candidate selection. Default: RNG uniform over batch.
-                # If a preselective hook is attached, it gets first refusal —
-                # may return an index (use it) or None (defer to RNG).
-                idx = None
-                if self._skill_candidate_selector is not None:
-                    try:
-                        idx = self._skill_candidate_selector(
-                            cands, current_joints, goal_joint_rad, is_transit,
-                        )
-                    except Exception as e:
-                        self._log(
-                            f"  [Skill Perturbation] selector hook failed: {e}; RNG fallback"
-                        )
-                        idx = None
-                if idx is None:
-                    idx = int(self._perturbation_rng.integers(0, len(cands)))
-                chosen = cands[idx]
-                self._log(
-                    f"  [Skill Perturbation] {chosen.algo} "
-                    f"(seed={chosen.seed}, wp={chosen.waypoints.shape[0]}, "
-                    f"cost={chosen.cost:.3f}) chosen from {len(cands)} candidates"
-                )
-                # Phase1 (smoothstep + time_parameterize) 의 30 Hz dataset
-                # |a_{t+1}−a_t| 분포를 그대로 따라가도록 curobo path W 를
-                #   (1) arc-length 위 smoothstep 으로 N=50점 재샘플  → 양 끝
-                #       촘촘/중간 성김의 phase1 위치 분포 복제,
-                #   (2) phase1 직선 trajectory 의 duration · (L/D) 로 시간 부여
-                #       → 모든 fractional progress 에서 |dq/dt| 가 phase1 과
-                #       일치 (peak vel, first-frame jump, KS 분포 통과 검증).
-                W = np.asarray(chosen.waypoints, dtype=float)
-                seg = np.linalg.norm(np.diff(W, axis=0), axis=1)
-                L = float(seg.sum())
-                q0 = np.asarray(current_joints, dtype=float)[: W.shape[1]]
-                q1 = np.asarray(goal_joint_rad, dtype=float)[: W.shape[1]]
-                D = float(np.linalg.norm(q1 - q0))
-                if L < 1e-9 or D < 1e-9 or W.shape[0] < 2:
-                    self._log("  [Skill Perturbation] degenerate path — cartesian fallback")
-                else:
-                    N = int(active_planner.interpolation_points)
-                    u = np.concatenate([[0.0], np.cumsum(seg)]) / L
-                    t_unif = np.linspace(0.0, 1.0, N)
-                    s_frac = 3.0 * t_unif**2 - 2.0 * t_unif**3   # smoothstep
-                    j = np.clip(np.searchsorted(u, s_frac, side="right"), 1, len(u) - 1)
-                    denom = u[j] - u[j - 1]
-                    safe = np.where(denom < 1e-12, 1.0, denom)
-                    alpha = np.where(denom < 1e-12, 0.0, (s_frac - u[j - 1]) / safe)
-                    new_joints = W[j - 1] + alpha[:, None] * (W[j] - W[j - 1])
-                    straight = smooth_linear_interpolation(q0, q1, N)
-                    phase1_ts, _ = time_parameterize_trajectory(
-                        straight,
-                        active_planner.max_velocity,
-                        active_planner.max_acceleration,
+        # NOTE: 아래 `if cands:` 블록은 transit (Phase2 plan_batch) 와 cartesian
+        # fallback 양쪽에서 평가돼야 한다. 과거 commit (9ff7447 추정) 에서
+        # accidentally else block 안으로 한 단계 들여쓰기 돼 — Phase2 가 chosen
+        # wp 를 *받기는 했지만 (log: "plan_batch DONE — 1 candidates received")*
+        # trajectory.joint_positions 에 *적용되지 못해* robot 은 straight-line
+        # IK trajectory 로 직진했다. visualization 의 chosen wp 와 robot 의 실제
+        # 거동이 alignment 가 깨지던 핵심 원인. top-level 로 복원.
+        if cands:
+            # Candidate selection. Default: RNG uniform over batch.
+            # If a preselective hook is attached, it gets first refusal —
+            # may return an index (use it) or None (defer to RNG).
+            idx = None
+            if self._skill_candidate_selector is not None:
+                try:
+                    idx = self._skill_candidate_selector(
+                        cands, current_joints, goal_joint_rad, is_transit,
                     )
-                    dur = float(phase1_ts[-1]) * (L / D)
-                    trajectory.joint_positions = new_joints
-                    trajectory.timestamps = np.linspace(0.0, dur, N)
-                    trajectory.ee_positions = None
+                except Exception as e:
+                    self._log(
+                        f"  [Skill Perturbation] selector hook failed: {e}; RNG fallback"
+                    )
+                    idx = None
+            if idx is None:
+                idx = int(self._perturbation_rng.integers(0, len(cands)))
+            chosen = cands[idx]
+            self._log(
+                f"  [Skill Perturbation] {chosen.algo} "
+                f"(seed={chosen.seed}, wp={chosen.waypoints.shape[0]}, "
+                f"cost={chosen.cost:.3f}) chosen from {len(cands)} candidates"
+            )
+            # Phase1 (smoothstep + time_parameterize) 의 30 Hz dataset
+            # |a_{t+1}−a_t| 분포를 그대로 따라가도록 curobo path W 를
+            #   (1) arc-length 위 smoothstep 으로 N=50점 재샘플  → 양 끝
+            #       촘촘/중간 성김의 phase1 위치 분포 복제,
+            #   (2) phase1 직선 trajectory 의 duration · (L/D) 로 시간 부여
+            #       → 모든 fractional progress 에서 |dq/dt| 가 phase1 과
+            #       일치 (peak vel, first-frame jump, KS 분포 통과 검증).
+            W = np.asarray(chosen.waypoints, dtype=float)
+            seg = np.linalg.norm(np.diff(W, axis=0), axis=1)
+            L = float(seg.sum())
+            q0 = np.asarray(current_joints, dtype=float)[: W.shape[1]]
+            q1 = np.asarray(goal_joint_rad, dtype=float)[: W.shape[1]]
+            D = float(np.linalg.norm(q1 - q0))
+            if L < 1e-9 or D < 1e-9 or W.shape[0] < 2:
+                self._log("  [Skill Perturbation] degenerate path — cartesian fallback")
             else:
-                self._log("  [Skill Perturbation] empty batch — using cartesian fallback")
+                N = int(active_planner.interpolation_points)
+                u = np.concatenate([[0.0], np.cumsum(seg)]) / L
+                t_unif = np.linspace(0.0, 1.0, N)
+                s_frac = 3.0 * t_unif**2 - 2.0 * t_unif**3   # smoothstep
+                j = np.clip(np.searchsorted(u, s_frac, side="right"), 1, len(u) - 1)
+                denom = u[j] - u[j - 1]
+                safe = np.where(denom < 1e-12, 1.0, denom)
+                alpha = np.where(denom < 1e-12, 0.0, (s_frac - u[j - 1]) / safe)
+                new_joints = W[j - 1] + alpha[:, None] * (W[j] - W[j - 1])
+                straight = smooth_linear_interpolation(q0, q1, N)
+                phase1_ts, _ = time_parameterize_trajectory(
+                    straight,
+                    active_planner.max_velocity,
+                    active_planner.max_acceleration,
+                )
+                dur = float(phase1_ts[-1]) * (L / D)
+                trajectory.joint_positions = new_joints
+                trajectory.timestamps = np.linspace(0.0, dur, N)
+                trajectory.ee_positions = None
+        else:
+            self._log("  [Skill Perturbation] empty batch — using cartesian fallback")
 
         # ── xy-lead corrective descent ───────────────────────────────────
         # For interaction descents (pick/place; is_transit=False) the upstream

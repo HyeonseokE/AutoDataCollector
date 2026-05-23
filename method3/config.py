@@ -128,6 +128,8 @@ def load_phase2_config(
         arm_dof=mi.get("arm_dof", 5),
         full_dof=mi.get("full_dof", 5),
         dct_L0=int(mi.get("dct_L0", 50)),
+        # Table 6 Quadrant Validation — Q1(Useful OOD)/Q2(Harmful OOD)/Q3(Useful ID)/Q4(Redundant ID).
+        selection_mode=str(mi.get("selection_mode", "Q1")),
     )
 
     re = raw.get("reembedding") or {}

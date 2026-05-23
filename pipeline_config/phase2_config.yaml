@@ -95,18 +95,21 @@ skill_perturbation:
   curobo_num_trajopt_seeds: 4
   curobo_num_ik_seeds: 16
   curobo_use_cuda_graph: true     # graph capture 1회 → plan latency 50ms→5ms
-  curobo_via_offset_mag: 0.22     # m — via-point 가 직선에서 떨어지는 거리
-                                  # (0.15→0.22: 경로 envelope 확대 — candidate
-                                  # 가 한 다발로 몰리는 현상 완화)
+  curobo_via_offset_mag: 0.18     # m — via-point 가 직선에서 떨어지는 거리
+                                  # (0.22→0.18 절충: 0.22 는 workspace 경계 넘어
+                                  # via IK fail 다수 발생 → trajopt 0 valid).
   curobo_junction_smooth_k: 5     # cubic spline blend at via junction
   # K_max — candidate 당 최대 via 개수. 0=direct-only / 1=default / 2+ 더 다양.
-  # 3: K=0/1/2/3 vias mix → 직선·1-bend·S자·이중곡선 topology 다양화.
-  curobo_max_vias_per_candidate: 3
+  # 2: K=0/1/2 vias mix → 직선·1-bend·S자 topology 다양화.
+  # (3→2 절충: K=3 누적 IK·collision fail 로 valid 비율 급락).
+  curobo_max_vias_per_candidate: 2
   # joint-space 저주파 perturbation (A안) — collision-free curobo 경로에
   # Σ_{k=1}^{K} a_k·sin(kπt) 를 더해 질적으로 다양화. start/goal joint 보존.
   # K=2~3 저주파라 매끄러운 S자/곡선 (고주파 noise 아님). 0 = off.
+  # NOTE: trajopt *후* 적용 — trajopt valid 비율과는 무관.
   curobo_joint_perturb_k: 3        # 저주파 항 개수 K
-  curobo_joint_perturb_mag: 0.13   # rad — per-joint amplitude
+  curobo_joint_perturb_mag: 0.10   # rad — per-joint amplitude
+                                   # (0.13→0.10 절충: mid joint 흔들림 ~17°)
                                    # (0.08→0.13: mid joint 흔들림 최대 ~22°)
   # SO-101: wrist_roll (joint index 4) 는 cartesian IK 가 start 값에 고정.
   fixed_joint_indices: [4]

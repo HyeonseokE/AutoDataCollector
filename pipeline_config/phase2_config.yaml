@@ -18,10 +18,10 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260524_113901/checkpoints/001400/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260524_002914/checkpoints/001050/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
-phase1_dataset_path: "CoRL2026-CSI/pnp_ours_100_table1"
+phase1_dataset_path: "CoRL2026/ours_open_drawer"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
@@ -181,7 +181,7 @@ camera_rename:
 
 # --- gRPC transport endpoint (client ↔ server 통신) ---
 transport:
-  address: "127.0.0.1:50061"
+  address: "127.0.0.1:50063"
   timeout_s: 60.0
   debug_verbose: true                  # true → [skill_planner_transport] 로그 출력
 
@@ -224,7 +224,7 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  skill_dct_parquet: "results/skill_dct/pnp_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
+  skill_dct_parquet: "results/skill_dct/ours_open_drawer.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
 
 # --- server-local SkillVectorDB 영속화 ---
@@ -254,10 +254,10 @@ remote:
   identity_file: ""                      # 예: "~/.ssh/id_ed25519"  (~ 자동 expand)
 
   # [필수] 원격 서버 운영
-  project_path: "/home/csiwoo/CORL2026/AutoDataCollector"
+  project_path: "/home/csiwoo/CORL2026/AutoDataCollector-open_drawer"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES — GPU 2 idle (GPU 0/1/3 다른 사용자 사용 중)
-  tmux_session: "phase2_server_pnp"          # 재시작 시 reuse
+  gpu_id: 0                              # 원격 CUDA_VISIBLE_DEVICES — GPU 0 (open_drawer 전용 isolation)
+  tmux_session: "phase2_server_open_drawer"   # 재시작 시 reuse; prefix unique (phase2_server_* family)
 
   # [선택] 동작 옵션
   git_pull_before_start: true

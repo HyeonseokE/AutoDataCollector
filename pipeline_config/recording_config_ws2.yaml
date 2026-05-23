@@ -3,7 +3,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026/test"
+dataset_repo_id: "CoRL2026/ours_open_drawer"
 recording_fps: 10
 robot_type: "so101"
 vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv
@@ -19,7 +19,7 @@ enable_reset_dataset_recording: true
 
 # Wrist-camera transit orientation bias.(Negative = tilted down.)
 # Multi-IK keeps only solutions whose gripper pitch ≤ this value (degrees) during is_transit=True moves. 
-transit_pitch_max_deg: -30.0
+transit_pitch_max_deg: null
 
 # =============================================================================
 # Camera Configuration
@@ -47,7 +47,7 @@ cameras:
     - name: "wrist"
       type: "opencv"
       enabled: true
-      index_or_path: "/dev/video15"
+      index_or_path: "/dev/video6"
       width: 640
       height: 480
       fps: 30
@@ -63,6 +63,7 @@ cameras:
   #     height: 480
   #     fps: 30
   #     fourcc: "MJPG"
+
 
 # =============================================================================
 # Skill Features Configuration

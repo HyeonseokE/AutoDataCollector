@@ -316,20 +316,26 @@ class CuroboBackend:
             [start_full, goal_full]
         )
 
-        # 2) Per-candidate K_via assignment.
-        #   slot 0     : K=0 (direct) — one guaranteed baseline path.
-        #   slots 1..n-1: K ~ Uniform({1, ..., max_vias}) — never zero, so
-        #                 every non-baseline candidate has at least one via
-        #                 and is structurally different from the direct path.
-        #   If max_vias == 0 (ablation), all candidates are direct.
-        K_via_per_cand: list[int] = [0]
-        if self._max_vias == 0:
-            K_via_per_cand.extend([0] * (n - 1))
-        else:
-            for _ in range(1, n):
-                K_via_per_cand.append(
-                    int(rng.integers(1, self._max_vias + 1))
-                )
+        # 2) Per-candidate K_via assignment — STRUCTURED uniform quota.
+        #   원래는 slot 0 만 K=0 (direct) guaranteed, 나머지 n-1 개는
+        #   K ∈ {1..max_vias} RNG uniform 이었다. 결과적으로 n=64, max_vias=2
+        #   일 때 K=0:1, K=1:~31, K=2:~32 로 direct path 가 거의 안 뽑혀
+        #   chosen 도 항상 via1/via2 만 — 사용자가 "랜덤" 으로 느낀 정체.
+        #
+        #   이제 K ∈ {0, 1, ..., max_vias} 전체에 deterministic 균등 분배.
+        #     n=64, max_vias=2  → K=[22, 21, 21]
+        #     n=64, max_vias=3  → K=[16, 16, 16, 16]
+        #   각 type 의 cand 가 항상 cand pool 에 존재 → Phase2 selector 가
+        #   argmax U_VLA 할 때 모든 path topology 가 후보로 들어감.
+        K_via_per_cand: list[int] = []
+        n_buckets = self._max_vias + 1
+        n_per_k = n // n_buckets
+        remainder = n % n_buckets
+        for k in range(n_buckets):
+            count = n_per_k + (1 if k < remainder else 0)
+            K_via_per_cand.extend([k] * count)
+        # K_via_per_cand 의 길이 = n. cand index 와 K type 의 sequential 결합은
+        # log/시각화 디버깅 쉽게 — shuffle 안 함 (필요시 RNG shuffle 추가 가능).
 
         # 3) For each candidate, pre-sample its (t, lat, vert) param tuples
         #    (stratified t) and convert to via xyz.

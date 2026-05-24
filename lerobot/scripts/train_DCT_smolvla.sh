@@ -40,6 +40,7 @@ if [ -z "$_CONDA_SH" ]; then
     exit 1
 fi
 # shellcheck disable=SC1091
+set +u
 source "$_CONDA_SH"
 conda activate "$CONDA_ENV"
 set -u

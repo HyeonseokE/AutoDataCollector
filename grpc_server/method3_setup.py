@@ -255,9 +255,56 @@ def setup_method3_phase2_server(
             print(f"[method3_setup] U_VLA setup failed ({e}); selection falls back to argmax M_MI")
             vla_scorer = None
 
+    # tau_U_ID auto-load — ckpt 옆 uvla_id_stats.json sidecar 에서 quantile 추출.
+    # yaml.mi_selection.tau_U_strategy ∈ {p50, p75, p90, p95, p99, mean_plus_2sigma, null}.
+    # JSON 없거나 strategy=null 이면 tau_U_ID=None (gate 미적용, 기존 동작 유지).
+    _mi_cfg = ph2_raw.get("mi_selection") or {}
+    _tau_U_strategy = _mi_cfg.get("tau_U_strategy")
+    if _tau_U_strategy and vla_scorer is not None:
+        try:
+            import json as _json
+            _vla_path = vla_cfg.get("path") or ph2_raw.get("phase1_trained_vla_path")
+            if _vla_path:
+                _stats_path = Path(_vla_path).parent / "uvla_id_stats.json"
+                if _stats_path.exists():
+                    _payload = _json.loads(_stats_path.read_text())
+                    _stats = _payload.get("stats") or {}
+                    _key = (
+                        "mean_plus_2sigma"
+                        if _tau_U_strategy == "mean_plus_2sigma"
+                        else str(_tau_U_strategy)
+                    )
+                    # mean_plus_2sigma 는 params 에 저장됨 (stats 아님).
+                    _val = (
+                        _payload.get("params", {}).get("mean_plus_2sigma")
+                        if _key == "mean_plus_2sigma"
+                        else _stats.get(_key)
+                    )
+                    if _val is not None:
+                        phase2_mi.tau_U_ID = float(_val)
+                        print(
+                            f"[method3_setup] tau_U_ID loaded ← {_stats_path.name} "
+                            f"({_tau_U_strategy}={_val:.4f}, "
+                            f"computed_at={_payload.get('computed_at', '?')})"
+                        )
+                    else:
+                        print(
+                            f"[method3_setup][warn] uvla_id_stats.json has no "
+                            f"key {_key!r} — tau_U_ID gate skipped."
+                        )
+                else:
+                    print(
+                        f"[method3_setup][warn] uvla_id_stats.json missing at "
+                        f"{_stats_path} — tau_U_ID gate skipped. "
+                        f"(run tools/eval_phase1_uvla_distribution.py)"
+                    )
+        except Exception as e:
+            print(f"[method3_setup][warn] tau_U_ID load failed ({e}); gate skipped.")
+
     print(
         f"[method3_setup] Phase2MISelector ready — "
         f"selection_mode={phase2_mi.selection_mode}, tau_MI={phase2_mi.tau_MI}, "
+        f"tau_U_ID={phase2_mi.tau_U_ID}, "
         f"k_nn_a={phase2_mi.k_nn_a}, vla_scorer={'on' if vla_scorer else 'off'}"
     )
     return Method3ServerStack(

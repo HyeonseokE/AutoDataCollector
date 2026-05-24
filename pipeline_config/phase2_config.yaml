@@ -60,6 +60,14 @@ mi_selection:
   #   "argmax"     : paper default — eligible 중 가장 헷갈리는 cand
   #   "argmedian"  : eligible 의 U_VLA 중간값 cand (outlier-robust variant)
   q1_chosen_strategy: argmedian
+  # OOD/ID gate — D_phase1 (ID) U_VLA distribution 의 quantile 을 threshold τ_U_ID
+  # 로 사용. server boot 시 {ckpt}/uvla_id_stats.json 의 stats[<strategy>] 값을
+  # 자동 로드해 Phase2MIConfig.tau_U_ID 에 주입한다. JSON sidecar 가 없으면
+  # tau_U_ID=None — gate 미적용 (기존 implicit median split 으로 fallback).
+  #   "p90" / "p95" / "p99"     — distribution quantile (paper-friendly)
+  #   "mean_plus_2sigma"        — Gaussian 95% (EnsembleDAgger 식)
+  #   null                       — gate 비활성 (backward compat)
+  tau_U_strategy: p95
   # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율

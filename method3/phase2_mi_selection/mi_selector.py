@@ -77,8 +77,14 @@ class Phase2Candidate:
     instruction: str | None = None
     proprios: np.ndarray | None = None  # (T, P) — window 별 proprio
     # method3 DCT paradigm — skill 단위 후보 trajectory 의 DCT_50 feature.
-    # (L0, action_dim). vla_dct_uncertainty.DCTDenoiseUncertainty 가 사용.
+    # joint DCT (L0, arm_dof=5). **U_VLA scorer 전용** (VLA 가 joint action 학습 →
+    # 5→6 pad 후 batch["action"] 으로 주입). MI scoring 에는 dct_target_ee 사용.
     dct_target: np.ndarray | None = None
+    # EE delta DCT (L0, 6) = [Δxyz + Δrpy] — translation invariant motion shape
+    # descriptor. **MI scoring 전용** (action_descriptors 가 이걸 사용). joint
+    # 공간 kinematic redundancy 영향 제거. SCIZOR 분야 관례 정렬. None 이면
+    # legacy fallback (dct_target = joint DCT 사용; warning).
+    dct_target_ee: np.ndarray | None = None
 
 
 @dataclass
@@ -108,15 +114,11 @@ class Phase2MIConfig:
     amb_agg: str = "mean"         # §9.4 covered aggregation: "mean" | "max"
     min_covered_windows: int = 1  # §9.1 T_min — 미만이면 under-covered
     debug_verbose: bool = False
-    # Arm-only 비교 — DB 도 candidate 도 arm-only (gripper 축 제외) 로 통일됨
-    # (DB build path 의 skill_segment_adapter 가 gripper 축을 사전 제외).
-    # 따라서 *기본은 slicing 비활성* (arm_dof == full_dof).
-    # legacy: DB 가 full_dof (arm+gripper) 로 빌드된 경우만 arm_dof < full_dof
-    # 로 두면 score_one 이 비교 시점에 db_z / db_keys 를 slice 한다.
-    #   - db_z: (N, L0*full_dof) → (N, L0, full_dof) → [:,:,:arm_dof] → (N, L0*arm_dof)
-    #   - db_keys: (N, D_vl + full_dof) → [:, :-(full_dof-arm_dof)]
-    arm_dof: Optional[int] = 5
-    full_dof: Optional[int] = 5  # = arm_dof → slicing 비활성 (DB 가 이미 arm-only)
+    # EE delta DCT 전환 후 (2026-05-24): action descriptor 가 EE 공간 (6축 =
+    # Δxyz+Δrpy) 으로 통일됨. joint-space 시절의 arm/full slicing 은 비활성
+    # (둘 다 6 → slicing 안 일어남). legacy yaml 호환을 위해 필드 자체는 유지.
+    arm_dof: Optional[int] = 6
+    full_dof: Optional[int] = 6  # = arm_dof → slicing 비활성
     dct_L0: int = 50  # DB 빌드 시 L0 — db_z reshape 용
 
     def __post_init__(self) -> None:
@@ -192,18 +194,30 @@ class Phase2MISelector:
             print(f"[Phase2-MI][debug] {msg}")
 
     def action_descriptors(self, candidate: Phase2Candidate) -> np.ndarray:
-        """후보의 action descriptor.
+        """후보의 action descriptor — MI scoring 입력.
 
-        paradigm step [6] — candidate 의 skill 단위 DCT feature
-        ``dct_target (L0, dof)`` 를 flatten 한 (1, L0·dof) 를 single-window z
-        로 사용 (skill-atomic representation, DCT skill-unit paradigm).
+        EE delta DCT 전환 후 (2026-05-24): candidate.dct_target_ee 우선 사용.
+        translation-invariant motion shape descriptor 로 joint kinematic
+        redundancy 영향 제거. legacy candidate (dct_target_ee 없음) 는 joint
+        DCT 로 fallback (paradigm 호환).
         """
-        z = candidate.dct_target
+        z = getattr(candidate, "dct_target_ee", None)
         if z is None:
-            raise ValueError(
-                "candidate.dct_target 이 None — "
-                "curobo_candidate_gen 의 dct_target 필드 채움이 필요합니다."
-            )
+            # legacy fallback — joint DCT. warn 1회.
+            if not getattr(self, "_warned_legacy_dct", False):
+                print(
+                    "[Phase2-MI][warn] candidate.dct_target_ee 가 None — "
+                    "joint DCT fallback. EE delta DCT 전환 후엔 candidate gen "
+                    "단계에서 dct_target_ee 가 항상 채워져야 한다.",
+                    flush=True,
+                )
+                self._warned_legacy_dct = True
+            z = candidate.dct_target
+            if z is None:
+                raise ValueError(
+                    "candidate 에 dct_target_ee 와 dct_target 모두 None — "
+                    "MI scoring 불가."
+                )
         arr = np.asarray(z, dtype=np.float64).reshape(1, -1)
         return arr
 

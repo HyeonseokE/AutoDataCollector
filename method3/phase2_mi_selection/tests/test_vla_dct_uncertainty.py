@@ -75,15 +75,15 @@ def test_dct_mode_action_replaced_with_dct_target():
     np.testing.assert_allclose(call["action"].numpy()[0], z, atol=1e-6)
 
 
-def test_dct_mode_single_step_forced():
-    # R=1 강제 (param 으로 R 더 큰 값을 줘도 1 회만 forward).
+def test_dct_mode_runs_R_times():
+    # paper §3.4 식 (18) — dct mode 도 R 회 forward (noise z 매번 random).
     policy = _FakePolicy()
     scorer = LeRobotVLAInformativenessScorer(
-        policy=policy, batch_builder=_identity_builder, mode="dct", R=99
+        policy=policy, batch_builder=_identity_builder, mode="dct", R=4
     )
     z = np.zeros((50, 6))
     scorer.score(_make_candidate(dct_target=z))
-    assert len(policy.calls) == 1
+    assert len(policy.calls) == 4
 
 
 def test_dct_mode_sigma_passed_as_time():

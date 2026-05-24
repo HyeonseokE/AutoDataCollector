@@ -115,7 +115,9 @@ class LeRobotVLAInformativenessScorer:
             None 이면 ``candidate.observations`` 를 그대로 batch 로 사용 (caller 가
             family-aware 로 미리 채워 넣는 패턴). family-별 transform 이 필요하면
             explicit builder 를 등록.
-        R: §12.1 stochastic denoise eval 횟수. mode="dct" 에선 항상 1 (override).
+        R: §3.4 식 (18) stochastic denoise eval 횟수 — noise z ∼ N(0,I) 를
+            R 회 sample 하여 (1/R) Σ_r L^{(r)} 평균. mode="dct" 도 동일하게
+            적용 (sigma=0.5 는 time fix, noise 는 여전히 random).
         agg: ``mean`` 또는 ``max`` — R 번 loss 의 trajectory-level aggregator.
         mode: ``"default"`` | ``"dct"`` — 위 두 mode 참조.
         sigma: mode="dct" 전용. None=policy 내부 schedule sample, float=forward 의
@@ -293,16 +295,28 @@ class LeRobotVLAInformativenessScorer:
                             _time = _time.to(_dev)
                         forward_kwargs["time"] = _time
                     # reduction="none" → per-sample loss (chunk_n,).
+                    # paper §3.4 식 (18): U_VLA = Agg_τ [(1/R) Σ_r L^{(r)}]
+                    # sigma=0.5 는 time deterministic 이지만 forward 내부
+                    # noise z ∼ N(0,I) 는 매 호출 random — R 회 forward 평균/최대
+                    # 로 noise variance 를 줄여야 paper 정의와 일치한다.
                     _t_f = _tmod.perf_counter()
                     _tb_build += _t_f - _t_c
-                    out_t = self.policy.forward(
-                        batch, reduction="none", **forward_kwargs
+                    effective_R = max(1, int(self.R))
+                    loss_per_r = np.empty((effective_R, cn), dtype=float)
+                    for _r in range(effective_R):
+                        out_t = self.policy.forward(
+                            batch, reduction="none", **forward_kwargs
+                        )
+                        loss_t = out_t[0] if isinstance(out_t, tuple) else out_t
+                        loss_per_r[_r] = np.asarray(
+                            loss_t.detach().cpu().numpy(), dtype=float
+                        ).reshape(-1)[:cn]
+                    loss_np = (
+                        loss_per_r.max(axis=0)
+                        if self.agg == "max"
+                        else loss_per_r.mean(axis=0)
                     )
-                    loss_t = out_t[0] if isinstance(out_t, tuple) else out_t
-                    loss_np = np.asarray(
-                        loss_t.detach().cpu().numpy(), dtype=float
-                    ).reshape(-1)
-                    out[start:start + len(chunk)] = loss_np[:len(chunk)]
+                    out[start:start + cn] = loss_np
                     _tb_fwd += _tmod.perf_counter() - _t_f
         finally:
             if was_training and hasattr(self.policy, "train"):

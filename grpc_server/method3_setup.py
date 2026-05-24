@@ -248,7 +248,7 @@ def setup_method3_phase2_server(
             )
             print(
                 f"[method3_setup] U_VLA scorer ENABLED (mode={scorer_mode}, "
-                f"R={'1' if scorer_mode == 'dct' else vla_scorer.R}, "
+                f"R={vla_scorer.R}, agg={vla_scorer.agg}, "
                 f"sigma={vla_scorer.sigma})"
             )
         except Exception as e:

@@ -114,7 +114,7 @@ skill_perturbation:
   curobo_num_trajopt_seeds: 4
   curobo_num_ik_seeds: 16
   curobo_use_cuda_graph: true     # graph capture 1회 → plan latency 50ms→5ms
-  curobo_via_offset_mag: 0.15     # m — via-point 가 직선에서 떨어지는 거리
+  curobo_via_offset_mag: 0.10     # m — via-point 가 직선에서 떨어지는 거리
                                   # (0.22→0.18 절충: 0.22 는 workspace 경계 넘어
                                   # via IK fail 다수 발생 → trajopt 0 valid).
                                   # 2026-05-24 trial: 0.18→0.25 시도했으나 vert

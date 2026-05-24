@@ -67,7 +67,8 @@ mi_selection:
   #   "p90" / "p95" / "p99"     — distribution quantile (paper-friendly)
   #   "mean_plus_2sigma"        — Gaussian 95% (EnsembleDAgger 식)
   #   null                       — gate 비활성 (backward compat)
-  tau_U_strategy: p90
+  tau_U_strategy: null   # gate 일단 비활성 (sidecar JSON 은 있으나 미적용).
+                         # 후에 "p90"/"p95"/"p99"/"mean_plus_2sigma" 로 켜기.
   # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율

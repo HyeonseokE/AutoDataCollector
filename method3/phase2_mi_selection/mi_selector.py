@@ -125,10 +125,10 @@ class Phase2MIConfig:
         # 기존 yaml 들이 accept_threshold 만 지정하던 호환 경로를 보존.
         if self.accept_threshold is not None:
             self.tau_MI = float(self.accept_threshold)
-        # selection_mode validation (Table 6 Quadrant Validation).
-        if self.selection_mode not in ("Q1", "Q2", "Q3", "Q4"):
+        # selection_mode validation (Table 6 Quadrant Validation + median variants).
+        if self.selection_mode not in ("Q1", "Q2", "Q3", "Q4", "Qmed", "Qmed_neg"):
             raise ValueError(
-                f"selection_mode must be one of Q1/Q2/Q3/Q4, "
+                f"selection_mode must be one of Q1/Q2/Q3/Q4/Qmed/Qmed_neg, "
                 f"got {self.selection_mode!r}"
             )
 
@@ -376,16 +376,16 @@ class Phase2MISelector:
         u_vla = np.zeros(len(candidates), dtype=np.float64)
 
         # Stage 2 — eligible: selection_mode 별 분기 (Table 6 Quadrant Validation).
-        #   Q1/Q3 (positive side):  M̃_MI ≥ +τ_MI  (Useful OOD / Useful ID)
-        #   Q2/Q4 (negative side):  M̃_MI ≤ -τ_MI  (Harmful OOD / Redundant ID)
+        #   Q1/Q3/Qmed (positive side):  M̃_MI ≥ +τ_MI  (Useful OOD / Useful ID / Useful median)
+        #   Q2/Q4/Qmed_neg (negative side):  M̃_MI ≤ -τ_MI  (Harmful OOD / Redundant ID)
         # under_covered 후보는 모든 mode 에서 제외 (Phase2 신뢰성 보장).
         _mode = cfg.selection_mode
-        if _mode in ("Q1", "Q3"):
+        if _mode in ("Q1", "Q3", "Qmed"):
             eligible = [
                 i for i, r in enumerate(reports)
                 if m_mi_norm[i] >= cfg.tau_MI and not r.under_covered
             ]
-        else:  # Q2, Q4
+        else:  # Q2, Q4, Qmed_neg
             eligible = [
                 i for i, r in enumerate(reports)
                 if m_mi_norm[i] <= -cfg.tau_MI and not r.under_covered
@@ -436,33 +436,40 @@ class Phase2MISelector:
         # Stage 3 — mode 별 chosen 선택 (Table 6 Quadrant Validation).
         #   Q1, Q2: argmax U_VLA  (VLA-novel 우선)
         #   Q3, Q4: argmin U_VLA  (VLA-familiar 우선)
+        #   Qmed/Qmed_neg: argmedian U_VLA (extreme 회피 — middle informativeness)
         # fallback (eligible=∅):
-        #   Q1, Q3 (positive side): argmax M_MI    (가장 useful 한 candidate)
-        #   Q2, Q4 (negative side): argmin M_MI    (가장 not-useful 한 candidate)
-        _side = "≥+τ_MI" if _mode in ("Q1", "Q3") else "≤-τ_MI"
+        #   Q1, Q3, Qmed (positive side): argmax M_MI    (가장 useful 한 candidate)
+        #   Q2, Q4, Qmed_neg (negative side): argmin M_MI    (가장 not-useful 한 candidate)
+        _side = "≥+τ_MI" if _mode in ("Q1", "Q3", "Qmed") else "≤-τ_MI"
         if eligible:
             if vla_scorer is not None:
                 if _mode in ("Q1", "Q2"):
                     chosen = max(eligible, key=lambda i: u_vla[i])
                     rule = f"argmax U_VLA s.t. M̃_MI{_side}  [{_mode}]"
+                elif _mode in ("Qmed", "Qmed_neg"):
+                    # argmedian — eligible 을 U_VLA 로 정렬해 중앙값 index 선택.
+                    # 짝수 개일 때 lower-median (n//2) — 안정적 (numpy median 과 다름).
+                    _sorted = sorted(eligible, key=lambda i: u_vla[i])
+                    chosen = _sorted[len(_sorted) // 2]
+                    rule = f"argmedian U_VLA s.t. M̃_MI{_side}  [{_mode}]"
                 else:  # Q3, Q4
                     chosen = min(eligible, key=lambda i: u_vla[i])
                     rule = f"argmin U_VLA s.t. M̃_MI{_side}  [{_mode}]"
             else:
                 # vla_scorer=None backward-compat — U_VLA 대신 M_MI 정렬.
-                if _mode in ("Q1", "Q3"):
+                if _mode in ("Q1", "Q3", "Qmed"):
                     chosen = max(eligible, key=lambda i: m_mi[i])
                     rule = f"argmax M_MI s.t. M̃_MI{_side}  (vla_scorer=None) [{_mode}]"
-                else:  # Q2, Q4
+                else:  # Q2, Q4, Qmed_neg
                     chosen = min(eligible, key=lambda i: m_mi[i])
                     rule = f"argmin M_MI s.t. M̃_MI{_side}  (vla_scorer=None) [{_mode}]"
             accepted = True
         else:
             # fallback — eligible 이 비면 mode 별로 argmax/argmin M_MI.
-            if _mode in ("Q1", "Q3"):
+            if _mode in ("Q1", "Q3", "Qmed"):
                 chosen = int(np.argmax(m_mi))
                 rule = f"fallback argmax M_MI (no eligible) [{_mode}]"
-            else:  # Q2, Q4
+            else:  # Q2, Q4, Qmed_neg
                 chosen = int(np.argmin(m_mi))
                 rule = f"fallback argmin M_MI (no eligible) [{_mode}]"
             accepted = False

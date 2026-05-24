@@ -101,11 +101,24 @@ class TaskRunner:
 
     @staticmethod
     def _call_entry_function(exec_globals: Dict):
-        """exec_globals에서 execute_task 또는 execute_reset_task를 호출."""
+        """exec_globals에서 execute_task 또는 execute_reset_task를 호출.
+
+        Reset transport는 seed→seed 이동이라 forward의 carry-pitch lock 이
+        오히려 IK 실패를 유발 (steep pick pitch 가 새 위치에서 unreachable).
+        execute_reset_task 진입 직전에 skills.disable_holding_pitch_lock 을
+        True 로 켜서 holding-phase pitch lock 을 우회한다.
+        """
         if "execute_task" in exec_globals:
             exec_globals["execute_task"]()
         elif "execute_reset_task" in exec_globals:
-            exec_globals["execute_reset_task"]()
+            skills = exec_globals.get("skills")
+            if skills is not None:
+                setattr(skills, "disable_holding_pitch_lock", True)
+            try:
+                exec_globals["execute_reset_task"]()
+            finally:
+                if skills is not None:
+                    setattr(skills, "disable_holding_pitch_lock", False)
 
 
 class SingleArmTaskRunner(TaskRunner):

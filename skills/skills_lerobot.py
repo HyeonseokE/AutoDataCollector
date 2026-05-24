@@ -152,6 +152,12 @@ class LeRobotSkills:
         self.use_deceleration = use_deceleration
         self.verbose = verbose
         self.pick_offset = pick_offset  # Fixed offset from object top for pick/place
+        # Holding-phase transit pitch lock toggle. When True (default), move_to_position
+        # with is_transit=True and _saved_pitch set forces the saved grasp pitch (good
+        # for forward — keeps the carried object oriented). Reset transports between
+        # arbitrary seed positions often hit unreachable poses at the saved pitch, so
+        # task_runner flips this False before executing execute_reset_task.
+        self.disable_holding_pitch_lock: bool = False
         self.RECORDING_FPS = int(recording_fps)  # instance attr shadows class default
         self.skill_sequence = []  # 실행된 스킬 시퀀스 기록 (후처리 라벨링용)
         # episode 시작 시 connect() 가 snapshot — 현재 skill 의 episode-내
@@ -2226,13 +2232,16 @@ class LeRobotSkills:
             current_pitch = active_planner.kinematics.get_gripper_pitch(current_joints)
             ik_target_pitch = current_pitch
             self._log(f"  Maintaining pitch at {np.degrees(current_pitch):.1f}°")
-        elif is_transit and getattr(self, "_saved_pitch", None) is not None:
+        elif (is_transit and getattr(self, "_saved_pitch", None) is not None
+                and not getattr(self, "disable_holding_pitch_lock", False)):
             # Holding-phase transit: an object is grasped (pick saved its
             # grasp pitch, place clears it). Keep that pitch through lift /
             # move-over so the held object stays oriented and the place
             # descent does not need a large wrist re-orientation at the
             # hover. The ±20° IK retry below relaxes it when the saved
             # (steep) pitch is unreachable at the higher transit z.
+            # Disabled in reset transports (disable_holding_pitch_lock=True) —
+            # arbitrary seed-to-seed moves often hit pitch-unreachable poses.
             ik_target_pitch = self._saved_pitch
             self._log(f"  Holding-phase pitch: {np.degrees(self._saved_pitch):.1f}° (saved grasp)")
 

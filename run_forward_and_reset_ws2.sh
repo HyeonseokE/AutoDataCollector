@@ -162,7 +162,7 @@ RECORD_DATASET=true
 #            re-embedding 자동 구축. HF repo_id ("user/name") 도 그대로 인식 —
 #            로컬 캐시 miss 면 lerobot 가 다운로드.
 # ============================================================
-PHASE="phase1"
+PHASE="phase2"
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기

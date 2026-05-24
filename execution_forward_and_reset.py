@@ -3500,18 +3500,12 @@ class ForwardAndResetPipeline(BasePipeline):
                     )
                     result['judge'] = judge_result
 
-                    # VLM 의 실제 판정은 log/JSON 에 그대로 보존하되, 데이터셋
-                    # 로깅 결정에 쓰는 prediction 만 항상 TRUE 로 박는다.
-                    # → 모든 episode 가 dataset + subgoal_buffer 에 누적.
-                    _vlm_pred = judge_result.get('prediction', 'UNCERTAIN')
-                    _vlm_reason = judge_result.get('reasoning', '')
-                    _vlm_color = GREEN if _vlm_pred == "TRUE" else RED if _vlm_pred == "FALSE" else YELLOW
-                    print(f"  [VLM raw] Prediction: {_vlm_color}{_vlm_pred}{RESET}")
-                    print(f"  [VLM raw] Reasoning : {_vlm_reason[:100]}...")
-                    judge_result['prediction'] = 'TRUE'   # ← override
-                    judge_prediction = 'TRUE'
-                    reasoning = f"[OVERRIDDEN to TRUE] vlm_raw={_vlm_pred}: {_vlm_reason}"
-                    print(f"  Prediction: {GREEN}TRUE (overridden){RESET}")
+                    judge_prediction = judge_result.get('prediction', 'UNCERTAIN')
+                    reasoning = judge_result.get('reasoning', '')
+
+                    pred_color = GREEN if judge_prediction == "TRUE" else RED if judge_prediction == "FALSE" else YELLOW
+                    print(f"  Prediction: {pred_color}{judge_prediction}{RESET}")
+                    print(f"  Reasoning: {reasoning[:100]}...")
                     # Judge 비용을 llm_cost.json에 추가
                     try:
                         from judge.vlm import _call_gemini_vlm

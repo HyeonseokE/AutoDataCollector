@@ -637,6 +637,40 @@ def lerobot_code_gen_multi_turn(
 
     assert valid_objects, "No valid bboxes detected from Turn 1"
 
+    # ── Identical-object canonical re-labeling ──
+    # 동일 종류 객체가 둘 이상이면 (예: chocolate_pie × 2, red_plate × 2) VLM
+    # 이 run 마다 임의 순서로 labeling 한다 ("chocolate_pie_1" vs
+    # "chocolate_pie_2" swap). 그러면 Phase2 subgoal replay 가 phase1 의 첫
+    # pick subgoal 좌표를 phase2 의 *다른* pie 에 적용 → perturbation 무의미.
+    # 해결: base_label (trailing `_\d+` 또는 ` \d+` 제거) 별로 group + cx asc
+    # 로 sort + `{base}_0, {base}_1, ...` 강제 → run-to-run deterministic.
+    import re as _re
+    def _base_label(_lbl: str) -> str:
+        return _re.sub(r"[_\s]\d+$", "", str(_lbl)).strip()
+    _by_base: Dict[str, List[dict]] = {}
+    for _obj in valid_objects:
+        _by_base.setdefault(_base_label(_obj["label"]), []).append(_obj)
+    _renamed = 0
+    for _base, _grp in _by_base.items():
+        if len(_grp) < 2:
+            continue
+        # group 내 cx (bbox center x) asc sort. box_2d = [ymin,xmin,ymax,xmax].
+        _grp.sort(key=lambda _o: 0.5 * (_o["box_2d"][1] + _o["box_2d"][3]))
+        for _i, _o in enumerate(_grp):
+            _new = f"{_base}_{_i}"
+            _old = _o["label"]
+            if _old == _new:
+                continue
+            _o["label"] = _new
+            # strategy_by_label 도 동기화
+            if _old in strategy_by_label:
+                strategy_by_label[_new] = strategy_by_label.pop(_old)
+            _renamed += 1
+            print(f"    [canonical-sort] {_old} → {_new} (cx={0.5*(_o['box_2d'][1]+_o['box_2d'][3]):.0f})")
+    if _renamed:
+        print(f"    [canonical-sort] re-labeled {_renamed} identical-object instances "
+              f"(deterministic skill_ordinal across Phase1↔Phase2)")
+
     # 이미지 로드
     full_img = cv2.imread(image_path)
     assert full_img is not None, f"Cannot read image: {image_path}"

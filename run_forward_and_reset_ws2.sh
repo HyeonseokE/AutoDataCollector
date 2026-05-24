@@ -10,64 +10,14 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# lerobot 패키지는 src layout (lerobot/src/lerobot/) — Python 3.12+ 요구라
+# lerobot_cap 에 pip install -e 거부. PYTHONPATH 로 잡는다 (PARALLEL_TASKS.md §3(c)).
+# 누락 시 `ModuleNotFoundError: No module named 'lerobot.utils'` 로 record 가 fail.
+export PYTHONPATH="$SCRIPT_DIR/lerobot/src:${PYTHONPATH:-}"
+
 # ============================================================
 # 핵심 설정 (Essential Configuration) / 워크스페이스 명시 / 에피소드 갯수 명시
 # ============================================================
-
-# # Grasping:                                                                  
-# (1, 완료) pick up the red block and place it on the blue plate
-# (2, 완료) distribute chocolate pies to each plate                           
-# (3) -
-
-# # Arrangement:                                                               
-# (1, 완료) place the yellow block between chocolate pies             
-# (2, 완료) arrange yellow, red, and purple blocks in a line from left to right
-# (3, 완료) stack the blocks in the order of red and yellow
-# (3, 완료) stack the blocks in the order of red and yellow, purple
-
-# # Non-grasping:
-# (1, 성공) turn on the microphone by pressing the power button
-# (2, 성공) Push the bowl of cereal 5cm from left to right
-# (3, 성공) Open the trash can lid
-
-# # Deformable:
-# (1, 완료) fold the towel
-# (2) sweep the floor with a towel
-# (3) bend the microphone gooseneck leftward
-
-# # Articulated:
-# (1) open the drawers
-# (2) close the drawers
-# (3) beat the red block with a hammer
-
-# # Insertion/Assembly:
-# (1) assemble the battery pack
-# (2) peg-in-hole
-# (3) clean the desk
-
-# # Rotation:
-# (1) tighten the bolt
-# (2) open the bottle
-# (3) mix the tea
-
-# # Contact-rich:
-# (1) wipe the dish with a sponge
-# (2) sweep the floor with a brush
-# (3) shake the bottle
-
-# INSTRUCTION="make sandwich using the ingredients on the table"
-# INSTRUCTION="pick up the red block and place it on the blue dish"
-# INSTRUCTION="fold the green towel"
-# INSTRUCTION="pick up the brown peg and insert it into the hole of the gray structure"
-# INSTRUCTION = "Pick up the banana and place it in the bowl. 
-# You may need to handover the banana from one arm to the other if the initial arm picking the banana cannot reach the bowl. 
-# After picking the banana with one arm, you can handover the banana by first placing it carefully on the table surface and then using the other arm to pick it up. 
-# The placing position must be on the table, as far as possible from other objects but absolutely within the reachable table area of the other arm. 
-# Make sure to move the picking arm out of the way before the receiving arm moves towards grasping the object."
-
-# INSTRUCTION="Assemble the green hinge and red hinge.
-# You need to carefully assemble the green hinge's male part to red hinge's hole part.
-# since the green hinge's male part is upward, you need to rotate it downward first before assembling."
 
 # [필수] 로봇 번호 배열 — 순서가 arm 그룹을 결정 (최대 4대):
 #   ROBOT_IDS[0] → left_arm
@@ -89,8 +39,8 @@ ROBOT_IDS=(0)
 # RESET_INSTRUCTION="Close the top drawer 7cm."
 
 # close pot
-INSTRUCTION="Open the top drawer 7cm."
-RESET_INSTRUCTION="Close the top drawer 7cm."
+# INSTRUCTION="Close the top drawer 7cm."
+# RESET_INSTRUCTION="Open the top drawer 7cm."
 
 # ## pick and place
 # INSTRUCTION="pick up the red block and place it on the blue dish"
@@ -108,8 +58,8 @@ RESET_INSTRUCTION="Close the top drawer 7cm."
 # RESET_INSTRUCTION=""
 
 ## distribute chocolatepies
-# INSTRUCTION="distribute chocolate pies to each plate."
-# RESET_INSTRUCTION=""
+INSTRUCTION="distribute chocolate pies to each plate."
+RESET_INSTRUCTION=""
 
 ### ==================== [dual arm task] ==================
 ## towel folding
@@ -162,12 +112,12 @@ RECORD_DATASET=true
 #            re-embedding 자동 구축. HF repo_id ("user/name") 도 그대로 인식 —
 #            로컬 캐시 miss 면 lerobot 가 다운로드.
 # ============================================================
-PHASE="phase2"
+PHASE="phase1"
 
 # Resume 설정 (이전 세션 이어받기)
 # 비어있으면 새 세션, 경로 지정 시 이전 세션 이어받기
 # RESUME_SESSION="./results/distribute_chocolatepies"
-RESUME_SESSION="./results/session_20260523_220703"
+RESUME_SESSION=""
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

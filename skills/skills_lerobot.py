@@ -152,12 +152,14 @@ class LeRobotSkills:
         self.use_deceleration = use_deceleration
         self.verbose = verbose
         self.pick_offset = pick_offset  # Fixed offset from object top for pick/place
-        # Holding-phase transit pitch lock toggle. When True (default), move_to_position
-        # with is_transit=True and _saved_pitch set forces the saved grasp pitch (good
-        # for forward — keeps the carried object oriented). Reset transports between
-        # arbitrary seed positions often hit unreachable poses at the saved pitch, so
-        # task_runner flips this False before executing execute_reset_task.
-        self.disable_holding_pitch_lock: bool = False
+        # Holding-phase transit pitch lock toggle.
+        # Default True: transit moves never lock to saved grasp pitch — IK picks
+        # any reachable orientation. Place skills (execute_place_object /
+        # execute_place_lid) explicitly restore the saved pick pitch at descend
+        # via target_pitch=saved_pitch, so transit locking is redundant AND
+        # causes IK failures at high-z transit waypoints. Set False only for
+        # legacy rigid-carry-orientation behavior.
+        self.disable_holding_pitch_lock: bool = True
         self.RECORDING_FPS = int(recording_fps)  # instance attr shadows class default
         self.skill_sequence = []  # 실행된 스킬 시퀀스 기록 (후처리 라벨링용)
         # episode 시작 시 connect() 가 snapshot — 현재 skill 의 episode-내
@@ -2533,15 +2535,13 @@ class LeRobotSkills:
                     (_cl.lower_limits_radians, _cl.upper_limits_radians)
                     if _cl is not None else None
                 )
-                # via: target xy, held at ~70% of original height (=descend only
-                # VIA_DESCENT_FRAC of the way down). With VIA_DESCENT_FRAC=0.30
-                # the Bezier curve passes near (target_xy, 70%-high z) at its
-                # midpoint — xy is essentially aligned by then, and the latter
-                # half of the trajectory is mostly pure z descent. More
-                # pronounced staging than the previous 0.15 (which kept via
-                # near 85% high; xy convergence was earlier but z stayed nearly
-                # untouched for too long, producing a sharper kink at via).
-                VIA_DESCENT_FRAC = 0.30
+                # via: target xy, held at ~80% of original height (=descend only
+                # VIA_DESCENT_FRAC of the way down). With VIA_DESCENT_FRAC=0.20
+                # the Bezier curve front-loads xy correction in the first ~20%
+                # of the descent, then the remaining ~80% is mostly pure z
+                # descent. This matches the user-requested "xy 먼저 빠르게
+                # 20% 구간 내에 복원하고 이후 z 구간 다 내려가는" pattern.
+                VIA_DESCENT_FRAC = 0.20
                 via_z = current_ee[2] + VIA_DESCENT_FRAC * (
                     ik_target_position[2] - current_ee[2]
                 )

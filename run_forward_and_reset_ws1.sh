@@ -95,7 +95,7 @@ RECORD_DATASET=true
 PHASE="phase1"
 
 # Resume 설정 (이전 세션 이어받기)
-RESUME_SESSION="./results/session_20260524_105628"
+RESUME_SESSION="./results/session_20260525_021200"
 # RESUME_SESSION="./results/session_20260319_174942"
 
 # ============================================================

@@ -3,7 +3,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026/close_pot_ours_100_table1"
+dataset_repo_id: "CoRL2026/close_pot_ours_100_table1_"
 recording_fps: 10
 robot_type: "so101"
 vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv
@@ -19,8 +19,8 @@ enable_reset_dataset_recording: true
 
 # Wrist-camera transit orientation bias.(Negative = tilted down.)
 # Multi-IK keeps only solutions whose gripper pitch ≤ this value (degrees) during is_transit=True moves. 
-transit_pitch_max_deg: -30.0
-# transit_pitch_max_deg: null 
+# transit_pitch_max_deg: -30.0
+transit_pitch_max_deg: null 
 
 # =============================================================================
 # Camera Configuration

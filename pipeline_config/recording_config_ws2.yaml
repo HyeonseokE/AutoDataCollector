@@ -3,7 +3,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026/ours_open_drawer"
+dataset_repo_id: "CoRL2026/table1/ours_close_drawer"
 recording_fps: 10
 robot_type: "so101"
 vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv

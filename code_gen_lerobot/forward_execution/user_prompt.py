@@ -128,6 +128,7 @@ def lerobot_code_gen_prompt(
          - After descent, drags the lid by `pull_distance` (default 2cm) in the -x direction (toward the robot base) with the gripper still closed, then opens the gripper. This compensates for systematic +x landing offset so the lid sits centered on the rim.
          - Pass the container's position as-is (e.g. `positions["pot"]["position"]`). Leave `pull_distance` at default unless instructed otherwise. Use `gripper_open_ratio=0.7`.
          - Do NOT use execute_place_object for lids — use execute_place_lid.
+         - **DO NOT emit ANY retreat / move_to_position / gripper_action="close" after `execute_place_lid`**. Go directly to `move_to_initial_state()`. Closing the gripper at lid height (or moving sideways at lid height before lifting) re-catches or knocks the lid.
 
        **execute_press**: Call from approach position with gripper closed. 2-phase descent: normal speed to contact surface, then slow press with torque limit (400/1000).
 
@@ -192,7 +193,7 @@ def lerobot_code_gen_prompt(
 
        skills.move_to_position([lid_target_pos[0], lid_target_pos[1], approach_height], target_name="pot", skill_description="Move lid above pot", verification_question="Is the lid above the pot?")
        skills.execute_place_lid(lid_target_pos, gripper_open_ratio=0.7, target_name="pot", skill_description="Place lid on pot and seat it", verification_question="Is the lid centered and seated on the pot?")
-       skills.move_to_position([lid_target_pos[0] - 0.02, lid_target_pos[1], approach_height], target_name="pot", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from pot and close gripper", verification_question="Is the gripper clear of the pot and closed?")
+       # NO retreat-with-close after execute_place_lid — go directly to move_to_initial_state. Closing the gripper at lid height re-catches the lid.
 
        # LATERAL PICK pattern (approach from side at object height WHILE opening gripper, then slide in):
        # Use when the object is thin/tall and top-down approach is not suitable (e.g., gooseneck, handle, lever).
@@ -467,7 +468,7 @@ lid_target = positions["pot"]   # container the lid sits on
 lid_target_pos = lid_target["position"]
 skills.move_to_position([lid_target_pos[0], lid_target_pos[1], approach_height], target_name="pot")
 skills.execute_place_lid(lid_target_pos, gripper_open_ratio=0.7, target_name="pot")
-skills.move_to_position([lid_target_pos[0] - 0.02, lid_target_pos[1], approach_height], target_name="pot", gripper_action="close", gripper_start_fraction=0.2)
+# NO retreat-with-close after execute_place_lid — proceed directly to move_to_initial_state.
 
 # LATERAL PICK — approach from side at object height (for thin/tall objects like gooseneck, handle, lever)
 # Determine offset direction from scene analysis — approach from obstacle-free side
@@ -682,7 +683,7 @@ lid_target = positions["pot"]
 lid_target_pos = lid_target["position"]
 skills.move_to_position([lid_target_pos[0], lid_target_pos[1], approach_height], target_name="pot", skill_description="Move lid above pot", verification_question="Is the lid above the pot?")
 skills.execute_place_lid(lid_target_pos, gripper_open_ratio=0.7, target_name="pot", skill_description="Place lid on pot and seat it", verification_question="Is the lid centered and seated on the pot?")
-skills.move_to_position([lid_target_pos[0] - 0.02, lid_target_pos[1], approach_height], target_name="pot", gripper_action="close", gripper_start_fraction=0.2, skill_description="Retreat from pot and close gripper", verification_question="Is the gripper clear of the pot and closed?")
+# NO retreat-with-close after execute_place_lid — proceed directly to move_to_initial_state. Closing the gripper at lid height re-catches the lid.
 
 # PLACE AT PIXEL (is_table=True) — target is NOT in positions dict (e.g., empty spot on table)
 # Specify [y, x] in normalized 0–1000 coordinates from the top-view image.

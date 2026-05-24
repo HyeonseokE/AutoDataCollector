@@ -655,12 +655,7 @@ def serve(args: argparse.Namespace) -> None:
                 _ccp = _proj_root / _ccp
             if _ccp.exists():
                 with open(_ccp) as _f:
-                    _yaml_data = yaml.safe_load(_f) or {}
-                # curobo robot yml 구조: kinematics.urdf_path (nested 1-level).
-                # 1차 top-level 시도, 2차 nested kinematics.urdf_path fallback.
-                _raw_urdf = _yaml_data.get("urdf_path")
-                if not _raw_urdf:
-                    _raw_urdf = (_yaml_data.get("kinematics") or {}).get("urdf_path")
+                    _raw_urdf = (yaml.safe_load(_f) or {}).get("urdf_path")
                 if _raw_urdf:
                     # 1차 시도: yaml 의 절대경로 그대로
                     if Path(_raw_urdf).exists():

@@ -78,39 +78,40 @@ def ee_delta_dct_from_poses(
     return traj_to_dct(deltas, L0=L0)                        # (L0, 6)
 
 
+def _quat_wxyz_to_rotmat(q_wxyz: np.ndarray) -> np.ndarray:
+    """quaternion [w, x, y, z] (scalar first — curobo Pose convention) → 3x3 R."""
+    w, x, y, z = q_wxyz
+    return np.array([
+        [1 - 2*(y*y + z*z),  2*(x*y - z*w),      2*(x*z + y*w)],
+        [2*(x*y + z*w),      1 - 2*(x*x + z*z),  2*(y*z - x*w)],
+        [2*(x*z - y*w),      2*(y*z + x*w),      1 - 2*(x*x + y*y)],
+    ], dtype=np.float64)
+
+
 def ee_delta_dct_from_joints(
     joint_traj: np.ndarray,
     urdf_path: str,
     L0: int = 50,
     ee_frame: str = "gripper_frame_link",
     arm_dof: int = 5,
+    kinematics_engine=None,
 ) -> np.ndarray:
     """joint 시계열 → FK → EE pose → delta → DCT.
 
-    curobo candidate 는 ``waypoints`` 가 joint 5-axis 라 FK 필요. 데이터셋
-    측 entry 는 ``observation.ee_pos.robot_xyzrpy`` 가 이미 있어 FK 불필요.
-    두 경로 모두 결과 dim (L0, 6) 으로 통일.
-
     Args:
-        joint_traj: (T, dof) joint trajectory (arm joints; gripper 무시).
-            앞 ``arm_dof`` 열만 사용.
-        urdf_path: URDF 파일 절대/repo-relative 경로.
+        joint_traj: (T, dof) joint trajectory.
+        urdf_path: URDF path (legacy fallback path 에서만 사용).
         L0: DCT 길이.
-        ee_frame: FK 대상 link name. so101 = "gripper_frame_link".
-        arm_dof: FK 입력 dim (so101 = 5).
+        ee_frame: FK 대상 link.
+        arm_dof: arm joint 수.
+        kinematics_engine: server-side 에서 이미 부팅된 curobo Kinematics
+            (= MotionPlanner.kinematics). 주입되면 curobo 의 batched FK 직접
+            사용 — ``lerobot_cap`` chain (scservo_sdk 의존) 우회. 권장.
+            None 이면 legacy ``traj_analysis.fk_ee`` 경로 (client/local 만).
 
     Returns:
         (L0, 6) EE delta DCT.
     """
-    import sys
-    from pathlib import Path
-
-    # FK 라이브러리 — lerobot/scripts/traj_analysis/fk_ee 재사용 (이미 viz tool 사용).
-    _scripts = Path(__file__).resolve().parent.parent.parent / "lerobot" / "scripts"
-    if str(_scripts) not in sys.path:
-        sys.path.insert(0, str(_scripts))
-    from traj_analysis.fk_ee import get_kinematics
-
     traj = np.asarray(joint_traj, dtype=np.float64)
     if traj.ndim != 2:
         raise ValueError(f"joint_traj must be (T, dof), got {traj.shape}")
@@ -119,11 +120,48 @@ def ee_delta_dct_from_joints(
             f"joint_traj.shape[1]={traj.shape[1]} < arm_dof={arm_dof}"
         )
 
-    kin = get_kinematics(urdf_path, ee_frame)
     T = traj.shape[0]
     poses = np.empty((T, 6), dtype=np.float64)
-    for i in range(T):
-        pos, R = kin.forward_kinematics(traj[i, :arm_dof].astype(np.float64))
-        poses[i, :3] = pos
-        poses[i, 3:] = _rotation_matrix_to_rpy(R)
+
+    if kinematics_engine is not None:
+        # PRIMARY — server-side 의 이미 로드된 curobo kinematics 사용.
+        # attachment_manager.py:143-150 의 정확한 사용 패턴 그대로.
+        import torch
+        from curobo._src.state.state_joint import JointState
+
+        joint_names = list(kinematics_engine.joint_names)
+        n_dof = len(joint_names)
+        q_full = np.zeros((T, n_dof), dtype=np.float32)
+        q_full[:, :arm_dof] = traj[:, :arm_dof].astype(np.float32)
+        device = (kinematics_engine.tensor_args.device
+                  if hasattr(kinematics_engine, "tensor_args") else "cuda")
+        q_t = torch.as_tensor(q_full, dtype=torch.float32, device=device)
+        joint_state = JointState.from_position(q_t, joint_names=joint_names)
+        fk_result = kinematics_engine.compute_kinematics(joint_state)
+        if fk_result.tool_poses is None:
+            raise RuntimeError(
+                "kinematics_engine.compute_kinematics returned no tool_poses; "
+                "check robot config / ee_frame setup"
+            )
+        ee_pose = fk_result.tool_poses.get_link_pose(ee_frame)
+        pos_np = ee_pose.position.detach().cpu().numpy()      # (T, 3)
+        quat_np = ee_pose.quaternion.detach().cpu().numpy()   # (T, 4) [w,x,y,z]
+        for i in range(T):
+            poses[i, :3] = pos_np[i]
+            poses[i, 3:] = _rotation_matrix_to_rpy(_quat_wxyz_to_rotmat(quat_np[i]))
+    else:
+        # LEGACY fallback — traj_analysis.fk_ee. lerobot_cap chain 이라 server
+        # 에서는 scservo_sdk 의존으로 fail. local/client 전용.
+        import sys
+        from pathlib import Path
+        _scripts = Path(__file__).resolve().parent.parent.parent / "lerobot" / "scripts"
+        if str(_scripts) not in sys.path:
+            sys.path.insert(0, str(_scripts))
+        from traj_analysis.fk_ee import get_kinematics
+        kin = get_kinematics(urdf_path, ee_frame)
+        for i in range(T):
+            pos, R = kin.forward_kinematics(traj[i, :arm_dof].astype(np.float64))
+            poses[i, :3] = pos
+            poses[i, 3:] = _rotation_matrix_to_rpy(R)
+
     return ee_delta_dct_from_poses(poses, L0=L0)

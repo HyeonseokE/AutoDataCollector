@@ -66,7 +66,7 @@ mi_selection:
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
   lambda: 1.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
-  tau_MI: 0.3                  # §13.2 — Useful-OOD/ID constraint: M̃_MI gate
+  tau_MI: 0.0                  # §13.2 — Useful-OOD/ID constraint: M̃_MI gate
                                # (0.0→0.3 — eligible ~50%→~30% 로 narrowing,
                                # Q1 chosen 의 Phase1 정합 강화)
                                # (0.8→0.0: 검증된 baseline 복귀 — session_20260523_013722

@@ -256,7 +256,7 @@ remote:
   # [필수] 원격 서버 운영
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector-open_drawer"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 0                              # 원격 CUDA_VISIBLE_DEVICES — GPU 0 (open_drawer 전용 isolation)
+  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES — GPU 0 (open_drawer 전용 isolation)
   tmux_session: "phase2_server_open_drawer"   # 재시작 시 reuse; prefix unique (phase2_server_* family)
 
   # [선택] 동작 옵션

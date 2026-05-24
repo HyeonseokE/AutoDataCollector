@@ -70,12 +70,27 @@ def extract_point_labels(positions: Dict, queries) -> Dict[str, List[str]]:
 
 
 def merge_detected(target: Dict, results: Dict) -> None:
-    """검출 성공한 항목만 target dict 에 in-place merge (실패=None 은 skip)."""
+    """검출 성공한 항목만 target dict 에 in-place merge (실패=None 은 skip).
+
+    detect_objects 는 position/points/bbox 같은 *위치 정보* 만 refresh 한다.
+    is_obstacle 처럼 multi-turn classification (forward 초기 prompt 단계) 에서
+    결정된 *분류 metadata* 는 새 detect 결과에 안 들어오므로, 머지 시 기존
+    entry 의 그 키를 보존해야 한다. 그렇지 않으면 forward 초기 단계에서
+    placement reference 로 마킹된 plate 가 후속 in-script detect_objects 호출
+    뒤 is_obstacle 정보가 사라지고 reset 측에서 grippable 로 잘못 분류된다.
+    """
+    _PRESERVED_META_KEYS = ("is_obstacle",)
     if not results:
         return
     for name, info in results.items():
-        if info is not None:
-            target[name] = info
+        if info is None:
+            continue
+        existing = target.get(name)
+        if isinstance(existing, dict):
+            for _k in _PRESERVED_META_KEYS:
+                if existing.get(_k) and _k not in info:
+                    info[_k] = existing[_k]
+        target[name] = info
 
 
 def _compute_ee_xyzrpy(kinematics, joints_rad: np.ndarray) -> np.ndarray:

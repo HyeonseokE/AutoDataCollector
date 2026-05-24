@@ -246,7 +246,7 @@ remote:
   #   ssh h100 'cd /home/csiwoo/CORL2026/AutoDataCollector && git worktree add ../AutoDataCollector-sort task/sort')
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector-sort"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 2                              # 같은 GPU 2 공유 (sort + pnp 양쪽 SmolVLA, H100 80GB)
+  gpu_id: 0                              # sort 전용 GPU 0 (pnp/open_drawer 가 GPU 2 점유 OOM 회피)
   tmux_session: "phase2_server_sort"     # task/sort branch — pnp 머신과 분리
 
   # [선택] 동작 옵션

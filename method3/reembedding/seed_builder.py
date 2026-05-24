@@ -286,27 +286,15 @@ def build_phase1_vector_db(
         for j, (idx, entry) in enumerate(zip(chunk_indices, chunk_entries)):
             e_vla = np.asarray(e_vla_batch[j], dtype=np.float64).reshape(-1)
             e_i = state_retrieval_key(e_vla, entry.proprioception)           # §7.3
-            # action descriptor — EE delta DCT (2026-05-24 전환).
-            # entry.ee_chunk = (T_skill, 6) [xyz+rpy] EE pose 시계열. np.diff +
-            # traj_to_dct 로 (L0, 6) EE delta DCT → flatten (L0·6,).
-            # translation-invariant motion shape descriptor (SCIZOR 분야 관례).
-            # ee_chunk 가 빈 배열이면 legacy action_chunk(joint) DCT fallback.
-            from method3.dct.ee_features import ee_delta_dct_from_poses
+            # action descriptor — DCT skill-unit paradigm.
+            # entry.action_chunk = skill segment 의 가변 길이 raw action
+            # (T_skill, dof). traj_to_dct 로 (L0, dof) → flatten = candidate
+            # 의 dct_target 과 같은 z-space (L0·dof,).
             from method3.dct.transform import traj_to_dct
-            _ee = np.asarray(getattr(entry, "ee_chunk", np.empty((0, 6))),
-                             dtype=np.float64)
-            if _ee.size > 0 and _ee.ndim == 2 and _ee.shape[1] == 6:
-                z_i = ee_delta_dct_from_poses(_ee, L0=cfg.action_horizon).flatten()
-            else:
-                # legacy fallback — joint DCT (warn once via function attr).
-                if not getattr(build_phase1_vector_db, "_warned_no_ee", False):
-                    print("[reembed][warn] entry.ee_chunk 비어있음 — "
-                          "joint DCT fallback. adapter 가 ee_chunk 채우는지 확인.")
-                    build_phase1_vector_db._warned_no_ee = True
-                z_i = traj_to_dct(
-                    np.asarray(entry.action_chunk, dtype=np.float64),
-                    L0=cfg.action_horizon,
-                ).flatten()
+            z_i = traj_to_dct(
+                np.asarray(entry.action_chunk, dtype=np.float64),
+                L0=cfg.action_horizon,
+            ).flatten()
             db.append(VectorDBEntry(
                 skill_id=entry.skill_id,
                 state_key=e_i,

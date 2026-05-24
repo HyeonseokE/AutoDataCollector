@@ -132,7 +132,6 @@ class PreselectiveAcquirerServicer(
         max_T_eval: int | None = None,
         servo_calibration_file: str | None = None,
         camera_rename: dict | None = None,
-        urdf_path: str | None = None,
     ) -> None:
         self.stack = stack
         self.selector = stack.selector
@@ -159,13 +158,7 @@ class PreselectiveAcquirerServicer(
             action_horizon=int(action_horizon),
             max_T_eval=(None if max_T_eval is None else int(max_T_eval)),
             servo_calibration_file=servo_calibration_file,
-            urdf_path=urdf_path,
         )
-        if urdf_path:
-            print(f"[server] EE delta DCT enabled — URDF FK ← {urdf_path}", flush=True)
-        else:
-            print(f"[server] EE delta DCT DISABLED (urdf_path=None) — "
-                  f"MI scoring 이 joint DCT fallback (translation invariance 없음)", flush=True)
         if servo_calibration_file:
             print(f"[server] joint→servo calibration enabled ← {servo_calibration_file}", flush=True)
         else:
@@ -636,21 +629,6 @@ def serve(args: argparse.Namespace) -> None:
         print(f"[server] WARN: servo calibration file not found at {_servo_calib} "
               f"— joint→servo conversion disabled")
         _servo_calib = None
-    # URDF path 결정 — curobo robot cfg yaml 안의 urdf_path field 추출.
-    # EE delta DCT FK 에 사용 (2026-05-24 전환).
-    _urdf_path: str | None = None
-    try:
-        import yaml
-        _curobo_cfg_path = psf_cfg.get("curobo_robot_cfg_path", "")
-        if _curobo_cfg_path:
-            _ccp = Path(_curobo_cfg_path)
-            if not _ccp.is_absolute():
-                _ccp = Path(__file__).resolve().parent.parent / _ccp
-            if _ccp.exists():
-                with open(_ccp) as _f:
-                    _urdf_path = (yaml.safe_load(_f) or {}).get("urdf_path")
-    except Exception as _e:
-        print(f"[server] urdf_path 추출 실패: {_e}")
     servicer = PreselectiveAcquirerServicer(
         stack=stack,
         curobo_backend=curobo,
@@ -661,7 +639,6 @@ def serve(args: argparse.Namespace) -> None:
         max_T_eval=_max_T_eval,
         servo_calibration_file=_servo_calib,
         camera_rename=_camera_rename,
-        urdf_path=_urdf_path,
     )
     print(
         f"[server] selector: action_horizon (H)={_action_horizon}, "

@@ -54,14 +54,6 @@ class RawDatasetEntry:
     validity_flag: bool = True
     environment_metadata: dict = field(default_factory=dict)
     object_metadata: dict = field(default_factory=dict)
-    # EE delta DCT 전환용 (2026-05-24). segment 의 EE pose 시계열 (T, 6) —
-    # [xyz + rpy]. adapter 가 dataset 의 observation.ee_pos.robot_xyzrpy column
-    # 에서 추출. seed_builder 가 np.diff + traj_to_dct 로 EE delta DCT (L0, 6)
-    # 을 만들어 VectorDBEntry.action_descriptor 에 저장. RawTrajectoryDataset
-    # legacy .npz 경로에선 저장 안 됨 (DCT paradigm 은 adapter 경로).
-    ee_chunk: np.ndarray = field(
-        default_factory=lambda: np.empty((0, 6), dtype=np.float64)
-    )
 
 
 def _scalar_record(entry: RawDatasetEntry, array_file: str) -> dict:

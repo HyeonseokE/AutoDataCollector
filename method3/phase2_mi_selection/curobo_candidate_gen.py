@@ -86,13 +86,6 @@ class CurobogenConfig:
     # 변환. None 이면 변환 비활성 (legacy: candidate 는 radians space, DB 는
     # servo space → unit mismatch). path 가 주어지면 first-use 시 lazy load.
     servo_calibration_file: str | None = None
-    # EE delta DCT 전환 (2026-05-24) — joint trajectory → FK → EE pose → delta
-    # → DCT (L0, 6) 변환에 사용할 URDF 경로. None 이면 dct_target_ee 채우지 않고
-    # mi_selector 가 legacy joint DCT 로 fallback (경고 1회).
-    urdf_path: str | None = None
-    # FK 입력 dim (so101 = 5). EE 출력은 항상 6 (xyz + rpy).
-    ee_arm_dof: int = 5
-    ee_frame: str = "gripper_frame_link"
 
 
 def _chunk_waypoints(
@@ -243,32 +236,7 @@ def candidates_from_trajectory_list(
         T = proprios.shape[0]
         # skill 단위 DCT feature — candidate 의 전체 waypoints 를 한 skill 로
         # 보고 (L0, dof) DCT 로 변환 (paradigm step [3]).
-        # joint DCT — **U_VLA scorer 전용** (VLA 가 joint action 학습 → 5→6 pad).
         dct_target = traj_to_dct(_wp_full, L0=cfg.dct_L0)
-        # EE delta DCT — **MI scoring 전용** (translation-invariant motion shape).
-        # urdf_path 가 주어지면 FK 로 EE pose 산출 후 delta DCT (L0, 6).
-        # None 이면 None 채워 mi_selector 가 joint DCT fallback (경고 1회).
-        dct_target_ee = None
-        if cfg.urdf_path:
-            try:
-                from method3.dct.ee_features import ee_delta_dct_from_joints
-                # FK 입력은 *raw* curobo joint (radian) 가 자연 — servo space
-                # 변환 후엔 angle 의미가 깨져 FK 결과 garbage. wp_arr (변환 전)
-                # 의 arm 5축만 사용.
-                _wp_for_fk = np.asarray(wp_arr[:, :cfg.ee_arm_dof], dtype=np.float64)
-                dct_target_ee = ee_delta_dct_from_joints(
-                    _wp_for_fk,
-                    urdf_path=cfg.urdf_path,
-                    L0=cfg.dct_L0,
-                    ee_frame=cfg.ee_frame,
-                    arm_dof=cfg.ee_arm_dof,
-                )
-            except Exception as _e:
-                import traceback as _tb
-                print(f"  [curobo_candidate_gen] EE delta DCT FK failed: "
-                      f"{type(_e).__name__}: {_e}", flush=True)
-                _tb.print_exc()
-                dct_target_ee = None
 
         # state_keys[τ] = [e_vla; proprios[τ]] — spec §7.3 직역.
         # A.3 후 proprios 는 *servo space* (curobo joint radians → servo 변환됨)
@@ -294,6 +262,5 @@ def candidates_from_trajectory_list(
             instruction=str(instruction),
             proprios=proprios,
             dct_target=dct_target,
-            dct_target_ee=dct_target_ee,
         ))
     return out

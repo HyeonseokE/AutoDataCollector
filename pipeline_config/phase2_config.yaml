@@ -110,7 +110,7 @@ skill_perturbation:
   enabled_reset: false
   # GPU-accelerated curobo motion planner with via-point diversity.
   n_candidates: 64
-  curobo_robot_cfg_path: robot_configs/curobo/so101_robot4.yml
+  curobo_robot_cfg_path: robot_configs/curobo/so101_robot0.yml
   curobo_num_trajopt_seeds: 4
   curobo_num_ik_seeds: 16
   curobo_use_cuda_graph: true     # graph capture 1회 → plan latency 50ms→5ms

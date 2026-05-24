@@ -155,11 +155,22 @@ class PreselectiveAcquirerServicer(
 
         # Phase2Candidate (T, H) chunking 파라미터 — curobo_candidate_gen 의 input.
         # T 는 trajectory 길이 N 에서 자동 계산 (stride=1). max_T_eval 은 cost cap.
+        # EE delta DCT FK 는 curobo_backend 의 이미 부팅된 kinematics 를 재사용
+        # (lerobot_cap chain → scservo_sdk import 우회). CuroboBackend._planner
+        # = MotionPlanner, .kinematics property = trajopt_solver.kinematics.
+        _kin_engine = None
+        try:
+            _kin_engine = curobo_backend._planner.kinematics
+        except AttributeError as _e:
+            print(f"[server] WARN: curobo_backend._planner.kinematics 접근 실패 "
+                  f"({_e}) — ee_features 가 legacy fk_ee 로 fallback 시도", flush=True)
+
         self._candidate_cfg = CurobogenConfig(
             action_horizon=int(action_horizon),
             max_T_eval=(None if max_T_eval is None else int(max_T_eval)),
             servo_calibration_file=servo_calibration_file,
             urdf_path=urdf_path,
+            kinematics_engine=_kin_engine,
         )
         if urdf_path:
             print(f"[server] EE delta DCT enabled — URDF FK ← {urdf_path}", flush=True)

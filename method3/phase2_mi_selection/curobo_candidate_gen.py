@@ -93,6 +93,11 @@ class CurobogenConfig:
     # FK 입력 dim (so101 = 5). EE 출력은 항상 6 (xyz + rpy).
     ee_arm_dof: int = 5
     ee_frame: str = "gripper_frame_link"
+    # server-side 의 이미 부팅된 curobo Kinematics (= MotionPlanner.kinematics).
+    # ee_features.ee_delta_dct_from_joints 에 주입 — lerobot_cap chain
+    # (scservo_sdk 의존) 우회. None 이면 ee_features 가 legacy fk_ee path 사용
+    # (client/local 만 작동, server 에서는 ImportError).
+    kinematics_engine: object | None = None
 
 
 def _chunk_waypoints(
@@ -262,6 +267,7 @@ def candidates_from_trajectory_list(
                     L0=cfg.dct_L0,
                     ee_frame=cfg.ee_frame,
                     arm_dof=cfg.ee_arm_dof,
+                    kinematics_engine=cfg.kinematics_engine,
                 )
             except Exception as _e:
                 import traceback as _tb

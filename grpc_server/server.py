@@ -638,9 +638,11 @@ def serve(args: argparse.Namespace) -> None:
         _servo_calib = None
     # URDF path 결정 — curobo robot cfg yaml 안의 urdf_path field 추출.
     # EE delta DCT FK 에 사용 (2026-05-24 전환).
+    # yaml 은 module-level import (line 37) — 함수 안에서 재 import 하면
+    # Python scoping 이 yaml 을 local 로 인식해 위쪽 yaml.safe_load 가
+    # UnboundLocalError 발생함 (이전 버그).
     _urdf_path: str | None = None
     try:
-        import yaml
         _curobo_cfg_path = psf_cfg.get("curobo_robot_cfg_path", "")
         if _curobo_cfg_path:
             _ccp = Path(_curobo_cfg_path)

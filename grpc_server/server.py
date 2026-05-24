@@ -648,7 +648,15 @@ def serve(args: argparse.Namespace) -> None:
     _proj_root = Path(__file__).resolve().parent.parent
     _urdf_path: str | None = None
     try:
-        _curobo_cfg_path = psf_cfg.get("curobo_robot_cfg_path", "")
+        # curobo_robot_cfg_path 는 phase2_config.yaml.skill_perturbation 의 키.
+        # 이전 코드는 psf_cfg (recording_config.preselective_filter) 에서 찾았는데
+        # 그 section 은 비어있어 _curobo_cfg_path="" → EE delta DCT 자동 비활성.
+        # skill_cfg (line 583-588 에서 phase2_config.skill_perturbation 로 load
+        # 된 것) 를 우선 시도, 그래도 없으면 legacy psf_cfg 로 fallback.
+        _curobo_cfg_path = (
+            skill_cfg.get("curobo_robot_cfg_path")
+            or psf_cfg.get("curobo_robot_cfg_path", "")
+        )
         if _curobo_cfg_path:
             _ccp = Path(_curobo_cfg_path)
             if not _ccp.is_absolute():

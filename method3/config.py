@@ -130,6 +130,8 @@ def load_phase2_config(
         dct_L0=int(mi.get("dct_L0", 50)),
         # Table 6 Quadrant Validation — Q1(Useful OOD)/Q2(Harmful OOD)/Q3(Useful ID)/Q4(Redundant ID).
         selection_mode=str(mi.get("selection_mode", "Q1")),
+        # Q1 ablation — "argmax" (paper default) | "argmedian" (outlier-robust).
+        q1_chosen_strategy=str(mi.get("q1_chosen_strategy", "argmax")),
     )
 
     re = raw.get("reembedding") or {}

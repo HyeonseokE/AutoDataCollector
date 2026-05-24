@@ -56,6 +56,10 @@ mi_selection:
   selection_mode: Q1   # Useful OOD (Method3 default) — argmax U_VLA s.t. M̃_MI ≥ +τ_MI
                        # = "MI-aligned + VLA-uncertain": Phase1 분포 정합 cand 중
                        # VLA 가 가장 헷갈리는 것 (paper main claim)
+  # Q1 chosen 전략 ablation:
+  #   "argmax"     : paper default — eligible 중 가장 헷갈리는 cand
+  #   "argmedian"  : eligible 의 U_VLA 중간값 cand (outlier-robust variant)
+  q1_chosen_strategy: argmedian
   # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율

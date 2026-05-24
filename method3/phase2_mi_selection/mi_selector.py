@@ -111,6 +111,13 @@ class Phase2MIConfig:
     #   Q4:                     argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID)
     # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
     selection_mode: str = "Q1"
+    # Q1 의 chosen 전략 ablation — paper default 는 argmax (extreme uncertainty),
+    # "argmedian" 은 eligible 의 U_VLA 중간값 chosen (outlier-robust variant).
+    # active learning literature 의 BADGE/cluster-based 방향과 정렬. paper 의
+    # Table 6 ablation 으로 비교 가능.
+    #   "argmax"     : paper default — eligible 중 가장 헷갈리는 cand
+    #   "argmedian"  : eligible 의 U_VLA 중간값 cand (robust)
+    q1_chosen_strategy: str = "argmax"
     amb_agg: str = "mean"         # §9.4 covered aggregation: "mean" | "max"
     min_covered_windows: int = 1  # §9.1 T_min — 미만이면 under-covered
     debug_verbose: bool = False
@@ -442,7 +449,13 @@ class Phase2MISelector:
         _side = "≥+τ_MI" if _mode in ("Q1", "Q3") else "≤-τ_MI"
         if eligible:
             if vla_scorer is not None:
-                if _mode in ("Q1", "Q2"):
+                if _mode == "Q1" and cfg.q1_chosen_strategy == "argmedian":
+                    # Ablation variant — eligible 의 U_VLA 중간값 chosen.
+                    # extreme outlier (argmax) 대신 robust middle.
+                    eligible_sorted = sorted(eligible, key=lambda i: u_vla[i])
+                    chosen = eligible_sorted[len(eligible_sorted) // 2]
+                    rule = f"argmedian U_VLA s.t. M̃_MI{_side}  [{_mode}+median]"
+                elif _mode in ("Q1", "Q2"):
                     chosen = max(eligible, key=lambda i: u_vla[i])
                     rule = f"argmax U_VLA s.t. M̃_MI{_side}  [{_mode}]"
                 else:  # Q3, Q4

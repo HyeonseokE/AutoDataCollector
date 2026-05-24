@@ -68,6 +68,12 @@ def ee_delta_dct_from_poses(
         # 1-frame degenerate — zero-delta fallback (constant pose).
         return traj_to_dct(np.zeros((max(1, T), 6), dtype=np.float64), L0=L0)
     deltas = np.diff(poses, axis=0)                          # (T-1, 6)
+    # rpy delta unwrap — atan2 가 [-π, π] 로 자른 결과 ±π 경계 넘으면
+    # spurious 큰 jump (≈ ±2π) 가 생긴다. 실제 회전량은 작아도 DCT 에
+    # high-frequency 인공물로 들어가 motion shape 신호 흐려짐. 양쪽
+    # producer (DB recorded + candidate FK) 모두 같은 atan2 convention
+    # 사용하므로 한 줄 patch 로 대칭 적용.
+    deltas[:, 3:] = (deltas[:, 3:] + np.pi) % (2 * np.pi) - np.pi
     deltas = np.vstack([deltas, deltas[-1:]])                # (T, 6) — tail pad
     return traj_to_dct(deltas, L0=L0)                        # (L0, 6)
 

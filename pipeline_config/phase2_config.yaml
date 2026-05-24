@@ -53,9 +53,9 @@ mi_selection:
   #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
   # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
-  selection_mode: Q3   # Useful ID — argmin U_VLA s.t. M̃_MI ≥ +τ_MI
-                       # = "MI-aligned + VLA-familiar": Phase1 분포 정합 cand 중
-                       # VLA 가 가장 자신 있어 하는 것 (negative control of Q1)
+  selection_mode: Q1   # Useful OOD (Method3 default) — argmax U_VLA s.t. M̃_MI ≥ +τ_MI
+                       # = "MI-aligned + VLA-uncertain": Phase1 분포 정합 cand 중
+                       # VLA 가 가장 헷갈리는 것 (paper main claim)
   # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율
@@ -66,7 +66,9 @@ mi_selection:
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
   lambda: 1.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
-  tau_MI: 0.0                  # §13.2 — Useful-OOD/ID constraint: M̃_MI gate
+  tau_MI: 0.3                  # §13.2 — Useful-OOD/ID constraint: M̃_MI gate
+                               # (0.0→0.3 — eligible ~50%→~30% 로 narrowing,
+                               # Q1 chosen 의 Phase1 정합 강화)
                                # (0.8→0.0: 검증된 baseline 복귀 — session_20260523_013722
                                # 59/60 forward success 시 설정. 이전 변경 이력:
                                # 0.0→0.5(c41b6c0)→1.0→0.8(fe2d020)→0.0. 분야 관례상

@@ -1439,7 +1439,15 @@ class ForwardAndResetPipeline(BasePipeline):
         )
         from method3.phase2_mi_selection.seed_anchor import pick_anchor
 
-        cfg = CurobogenConfig()
+        # EE delta DCT FK 용 URDF — robot_id 기반 convention.
+        # 없으면 _hook 의 candidates_from_trajectory_list 가 dct_target_ee=None
+        # → mi_selector legacy joint DCT fallback (translation invariance 없음).
+        _urdf = f"assets/urdf/so101_robot{self.robot_id}.urdf"
+        if not Path(_urdf).exists():
+            print(f"[Method3 phase2] URDF 없음 ({_urdf}) — EE delta DCT 비활성 "
+                  f"(MI 가 joint DCT fallback)")
+            _urdf = None
+        cfg = CurobogenConfig(urdf_path=_urdf)
 
         def _hook(cands, current_joints, goal_joint_rad, is_transit) -> int | None:
             """ξ* index 반환. None 이면 skills_lerobot 의 RNG fallback."""

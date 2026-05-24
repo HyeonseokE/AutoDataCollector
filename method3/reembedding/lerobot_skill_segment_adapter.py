@@ -75,6 +75,10 @@ class LeRobotPhase1SkillSegmentAdapter:
         self._dataset_path = self._base._dataset_path
         # raw action bulk pre-read — global frame index 정렬.
         self._raw_actions = self._bulk_read_actions(repo_id_or_path)
+        # EE pose bulk pre-read — observation.ee_pos.robot_xyzrpy (T, 6) [xyz+rpy].
+        # 데이터셋 수집 시점에 robot 의 FK 로 기록된 ground-truth pose. seed_builder
+        # 가 np.diff + traj_to_dct 로 EE delta DCT 만든다 (FK 불필요, 동일 source).
+        self._raw_ee = self._bulk_read_ee_poses(repo_id_or_path)
 
     @staticmethod
     def _bulk_read_actions(repo_id_or_path: str | Path) -> np.ndarray:
@@ -91,6 +95,33 @@ class LeRobotPhase1SkillSegmentAdapter:
         )
         tbl = tbl.sort_by("index")
         return np.array(tbl["action"].to_pylist(), dtype=np.float64)
+
+    @staticmethod
+    def _bulk_read_ee_poses(repo_id_or_path: str | Path) -> np.ndarray:
+        """모든 frame 의 observation.ee_pos.robot_xyzrpy → (N, 6) bulk read.
+
+        column 없으면 (0, 6) 빈 배열 반환 (legacy dataset 호환 — seed_builder
+        가 fallback 로 joint DCT 사용).
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        root = _resolve_dataset_root(repo_id_or_path)
+        data_files = sorted((root / "data").rglob("*.parquet"))
+        if not data_files:
+            return np.empty((0, 6), dtype=np.float64)
+        # column 존재 확인 — 첫 파일 schema 만 본다.
+        col = "observation.ee_pos.robot_xyzrpy"
+        first_schema = pq.read_table(data_files[0], columns=None).schema
+        if col not in first_schema.names:
+            print(f"[adapter] {col} column 없음 — EE delta DCT 비활성 "
+                  f"(seed_builder 가 joint DCT fallback)")
+            return np.empty((0, 6), dtype=np.float64)
+        tbl = pa.concat_tables(
+            [pq.read_table(f, columns=[col, "index"]) for f in data_files]
+        )
+        tbl = tbl.sort_by("index")
+        return np.array(tbl[col].to_pylist(), dtype=np.float64)
 
     # ─────────────────────────────────────────────
     # RawTrajectoryDataset interface
@@ -130,6 +161,20 @@ class LeRobotPhase1SkillSegmentAdapter:
         if action.ndim == 2 and action.shape[1] > _ARM_DOF:
             action = action[:, :_ARM_DOF]
 
+        # EE pose chunk (T_skill, 6) — segment frame 범위에서 추출. seed_builder
+        # 가 np.diff + traj_to_dct 로 EE delta DCT 만든다 (translation invariant).
+        # test/mock 호환을 위해 _raw_ee 부재 시 빈 배열로 안전 fallback.
+        _ee_arr = getattr(self, "_raw_ee", np.empty((0, 6), dtype=np.float64))
+        if _ee_arr.size > 0 and _ee_arr.ndim == 2 and _ee_arr.shape[1] == 6:
+            _es = min(int(seg.frame_start), len(_ee_arr) - 1)
+            _ee_end = min(int(seg.frame_end), len(_ee_arr))
+            if _ee_end <= _es:
+                ee_chunk = _ee_arr[_es: _es + 1].copy()  # 1-row fallback
+            else:
+                ee_chunk = _ee_arr[_es:_ee_end].copy()
+        else:
+            ee_chunk = np.empty((0, 6), dtype=np.float64)
+
         # VLA instruction — 학습(SkillDCTDataset)이 episode-level task 를 쓰므로
         # re-embedding 입력도 동일하게 episode task 로 맞춘다 (Option A: VLA
         # 입력은 {skill_type}: {episode_task} 고정 — per-skill nl 아님).
@@ -159,6 +204,7 @@ class LeRobotPhase1SkillSegmentAdapter:
             planner_type="InterpPlan",
             success_flag=True,
             validity_flag=True,
+            ee_chunk=ee_chunk,
         )
 
     def pointer(self, idx: int) -> dict:

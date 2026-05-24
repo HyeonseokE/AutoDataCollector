@@ -641,36 +641,16 @@ def serve(args: argparse.Namespace) -> None:
     # yaml 은 module-level import (line 37) — 함수 안에서 재 import 하면
     # Python scoping 이 yaml 을 local 로 인식해 위쪽 yaml.safe_load 가
     # UnboundLocalError 발생함 (이전 버그).
-    #
-    # cross-machine portability: curobo cfg yaml 의 urdf_path 가 *로컬*
-    # 절대경로 (예: /home/lerobot/...) 라 원격 서버에서 그대로 못 씀.
-    # basename 추출 → project_root/assets/urdf/<basename> 으로 재구성.
-    _proj_root = Path(__file__).resolve().parent.parent
     _urdf_path: str | None = None
     try:
         _curobo_cfg_path = psf_cfg.get("curobo_robot_cfg_path", "")
         if _curobo_cfg_path:
             _ccp = Path(_curobo_cfg_path)
             if not _ccp.is_absolute():
-                _ccp = _proj_root / _ccp
+                _ccp = Path(__file__).resolve().parent.parent / _ccp
             if _ccp.exists():
                 with open(_ccp) as _f:
-                    _raw_urdf = (yaml.safe_load(_f) or {}).get("urdf_path")
-                if _raw_urdf:
-                    # 1차 시도: yaml 의 절대경로 그대로
-                    if Path(_raw_urdf).exists():
-                        _urdf_path = str(_raw_urdf)
-                    else:
-                        # 2차: basename 만 떼서 project_root/assets/urdf/ 결합
-                        _basename = Path(_raw_urdf).name  # so101_robot4.urdf
-                        _fallback = _proj_root / "assets" / "urdf" / _basename
-                        if _fallback.exists():
-                            _urdf_path = str(_fallback)
-                            print(f"[server] urdf_path basename fallback: "
-                                  f"{_raw_urdf} (없음) → {_urdf_path}", flush=True)
-                        else:
-                            print(f"[server] urdf_path 둘 다 없음: {_raw_urdf}, "
-                                  f"{_fallback} → EE delta DCT 비활성", flush=True)
+                    _urdf_path = (yaml.safe_load(_f) or {}).get("urdf_path")
     except Exception as _e:
         print(f"[server] urdf_path 추출 실패: {_e}")
     servicer = PreselectiveAcquirerServicer(

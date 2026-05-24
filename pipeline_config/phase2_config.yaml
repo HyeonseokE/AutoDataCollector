@@ -64,7 +64,7 @@ mi_selection:
   eps: 1.0e-6                  # log/정규화 분모 안정화
   beta: 1.0                    # §11 ΔH_A 가중
   lambda: 1.0                  # §11 ΔH_A|S 가중 — MI parameter select experiment 결과 (results/skill_dct/mutual_information_parameter_select_experiment.md)
-  tau_MI: 0.3                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
+  tau_MI: 0.0                  # §13.2 — Useful-OOD constraint: M̃_MI ≥ τ_MI
                                # (0.8→0.3: EE delta DCT 전환 후 M̃_MI 분포가
                                # 달라져 eligible 비율 회복 위해 완화)
   # accept_threshold 는 tau_MI 의 deprecated alias (구 yaml 호환). tau_MI 가 우선이지만

@@ -309,8 +309,16 @@ class CuroboBackend:
 
         try:
             self._planner.update_world(SceneCfg(cuboid=cuboids))
+            # Verbose log — confirms collision world actually mutated. Strip
+            # to a single emoji-free line so it grep-friendly in tmux pane.
+            names = [c.name for c in cuboids]
+            print(
+                f"[curobo:update_scene] world ← {len(cuboids)} cuboid(s): {names}",
+                flush=True,
+            )
             return {"added": n_added + 1, "removed": 0, "kept": 0}  # +1 for table
         except Exception as e:
+            print(f"[curobo:update_scene] FAILED: {e}", flush=True)
             return {"added": 0, "removed": 0, "kept": 0, "error": f"update_world failed: {e}"}
 
     def close(self) -> None:

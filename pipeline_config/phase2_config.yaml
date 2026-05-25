@@ -125,7 +125,7 @@ skill_perturbation:
   # K=2~3 저주파라 매끄러운 S자/곡선 (고주파 noise 아님). 0 = off.
   # NOTE: trajopt *후* 적용 — trajopt valid 비율과는 무관.
   curobo_joint_perturb_k: 3        # 저주파 항 개수 K
-  curobo_joint_perturb_mag: 0.10   # rad — per-joint amplitude
+  curobo_joint_perturb_mag: 0.05   # rad — per-joint amplitude
                                    # (0.13→0.10 절충: mid joint 흔들림 ~17°)
                                    # (0.08→0.13: mid joint 흔들림 최대 ~22°)
   # SO-101: wrist_roll (joint index 4) 는 cartesian IK 가 start 값에 고정.

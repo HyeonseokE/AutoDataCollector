@@ -211,3 +211,62 @@ class TestRcaRegression:
         # seed 8 pool = {ep_09, ep_29, ep_49} (round_robin)
         assert replay._episode_id in {"episode_09", "episode_29", "episode_49"}
         assert replay._episode_id != "episode_01"  # 옛 코드의 잘못된 매핑
+
+
+# ─────────────────────────────────────────────────────────────
+# 6) skill ordinal sort — buf.skill_ids() 가 string sort 일 때 회귀 방지
+# ─────────────────────────────────────────────────────────────
+class TestSkillOrdinalSort:
+    """RCA (session_20260524_233421/phase2/episode_71): type-aware lookup 의
+    _staged build 가 ``buf.skill_ids()`` 의 *string sort* 순서에 의존해
+    skill_10 < skill_2 가 되는 함정. 결과: ep_71 의 3번째 type=move 호출이
+    ep_11 의 skill_12 (lift blue) 로 매핑되어 lift red 위치로 못 감. fix 는
+    skill_id 의 *숫자 부분* 으로 sort 키 추가.
+    """
+    def test_skill_order_preserves_call_order(self, tmp_path):
+        # 동일 episode 에 skill_0, skill_1, skill_2, ..., skill_15 entries 를
+        # *string-sort 가 깨지는 순서* 로 buffer 에 commit.
+        from method3.phase1_state_seeding.subgoal_buffer import SubgoalBuffer
+        from method3.phase1_state_seeding.terminal_descriptor import DESCRIPTOR_DIM
+        import numpy as np
+        buf = SubgoalBuffer()
+        buf.set_file(tmp_path / "buf.npz")
+        # 호출 순서 = i 그대로. skill_0..skill_15.
+        # subgoal 의 x 좌표 = i*0.01 로 호출 순서 식별 가능.
+        for i in range(16):
+            key = np.zeros(DESCRIPTOR_DIM, dtype=np.float64)
+            buf.append(SubgoalBufferEntry(
+                skill_id=f"skill_{i}",
+                subgoal=np.array([i * 0.01, 0.0, 0.0], dtype=np.float64),
+                terminal_region_key=key,
+                end_state_keys=key.reshape(1, -1),
+                episode_id="episode_11",
+                start_t=-1, end_t=-1,
+                skill_type=("move_initial" if i in (0, 5, 10) else
+                            "move_and_open" if i in (1, 6, 11) else
+                            "move_and_close" if i in (4, 9, 14) else
+                            "other" if i == 15 else "move"),
+                seed_index=10,
+            ))
+        buf.save()
+
+        replay = Phase2SubgoalReplay(tmp_path / "buf.npz", num_seeds=20)
+        replay.set_episode("episode_11", seed_index=10)
+        # ep_11 exact match → cursor 0 reset. type-aware lookup 으로
+        # type="move" 의 첫 호출이 skill_2 (x=0.02) 여야 함 (옛 버그는 skill_12 = x=0.12).
+        sel = replay.select_subgoal(
+            current_ee=np.zeros(3), nominal_goal=np.zeros(3),
+            skill_type="move",
+        )
+        assert abs(sel.chosen_goal[0] - 0.02) < 1e-6, (
+            f"type=move 첫 호출은 skill_2 (x=0.02) 여야 함 — string-sort 버그면 "
+            f"skill_12 (x=0.12) 가 나옴. 실제 x={sel.chosen_goal[0]}"
+        )
+        # 두 번째 type=move → skill_3 (x=0.03)
+        sel2 = replay.select_subgoal(
+            current_ee=np.zeros(3), nominal_goal=np.zeros(3),
+            skill_type="move",
+        )
+        assert abs(sel2.chosen_goal[0] - 0.03) < 1e-6, (
+            f"type=move 두번째 호출은 skill_3 (x=0.03) 여야 함. 실제 x={sel2.chosen_goal[0]}"
+        )

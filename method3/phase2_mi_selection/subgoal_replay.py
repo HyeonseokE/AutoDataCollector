@@ -94,6 +94,12 @@ class Phase2SubgoalReplay:
         # skill_type 도 같이 저장 → select_subgoal 시 type-aware lookup 가능
         # (caller 의 skill_type 명시 받아 같은 type 의 다음 entry 반환 — 한 skill
         # 안 여러 select_subgoal 호출 시 cursor 단순 +1 의 over-advance 회피).
+        # _staged entry 의 tuple = (start_t, skill_ordinal, subgoal, skill_type).
+        # skill_ordinal = skill_id 의 숫자 부분 — Phase1SubgoalSelector 가 호출
+        # 순서대로 ``skill_0, skill_1, ...`` 로 stamp 했으므로 이 값이 *episode
+        # 안 호출 순서*. start_t 가 phase1 buffer 에서 -1 (미태깅) 인 경우 string
+        # sort 가 호출 순서와 어긋난다 (skill_10 < skill_2 의 함정). 그래서 sort
+        # key 에 skill_ordinal 을 함께 두어 string-sort 의존성 제거.
         _staged: dict[str, list[tuple]] = {}
         # {seed_index: [episode_id, ...]} — seed-aware lookup. entry stamp 우선,
         # 없으면 backfill (num_seeds + schedule_mode 가 둘 다 정해진 경우만).
@@ -102,7 +108,13 @@ class Phase2SubgoalReplay:
         # {episode_id: seed_index} — 진단/로그용.
         self._seed_by_episode: dict[str, int] = {}
 
+        def _sk_ord(skill_id: str) -> int:
+            """``skill_NN`` 에서 NN 추출. 매치 실패 시 매우 큰 값 (말미로 정렬)."""
+            m2 = re.search(r"(\d+)", str(skill_id))
+            return int(m2.group(1)) if m2 else 10**9
+
         for skill_id in buf.skill_ids():
+            sk_ord = _sk_ord(skill_id)
             for e in buf.entries(skill_id):
                 eid = str(e.episode_id)
                 if not eid:
@@ -110,6 +122,7 @@ class Phase2SubgoalReplay:
                     continue
                 _staged.setdefault(eid, []).append(
                     (int(e.start_t),
+                     sk_ord,
                      np.asarray(e.subgoal, dtype=float),
                      str(getattr(e, "skill_type", "")))
                 )
@@ -126,9 +139,11 @@ class Phase2SubgoalReplay:
         # {eid: [skill_type, ...]} — type-aware lookup 용 (호출 순서 동일 인덱스).
         self._by_episode_types: dict[str, list[str]] = {}
         for eid, lst in _staged.items():
-            lst.sort(key=lambda t: t[0])
-            self._by_episode[eid] = [xyz for _, xyz, _ in lst]
-            self._by_episode_types[eid] = [t for _, _, t in lst]
+            # (start_t, skill_ord) 로 정렬 — start_t 우선이지만 phase1 buffer 처럼
+            # 모든 entry 가 start_t=-1 인 경우 skill_ord 가 호출 순서를 보장.
+            lst.sort(key=lambda t: (t[0], t[1]))
+            self._by_episode[eid] = [xyz for _, _, xyz, _ in lst]
+            self._by_episode_types[eid] = [t for _, _, _, t in lst]
 
         # seed 별 sorted episode pool (deterministic rotation).
         self._eps_by_seed: dict[int, list[str]] = {

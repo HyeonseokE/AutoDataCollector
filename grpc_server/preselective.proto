@@ -69,6 +69,14 @@ message PlanRequest {
   // Absent / empty `name` → server detaches any previously attached object
   // (transitions between plans where the gripper is empty).
   HeldObject held_object = 10;
+
+  // Detected scene obstacles (pot, plate, etc.) to register in the server's
+  // collision world for THIS plan call. Empty list → server clears any
+  // previously-registered dynamic obstacles back to the static baseline
+  // (which still includes the persistent _table cuboid loaded at init).
+  // The server diffs the list against its last-applied signature, so passing
+  // the same obstacles every request is cheap (no redundant CUDA graph reset).
+  repeated SceneObstacle scene_obstacles = 11;
 }
 
 // Geometric description of an object currently grasped by the robot.
@@ -79,6 +87,17 @@ message HeldObject {
   string link_name = 2;           // attach link, e.g. "gripper_frame_link"
   repeated float dims = 3;        // [x_m, y_m, z_m] cuboid extents
   repeated float pose_offset = 4; // [x, y, z, qw, qx, qy, qz] in link frame
+}
+
+// Detected scene object that the planner should treat as a static cuboid
+// obstacle for the current plan. Position is the object's TOP point in
+// world frame (matches pix2robot / charuco convention); the server
+// constructs the cuboid centered at z/2. dims is optional — when empty,
+// the server uses an 8×8cm footprint × max(z, 2cm) height.
+message SceneObstacle {
+  string name = 1;
+  repeated float position = 2;    // [x, y, z] in world frame
+  repeated float dims = 3;        // [w_m, d_m, h_m] optional override
 }
 
 message PlanResponse {

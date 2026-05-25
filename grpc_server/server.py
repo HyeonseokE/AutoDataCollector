@@ -144,6 +144,11 @@ class PreselectiveAcquirerServicer(
         # Track current attached payload so we only call attach/detach when
         # the held state actually changes (avoids redundant graph invalidation).
         self._currently_held: dict | None = None
+        # Fingerprint of last-applied dynamic scene obstacles (sorted tuple
+        # of (name, x, y, z, w, d, h)). Used to skip redundant update_scene
+        # calls when consecutive plan_and_select requests carry the same
+        # detection results.
+        self._currently_scene_sig: tuple | None = None
         self.recording_fps = int(recording_fps)
         self._chunk_size = int(chunk_size)
         self.debug_verbose = debug_verbose
@@ -211,6 +216,42 @@ class PreselectiveAcquirerServicer(
         # 순서대로 policy image_keys 에 매핑하므로, 키 이름 순(=camera1,2,3)이
         # policy feature 순서와 일치해야 한다.
         return dict(sorted(out.items(), key=lambda kv: kv[0]))
+
+    # ----------------------------------------------------------------
+    def _sync_scene_obstacles(self, request) -> None:
+        """Reconcile self._currently_scene_sig with request.scene_obstacles.
+
+        On change, call self.curobo.update_scene(obstacles_dict) where the
+        dict matches the local backend's expected format (name -> {position,
+        dims?}). Backends without update_scene silently skip.
+        """
+        incoming = list(getattr(request, "scene_obstacles", None) or [])
+        # Build a sortable signature for change detection.
+        sig_items = []
+        obs_dict: dict = {}
+        for o in incoming:
+            name = str(getattr(o, "name", ""))
+            if not name:
+                continue
+            pos = list(o.position) if len(o.position) >= 3 else None
+            if pos is None:
+                continue
+            dims = list(o.dims) if len(o.dims) == 3 else None
+            sig_items.append((name, round(pos[0], 4), round(pos[1], 4), round(pos[2], 4),
+                              tuple(round(d, 4) for d in dims) if dims else None))
+            entry = {"position": pos}
+            if dims:
+                entry["dims"] = dims
+            obs_dict[name] = entry
+        new_sig = tuple(sorted(sig_items))
+        if new_sig == self._currently_scene_sig:
+            return  # no change since last request
+        if not hasattr(self.curobo, "update_scene"):
+            return  # backend doesn't support
+        # Pass the dict to backend; backend rebuilds the world (always
+        # includes the persistent _table cuboid).
+        self.curobo.update_scene(obs_dict)
+        self._currently_scene_sig = new_sig
 
     # ----------------------------------------------------------------
     def _sync_held_object(self, request, start_qpos) -> None:
@@ -282,6 +323,15 @@ class PreselectiveAcquirerServicer(
             # Skip selection for non-transit moves; client should fall back
             # to its own cartesian path.
             return preselective_pb2.PlanResponse(used_fallback=True)
+
+        # Reconcile dynamic scene obstacles BEFORE held-object reconciliation
+        # so attach (which may shrink the scene via the AttachmentManager's
+        # obstacle-disable feature in future) sees the up-to-date world.
+        try:
+            self._sync_scene_obstacles(request)
+        except Exception as e:
+            print(f"[server] sync_scene_obstacles FAILED (continuing with static scene): {e}",
+                  flush=True)
 
         # Reconcile held-object attachment state with the request BEFORE
         # plan_batch so the chosen trajectory routes around obstacles WITH

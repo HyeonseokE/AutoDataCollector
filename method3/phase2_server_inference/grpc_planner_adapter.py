@@ -80,6 +80,12 @@ class GrpcPlannerClient:
         # this state so the server attaches/detaches the payload to the
         # gripper's collision body before planning. None → no payload.
         self._held_object: dict | None = None
+        # Dynamic scene obstacles (pot, plate, etc.). skills_lerobot's
+        # detect_objects hook calls update_scene() with the freshly detected
+        # positions; we cache them here and pipe them into each plan_and_select
+        # so the server's curobo registers them as cuboid obstacles. None /
+        # empty → server reverts to the static-only baseline (_table cuboid).
+        self._scene_obstacles: list | None = None
 
     def pop_dump_refs(self) -> list[tuple[str, str]]:
         """누적된 (selection_id, skill_id) 목록을 반환하고 비운다.
@@ -172,6 +178,7 @@ class GrpcPlannerClient:
                 seed=int(seed) if seed is not None else 0,
                 is_transit=True,
                 held_object=self._held_object,
+                scene_obstacles=self._scene_obstacles,
             )
         except Exception as e:
             print(f"  [Skill Perturbation] grpc plan_and_select failed: {e}")
@@ -251,12 +258,34 @@ def _summarize_score_report(json_str: str, chosen_index: int = -1) -> str:
     )
 
     # ------------------------------------------------------------------
-    # update_scene — server-side curobo can also accept obstacle updates,
-    # but the prototype skips this (TODO: extend proto with UpdateScene RPC).
+    # update_scene — cache detected obstacles so the next plan_and_select
+    # RPC ships them in scene_obstacles. Each call REPLACES the cache (not
+    # accumulates) — matches detect_objects' semantics (one detect = one
+    # complete world snapshot).
     # ------------------------------------------------------------------
-    def update_scene(self, obstacles) -> None:  # noqa: ARG002
-        # Silent no-op for now — server's curobo uses its yaml's static workspace.
-        return None
+    def update_scene(self, obstacles) -> dict:
+        if not obstacles:
+            self._scene_obstacles = None
+            return {"added": 0, "removed": 0, "kept": 0}
+        if isinstance(obstacles, dict):
+            items = list(obstacles.items())
+        elif isinstance(obstacles, (list, tuple)):
+            items = [(o.get("name", f"obs_{i}"), o) for i, o in enumerate(obstacles)]
+        else:
+            return {"added": 0, "removed": 0, "kept": 0, "error": "unsupported type"}
+        out = []
+        for name, info in items:
+            if not isinstance(info, dict):
+                continue
+            pos = info.get("position")
+            if pos is None or len(pos) < 3:
+                continue
+            entry = {"name": str(name), "position": [float(pos[0]), float(pos[1]), float(pos[2])]}
+            if info.get("dims") and len(info["dims"]) == 3:
+                entry["dims"] = [float(v) for v in info["dims"]]
+            out.append(entry)
+        self._scene_obstacles = out if out else None
+        return {"added": len(out), "removed": 0, "kept": 0}
 
     # ------------------------------------------------------------------
     # Held-object lifecycle — skills_lerobot signals grasp/release here so

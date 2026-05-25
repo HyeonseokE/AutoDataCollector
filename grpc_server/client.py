@@ -68,6 +68,7 @@ class PreselectiveClient:
         seed: int = 0,
         is_transit: bool = True,
         held_object: dict | None = None,
+        scene_obstacles: list | None = None,
     ) -> dict[str, Any]:
         """Send context + goal to server, receive chosen trajectory.
 
@@ -103,6 +104,26 @@ class PreselectiveClient:
             pose = held_object.get("pose_offset") or (0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0)
             for v in pose:
                 req.held_object.pose_offset.append(float(v))
+
+        # Optional dynamic scene obstacles (pot, plate, etc.) — server diffs
+        # against its last-applied signature so passing the same list every
+        # request is cheap. Empty / None → server clears dynamic obstacles
+        # back to its static baseline (table only).
+        if scene_obstacles:
+            for o in scene_obstacles:
+                if not o or not o.get("name"):
+                    continue
+                pos = o.get("position")
+                if pos is None or len(pos) < 3:
+                    continue
+                obs = req.scene_obstacles.add()
+                obs.name = str(o["name"])
+                for v in pos[:3]:
+                    obs.position.append(float(v))
+                dims = o.get("dims")
+                if dims and len(dims) == 3:
+                    for v in dims:
+                        obs.dims.append(float(v))
         resp = self.stub.PlanAndSelect(req, timeout=self.timeout_s)
 
         if resp.used_fallback:

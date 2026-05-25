@@ -63,6 +63,26 @@ class TaskRunner:
         try:
             exec_globals = self.build_exec_globals(positions, extra_globals)
             self.skills._exec_positions = positions
+            # Push the initial detected scene to the planner's collision world
+            # BEFORE the LLM-generated code runs any transit. Without this the
+            # first plan_batch is computed against the static-only baseline
+            # (table cuboid), so the held lid would be allowed to cross the
+            # pot rim. Backends without update_scene (legacy / disabled
+            # transport) silently no-op via AttributeError.
+            _client = getattr(self.skills, "_skill_planner_client", None)
+            if _client is not None and positions:
+                _obstacles = {
+                    name: {"position": info["position"]}
+                    for name, info in positions.items()
+                    if isinstance(info, dict) and info.get("position") is not None
+                }
+                if _obstacles:
+                    try:
+                        _client.update_scene(_obstacles)
+                    except AttributeError:
+                        pass
+                    except Exception as _e:
+                        print(f"[TaskRunner] initial update_scene failed: {_e}")
             try:
                 if self.recorder is not None:
                     return self._execute_with_recording(code, exec_globals)
@@ -70,6 +90,14 @@ class TaskRunner:
                     return self._execute_bare(code, exec_globals)
             finally:
                 self.skills._exec_positions = None
+                # Release any payload still marked held (defensive — execute_place_lid
+                # already calls gripper_open → mark_released, but if the LLM code
+                # left a payload attached the next episode would inherit it).
+                if _client is not None:
+                    try:
+                        _client.mark_released()
+                    except AttributeError:
+                        pass
 
         except AssertionError as e:
             error_msg = str(e)

@@ -193,6 +193,10 @@ class Phase2SubgoalReplay:
             f"episode_id={eid!r} seed_index={seed_index}"
         )
 
+        _branch = None
+        _chosen = None
+        _detail = None
+
         # 1) exact match
         if eid in self._by_episode:
             print(
@@ -202,6 +206,8 @@ class Phase2SubgoalReplay:
             self._episode_id = eid
             self._cursor = 0
             self._type_cursors = {}
+            _branch, _chosen, _detail = "exact_match", eid, {}
+            self._trace_set_episode(eid, seed_index, _branch, _chosen, _detail)
             return
 
         # 2) seed-aware rotation
@@ -218,6 +224,10 @@ class Phase2SubgoalReplay:
             self._episode_id = chosen
             self._cursor = 0
             self._type_cursors = {}
+            _branch, _chosen = "seed_aware", chosen
+            _detail = {"pool": list(pool), "cursor_before": sc,
+                       "cursor_used": sc % len(pool)}
+            self._trace_set_episode(eid, seed_index, _branch, _chosen, _detail)
             return
 
         # 3) LEGACY cycle fallback — seed-mismatch 가능
@@ -238,6 +248,9 @@ class Phase2SubgoalReplay:
                 self._episode_id = mapped
                 self._cursor = 0
                 self._type_cursors = {}
+                _branch, _chosen = "legacy_cycle", mapped
+                _detail = {"why": _why, "buffer_size": len(eps)}
+                self._trace_set_episode(eid, seed_index, _branch, _chosen, _detail)
                 return
 
         # 4) buffer 비었음 — 호출부에서 nominal fallback
@@ -248,6 +261,35 @@ class Phase2SubgoalReplay:
         self._episode_id = eid
         self._cursor = 0
         self._type_cursors = {}
+        _branch, _chosen = "buffer_empty", eid
+        self._trace_set_episode(eid, seed_index, _branch, _chosen, {})
+
+    # ── jsonl trace — TeeLogger 와 무관, set_trace_file() 로 경로 바인딩 ──
+    def set_trace_file(self, path) -> None:  # type: ignore[override]
+        """jsonl trace 파일 경로 바인딩. None 이면 비활성."""
+        self._trace_path = str(path) if path else None
+
+    def _trace_set_episode(self, eid, seed_index, branch, chosen, detail) -> None:
+        """set_episode 호출 결과를 jsonl 한 줄로 append (forward_log 와 무관)."""
+        path = getattr(self, "_trace_path", None)
+        if not path:
+            return
+        try:
+            import json as _json, time as _time
+            from pathlib import Path as _Path
+            _Path(path).parent.mkdir(parents=True, exist_ok=True)
+            rec = {
+                "ts": _time.time(),
+                "called_with": {"episode_id": eid, "seed_index": seed_index},
+                "branch": branch,
+                "chosen_episode": chosen,
+                "detail": detail,
+                "seed_cursor_snapshot": dict(self._seed_cursor),
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"[Phase2SubgoalReplay] trace write failed: {e}")
 
     def select_subgoal(
         self,
@@ -322,5 +364,5 @@ class Phase2SubgoalReplay:
     def set_current_context(self, *args, **kwargs) -> None:  # noqa: D102
         pass
 
-    def set_trace_file(self, *args, **kwargs) -> None:  # noqa: D102
-        pass
+    # NOTE: set_trace_file 는 위(__init__ 직후)에서 *진단 trace 활성화* 로 override.
+    # 옛 no-op stub 제거 — Phase1SubgoalSelector 호환은 그대로 유지된다.

@@ -1176,6 +1176,14 @@ class ForwardAndResetPipeline(BasePipeline):
             import traceback; traceback.print_exc()
             return
         self._phase2_subgoal_replay = replay
+        # 매 set_episode 호출을 session-level jsonl 에 기록 — TeeLogger 범위 밖에서
+        # 일어나는 호출도 누락 없이 RCA. forward_log 캡처와 무관.
+        try:
+            _trace = Path(session_dir) / "phase2_subgoal_replay_trace.jsonl"
+            replay.set_trace_file(str(_trace))
+            print(f"[Method3 phase2] subgoal replay trace → {_trace}")
+        except Exception as _e:
+            print(f"[Method3 phase2] subgoal replay trace bind 실패: {_e}")
         print(f"[Method3 phase2] subgoal replay READY — "
               f"{replay.n_episodes()} episodes 기록 (seed-aware rotation)")
         # _skills 가 이미 있으면 즉시 부착; 아직 lazy-init 전이면 _create_skills

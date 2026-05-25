@@ -1154,12 +1154,33 @@ class ForwardAndResetPipeline(BasePipeline):
             from method3.phase2_mi_selection.subgoal_replay import Phase2SubgoalReplay
             # seed-aware replay 를 위해 schedule context 주입 — entry 에 seed_index
             # stamp 가 없는 legacy buffer 도 (num_seeds, schedule_mode) 로 backfill.
-            # readiness hook 의 schedule_mode 가 source-of-truth (line 5299).
+            # 우선순위:
+            #   1) session_config.json — 그 session 의 실제 schedule_mode (SoT)
+            #   2) _phase1_readiness_hook.cfg.schedule_mode — fresh run 의 경우
+            #   3) "round_robin" — 현재 실험 default (옛 코드의 seed_major default 는
+            #      pool 매핑을 *완전히* 어긋나게 만든 RCA 의 원흉. 절대 다시 쓰지 마라.)
             _num_seeds = int(getattr(self, "num_random_seeds", 0) or 0) or None
             _hook_cfg = getattr(
                 getattr(self, "_phase1_readiness_hook", None), "cfg", None
             )
-            _sched = getattr(_hook_cfg, "schedule_mode", "seed_major")
+            _sched = "round_robin"  # safer default
+            try:
+                _scfg_path = Path(session_dir) / "session_config.json"
+                if _scfg_path.exists():
+                    import json as _json
+                    with open(_scfg_path, "r", encoding="utf-8") as _f:
+                        _sc = _json.load(_f)
+                    if isinstance(_sc.get("schedule_mode"), str):
+                        _sched = _sc["schedule_mode"]
+            except Exception as _e:
+                print(f"[Method3 phase2] session_config schedule_mode 읽기 실패: {_e}")
+            # hook cfg override (fresh run 의 경우 session_config 가 아직 없을 수 있음)
+            if _hook_cfg is not None and hasattr(_hook_cfg, "schedule_mode"):
+                _hk = getattr(_hook_cfg, "schedule_mode", None)
+                if isinstance(_hk, str) and _hk:
+                    _sched = _hk
+            print(f"[Method3 phase2] schedule_mode resolved → {_sched!r} "
+                  f"(num_seeds={_num_seeds})")
             _eps_per = (
                 max(1, int(self.total_episodes) // int(self.num_random_seeds))
                 if getattr(self, "total_episodes", 0) and _num_seeds

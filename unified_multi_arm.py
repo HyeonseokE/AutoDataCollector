@@ -207,6 +207,21 @@ class UnifiedMultiArmPipeline(BasePipeline):
             self._setup_skill_planner_transport()
         except Exception:
             pass
+        # Lazy init bug fix — run_multiple_episodes 가 session_dir 를 *_init_multi_arm
+        # 호출 *전*에* set 한다. selector 가 *여기서* 처음 부착되므로 finalize
+        # (buffer 파일 binding) 와 phase2 setup 도 *이 시점에* 호출해야 한다.
+        # 아직 session_dir 가 없으면 (드물게 외부 호출) silent skip — 곧 알 때
+        # 다시 호출되도록 run_multiple_episodes 측 finalize 가 backup.
+        _session_dir = getattr(self, "_session_dir", None)
+        if _session_dir:
+            try:
+                self._finalize_subgoal_buffer_per_arm(_session_dir)
+            except Exception as _e:
+                print(f"[Method3 bi-arm] finalize (lazy-init) skipped: {_e}")
+            try:
+                self._setup_phase2_session_per_arm(_session_dir)
+            except Exception as _e:
+                print(f"[Method3 bi-arm] phase2 session (lazy-init) skipped: {_e}")
         return True  # connect()는 LLM 코드에서 호출
 
     # ─────────────────────────────────────────────

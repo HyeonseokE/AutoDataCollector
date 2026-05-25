@@ -181,7 +181,7 @@ camera_rename:
 
 # --- gRPC transport endpoint (client ↔ server 통신) ---
 transport:
-  address: "127.0.0.1:50063"
+  address: "127.0.0.1:50064"
   timeout_s: 60.0
   debug_verbose: true                  # true → [skill_planner_transport] 로그 출력
 
@@ -257,7 +257,7 @@ remote:
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector-open_drawer"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
   gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES — GPU 0 (open_drawer 전용 isolation)
-  tmux_session: "phase2_server_open_drawer"   # 재시작 시 reuse; prefix unique (phase2_server_* family)
+  tmux_session: "phase2_server_close_pot"   # 재시작 시 reuse; prefix unique (phase2_server_* family) — close_pot 전용 isolation (open_drawer는 ws3 cell 다른 사용자 점유)
 
   # [선택] 동작 옵션
   git_pull_before_start: true

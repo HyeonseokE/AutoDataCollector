@@ -213,6 +213,16 @@ class CuroboBackend:
         # is needed; with use_cuda_graph=True, the first plan_batch call pays
         # the one-time capture cost and subsequent calls reuse the graph.
 
+        # Bootstrap collision world with the static table plane (and nothing
+        # else). Dynamic obstacles (pot, lid, ...) are layered on top via
+        # update_scene() from skills_lerobot's detect hook. Calling with an
+        # empty dict triggers our update_scene to emit just the _table cuboid.
+        # Failures are non-fatal — backend still works with self-collision only.
+        try:
+            self.update_scene({})
+        except Exception:
+            pass
+
         # Cleanup hook: belt-and-suspenders for the pipeline teardown path.
         # close() also runs via _teardown_skill_perturbation under normal
         # shutdown; atexit fires under exceptions / interpreter exit / when
@@ -228,12 +238,80 @@ class CuroboBackend:
     def dof(self) -> int:
         return self._n_arm
 
-    def update_scene(self, obstacles) -> dict:  # noqa: ARG002
-        # The previous CPU-OMPL daemon mutated its FCL world here. curobo
-        # uses a static collision world baked into the robot yaml, so this
-        # is intentionally a no-op — kept only to satisfy the duck-typed
-        # planner interface that skills_lerobot's detect hook calls.
-        return {"added": 0, "removed": 0, "kept": 0}
+    def update_scene(self, obstacles) -> dict:
+        """Push detected scene objects into curobo's collision world.
+
+        obstacles: dict[name → {"position": [x,y,z], "dims"?: [w,d,h]}]
+                   or list of similar dicts.
+
+        Each obstacle becomes a Cuboid. Detected z is treated as the OBJECT TOP
+        (consistent with pix2robot / charuco convention), so the cuboid center
+        sits at z/2 with default height = z (object lying on table).
+
+        A persistent _table cuboid is always re-emitted so the planner never
+        descends below the workspace surface.
+
+        Failures are swallowed — falling back to self-collision-only is safer
+        than aborting the episode.
+        """
+        try:
+            from curobo.geom.types import SceneCfg, Cuboid
+        except Exception:
+            return {"added": 0, "removed": 0, "kept": 0, "error": "curobo SceneCfg/Cuboid import failed"}
+
+        if isinstance(obstacles, dict):
+            items = list(obstacles.items())
+        elif isinstance(obstacles, (list, tuple)):
+            items = [(o.get("name", f"obs_{i}"), o) for i, o in enumerate(obstacles)]
+        else:
+            return {"added": 0, "removed": 0, "kept": 0, "error": "unsupported obstacles type"}
+
+        # Static table plane — 80×80×5 cm centered at (0.30, 0, -0.025).
+        # Top surface sits at z=0, matching the kinematics frame convention.
+        cuboids = [Cuboid(
+            name="_table",
+            pose=[0.30, 0.0, -0.025, 1.0, 0.0, 0.0, 0.0],
+            dims=[0.80, 0.80, 0.05],
+        )]
+
+        DEFAULT_FOOTPRINT_M = 0.08   # 8 cm x/y default when bbox unknown
+        SAFETY_MARGIN_M = 0.01       # +1 cm radial pad
+
+        n_added = 0
+        for name, info in items:
+            if not isinstance(info, dict):
+                continue
+            pos = info.get("position")
+            if pos is None or len(pos) < 3:
+                continue
+            try:
+                px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+            except Exception:
+                continue
+            # Skip held / about-to-be-held lid — its detected position is stale
+            # the moment the gripper closes. Better to omit than to phantom-block.
+            if "lid" in str(name).lower():
+                continue
+            dims = info.get("dims")
+            if dims and len(dims) == 3:
+                w, d, h = float(dims[0]) + SAFETY_MARGIN_M, float(dims[1]) + SAFETY_MARGIN_M, float(dims[2])
+            else:
+                # z is the object top → height = z, footprint = 8cm default
+                w = DEFAULT_FOOTPRINT_M + SAFETY_MARGIN_M
+                d = DEFAULT_FOOTPRINT_M + SAFETY_MARGIN_M
+                h = max(pz, 0.02)  # min 2cm height for thin objects
+            cuboids.append(Cuboid(
+                name=str(name),
+                pose=[px, py, max(pz, h) / 2.0, 1.0, 0.0, 0.0, 0.0],
+                dims=[w, d, h],
+            ))
+            n_added += 1
+
+        try:
+            self._planner.update_world(SceneCfg(cuboid=cuboids))
+            return {"added": n_added + 1, "removed": 0, "kept": 0}  # +1 for table
+        except Exception as e:
+            return {"added": 0, "removed": 0, "kept": 0, "error": f"update_world failed: {e}"}
 
     def close(self) -> None:
         """Release GPU resources held by curobo (CUDA graphs, trajopt/IK

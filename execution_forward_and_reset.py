@@ -878,13 +878,17 @@ class ForwardAndResetPipeline(BasePipeline):
         보고함. 그래서 호출 후 `_resume_kept_true_episodes = None` 으로 비워
         finalize 의 reconcile 블록이 silent skip 되게 한다 (중복 로그 방지).
         """
-        # Phase2 는 Phase1 subgoal buffer 를 read-only 로 replay 한다. reconcile
-        # (stale episode drop) 은 Phase1 누적 정합용 — Phase2 resume 에서 돌면
-        # phase2/ 가 비어 kept_true_episodes=∅ 이 되고, Phase1 도달 subgoal 기록을
-        # 전부 stale 로 오판해 retain_episodes 가 날린다 (replay 데이터 소스 파괴).
-        if str(getattr(self, "method3_phase", "phase1")).lower() == "phase2":
-            print("[Perturbation] resume reconcile SKIPPED — method3_phase=phase2 "
-                  "(Phase1 subgoal buffer 는 replay 전용으로 보존)")
+        # Phase2 도 reconcile 활성화 — cleanup_dataset_for_resume 가 phase1/ +
+        # phase2/ + legacy 폴더 모두 스캔해 kept_true_episodes 를 산정하므로
+        # (cleanup.py L101-104) 이 reconcile 이 phase1 buffer 를 날릴 위험은
+        # 없다. 과거 가드는 phase2/ 만 보던 cleanup 시절의 잔재였음.
+        # 만약 cleanup 이 *완전히 skip* 됐다면 kept=None → 아래에서 자체 return.
+        # 안전판: kept_true_episodes 가 비어있으면 (cleanup 실패 등) 전체 drop
+        # 위험이 있으므로 reconcile 자체를 abort 한다.
+        _kept_check = getattr(self, "_resume_kept_true_episodes", None)
+        if _kept_check is not None and len(_kept_check) == 0:
+            print("[Perturbation] resume reconcile SKIPPED — kept_true_episodes=∅ "
+                  "(cleanup 가 폴더를 못 봤거나 빈 세션 — buffer 전부 날리지 않도록 abort)")
             return
         _kept = getattr(self, "_resume_kept_true_episodes", None)
         if _kept is None:

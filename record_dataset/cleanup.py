@@ -208,10 +208,26 @@ def cleanup_dataset_for_resume(
         assigned += 1
 
     # 초과분 처리 (dataset에 pipeline보다 많은 에피소드가 있는 경우)
+    # SAFETY GUARD — 폴더가 사라진 trailing ep 를 *silent 하게* dataset 에서
+    # 잘라내면 사용자가 손실을 인지 못 한다 (실측 RCA: session_20260524_233421
+    # 의 ep_69/70 가 폴더 rm 후 cleanup 이 tail 2 ep 자동 trim). 의도적이라면
+    # CLEANUP_FORCE_TRIM=1 으로 한 번만 풀어주고, 그 외엔 abort.
     if actual_dataset_episodes > assigned:
+        import os as _os
         excess_indices = list(range(assigned, actual_dataset_episodes))
-        dataset_indices_to_delete.extend(excess_indices)
-        _dprint(f"[Cleanup] {len(excess_indices)} excess episodes at tail → DELETE (indices {excess_indices})")
+        if _os.environ.get("CLEANUP_FORCE_TRIM"):
+            dataset_indices_to_delete.extend(excess_indices)
+            _dprint(f"[Cleanup] {len(excess_indices)} excess episodes at tail → DELETE "
+                    f"(indices {excess_indices})  [CLEANUP_FORCE_TRIM=1]")
+        else:
+            _dprint(f"[Cleanup] ⚠ ABORT — dataset has {actual_dataset_episodes} ep but "
+                    f"only {assigned} folders found. Tail trim 후보: {excess_indices}")
+            _dprint(f"[Cleanup] 폴더가 실수로 사라진 경우일 수 있다. 의도적 trim 이면 "
+                    f"`CLEANUP_FORCE_TRIM=1 ...` 으로 한 번만 재실행.")
+            raise RuntimeError(
+                f"cleanup_dataset_for_resume: silent excess trim blocked "
+                f"({len(excess_indices)} ep at tail). Set CLEANUP_FORCE_TRIM=1 to allow."
+            )
 
     # Corrupted-episode guard — video 프레임 수 ≠ metadata length 인 episode 감지.
     # delete_episodes() 는 *살아남는* episode 를 video reindex 할 때

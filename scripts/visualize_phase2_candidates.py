@@ -75,8 +75,14 @@ def _project(robot_xyz, calib) -> np.ndarray:
 
 
 def _panel_a_overlay(ax, ee, K, chosen, eligible, under, gt_ee, gt_episode,
-                     goal_ee, top_image, skill, calib) -> None:
-    """(a) top-view 이미지 위에 후보·g.t.·chosen trajectory 를 2D 오버레이."""
+                     goal_ee, top_image, skill, calib,
+                     accepted=None, fallback_reason: str = "",
+                     gt_miss_reason: str = "") -> None:
+    """(a) top-view 이미지 위에 후보·g.t.·chosen trajectory 를 2D 오버레이.
+
+    ``accepted`` (True/False/None) 와 ``fallback_reason`` 으로 selection 결과
+    상태를 top-left 코너에 색상 라벨로 시각화 — 사용자가 한눈에 파악.
+    """
     ax.imshow(top_image)
     H, W = top_image.shape[:2]
     color = {"under": _C_UNDER, "reject": _C_REJECT,
@@ -96,7 +102,8 @@ def _panel_a_overlay(ax, ee, K, chosen, eligible, under, gt_ee, gt_episode,
                         zorder=6, label=f"chosen #{chosen}")
             else:
                 ax.plot(px[:, 0], px[:, 1], color=color[cat], lw=0.7, alpha=0.55)
-    if gt_ee.ndim == 2 and len(gt_ee) > 0:
+    gt_present = gt_ee.ndim == 2 and len(gt_ee) > 0
+    if gt_present:
         gpx = _project(gt_ee, calib)
         if len(gpx) > 0:
             ax.plot(gpx[:, 0], gpx[:, 1], color=_C_GT, lw=2.8, zorder=7,
@@ -111,10 +118,54 @@ def _panel_a_overlay(ax, ee, K, chosen, eligible, under, gt_ee, gt_episode,
     ax.set_ylim(H, 0)
     ax.set_title(f"(a) top-view overlay — {K} candidates, skill={skill}")
     ax.legend(loc="upper right", fontsize=8)
+    # ── accept/fallback 상태 라벨 (top-left) ──
+    _draw_status_label(ax, accepted, fallback_reason, gt_present, gt_miss_reason)
+
+
+def _draw_status_label(ax, accepted, fallback_reason: str,
+                       gt_present: bool, gt_miss_reason: str) -> None:
+    """selection 결과 + GT 상태를 화면 좌상단에 색상 라벨로 표시.
+
+    - accepted=True       : "TRUE" (초록색)
+    - accepted=False      : "FALLBACK" (노랑색) + 이유
+    - gt_present=False    : "GT MISSING" (노랑색) + 이유
+    """
+    y_anchor = 0.985
+    line_h = 0.045
+    # accept/fallback 상태
+    if accepted is True:
+        ax.text(0.012, y_anchor, "TRUE", transform=ax.transAxes,
+                fontsize=14, fontweight="bold", color="#00b800",
+                va="top", ha="left",
+                bbox=dict(facecolor="white", edgecolor="#00b800",
+                          boxstyle="round,pad=0.30", alpha=0.85))
+    elif accepted is False:
+        ax.text(0.012, y_anchor, "FALLBACK", transform=ax.transAxes,
+                fontsize=14, fontweight="bold", color="#d4a000",
+                va="top", ha="left",
+                bbox=dict(facecolor="white", edgecolor="#d4a000",
+                          boxstyle="round,pad=0.30", alpha=0.85))
+        if fallback_reason:
+            ax.text(0.012, y_anchor - line_h, fallback_reason,
+                    transform=ax.transAxes,
+                    fontsize=9, color="#d4a000", va="top", ha="left",
+                    bbox=dict(facecolor="white", edgecolor="none",
+                              boxstyle="round,pad=0.20", alpha=0.75))
+    # GT missing 상태 (별도 줄)
+    if not gt_present:
+        offset = (2 if accepted is False and fallback_reason else
+                  1 if accepted is False or accepted is True else 0)
+        gt_y = y_anchor - line_h * offset - line_h
+        ax.text(0.012, gt_y, f"GT MISSING — {gt_miss_reason}",
+                transform=ax.transAxes,
+                fontsize=9, color="#d4a000", va="top", ha="left",
+                bbox=dict(facecolor="white", edgecolor="none",
+                          boxstyle="round,pad=0.20", alpha=0.75))
 
 
 def _panel_a_3d(ax, ee, K, chosen, eligible, under, gt_ee, gt_episode,
-                seed, skill) -> None:
+                seed, skill, accepted=None, fallback_reason: str = "",
+                gt_miss_reason: str = "") -> None:
     """(a) fallback — top_image/calib 없을 때 3D EE plot."""
     color = {"under": _C_UNDER, "reject": _C_REJECT,
              "eligible": _C_ELIGIBLE, "chosen": _C_CHOSEN}
@@ -131,7 +182,8 @@ def _panel_a_3d(ax, ee, K, chosen, eligible, under, gt_ee, gt_episode,
             else:
                 ax.plot(p[:, 0], p[:, 1], p[:, 2], color=color[cat],
                         lw=0.7, alpha=0.55)
-    if gt_ee.ndim == 2 and len(gt_ee) > 0:
+    gt_present = gt_ee.ndim == 2 and len(gt_ee) > 0
+    if gt_present:
         ax.plot(gt_ee[:, 0], gt_ee[:, 1], gt_ee[:, 2], color=_C_GT, lw=2.8,
                 zorder=6, label=f"g.t. Phase1{' ' + gt_episode if gt_episode else ''}")
     if seed is not None and seed.shape[0] >= 3:
@@ -140,6 +192,27 @@ def _panel_a_3d(ax, ee, K, chosen, eligible, under, gt_ee, gt_episode,
     ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_zlabel("z (m)")
     ax.set_title(f"(a) {K} candidate EE paths (3D) — skill={skill}")
     ax.legend(loc="upper left", fontsize=8)
+    # 3D axes 는 transAxes 좌표가 다름 — text2D 로 corner 라벨.
+    if accepted is True:
+        ax.text2D(0.012, 0.985, "TRUE", transform=ax.transAxes,
+                  fontsize=14, fontweight="bold", color="#00b800",
+                  va="top", ha="left",
+                  bbox=dict(facecolor="white", edgecolor="#00b800",
+                            boxstyle="round,pad=0.30", alpha=0.85))
+    elif accepted is False:
+        ax.text2D(0.012, 0.985, "FALLBACK", transform=ax.transAxes,
+                  fontsize=14, fontweight="bold", color="#d4a000",
+                  va="top", ha="left",
+                  bbox=dict(facecolor="white", edgecolor="#d4a000",
+                            boxstyle="round,pad=0.30", alpha=0.85))
+        if fallback_reason:
+            ax.text2D(0.012, 0.93, fallback_reason, transform=ax.transAxes,
+                      fontsize=9, color="#d4a000", va="top", ha="left")
+    if not gt_present:
+        gt_y = 0.88 if (accepted is False and fallback_reason) else 0.93
+        ax.text2D(0.012, gt_y, f"GT MISSING — {gt_miss_reason}",
+                  transform=ax.transAxes, fontsize=9, color="#d4a000",
+                  va="top", ha="left")
 
 
 def visualize(npz_path: str, calib_path: str = _DEFAULT_CALIB,
@@ -170,16 +243,62 @@ def visualize(npz_path: str, calib_path: str = _DEFAULT_CALIB,
 
     out_overlay = out_path or str(Path(npz_path).with_suffix(".png"))
 
+    # ── accept/fallback 이유 + GT miss 이유 추론 ──
+    # under_covered 가 bool array 면 sum 으로 비율. K=64 일 때 64/64 면 "all under-covered".
+    try:
+        under_arr = np.asarray(under, dtype=bool)
+        n_under = int(under_arr.sum())
+    except Exception:
+        n_under = 0
+    n_eligible = len(eligible)
+    fallback_reason = ""
+    if not accepted:
+        # eligible=0 의 두 가지 이유 분기. 한글 폰트 없는 환경 대비 영문화.
+        if n_under == K:
+            fallback_reason = (
+                f"all {K} candidates under-covered "
+                f"(buffer never observed this region) -> eligible=0, "
+                f"argmax M_MI fallback, NOT accepted to buffer"
+            )
+        elif n_eligible == 0:
+            fallback_reason = (
+                f"0 candidates satisfy M_MI_norm >= tau_MI({tau:g}) "
+                f"(under={n_under}/{K}) -> argmax M_MI fallback"
+            )
+        else:
+            fallback_reason = (
+                f"eligible={n_eligible}/{K} but chosen #{chosen} is outside "
+                f"(under_covered or reject) -> fallback"
+            )
+    # GT 없을 때의 이유 추론 — server _extract_gt 가 빈 array 반환한 경우.
+    gt_miss_reason = ""
+    gt_present_flag = isinstance(gt_ee, np.ndarray) and gt_ee.ndim == 2 and len(gt_ee) > 0
+    if not gt_present_flag:
+        if not (isinstance(skill, str) and skill.startswith("skill_") and
+                skill.split("_")[-1].isdigit()):
+            gt_miss_reason = (
+                f"skill_id={skill!r} not ordinal form -> P_phase1 DB lookup miss"
+            )
+        else:
+            gt_miss_reason = (
+                f"P_phase1 DB has no matching {skill}::descriptors entry "
+                f"or start+goal nearest match failed"
+            )
+
     # ── fig1: top-view 오버레이 (또는 3D fallback) — 경로 시각화 ──
     fig1 = plt.figure(figsize=(8, 7))
     if has_img and calib is not None:
         ax = fig1.add_subplot(111)
         _panel_a_overlay(ax, ee, K, chosen, eligible, under, gt_ee,
-                         gt_episode, goal_ee, top_image, skill, calib)
+                         gt_episode, goal_ee, top_image, skill, calib,
+                         accepted=accepted, fallback_reason=fallback_reason,
+                         gt_miss_reason=gt_miss_reason)
     else:
         ax = fig1.add_subplot(111, projection="3d")
         _panel_a_3d(ax, ee, K, chosen, eligible, under, gt_ee, gt_episode,
-                    seed, skill)
+                    seed, skill, accepted=accepted,
+                    fallback_reason=fallback_reason,
+                    gt_miss_reason=gt_miss_reason)
     fig1.tight_layout()
     fig1.savefig(out_overlay, dpi=130)
     plt.close(fig1)

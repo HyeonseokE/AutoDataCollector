@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from method3.phase1_state_seeding.subgoal_buffer import SubgoalBuffer
+from method3.phase1_state_seeding.subgoal_buffer import SubgoalBuffer, skill_ordinal
 from method3.phase1_state_seeding.subgoal_selector import SubgoalSelection
 
 
@@ -108,13 +108,11 @@ class Phase2SubgoalReplay:
         # {episode_id: seed_index} — 진단/로그용.
         self._seed_by_episode: dict[str, int] = {}
 
-        def _sk_ord(skill_id: str) -> int:
-            """``skill_NN`` 에서 NN 추출. 매치 실패 시 매우 큰 값 (말미로 정렬)."""
-            m2 = re.search(r"(\d+)", str(skill_id))
-            return int(m2.group(1)) if m2 else 10**9
-
-        for skill_id in buf.skill_ids():
-            sk_ord = _sk_ord(skill_id)
+        # iter 순서도 numeric sort — load() 가 이미 numeric sort 로 빌드해도
+        # 안전망 (legacy buffer 또는 다른 caller 가 load 수정 전 코드일 경우).
+        # _staged sort 와 이중 안전.
+        for skill_id in sorted(buf.skill_ids(), key=skill_ordinal):
+            sk_ord = skill_ordinal(skill_id)
             for e in buf.entries(skill_id):
                 eid = str(e.episode_id)
                 if not eid:

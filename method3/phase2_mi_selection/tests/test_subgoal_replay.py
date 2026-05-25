@@ -15,6 +15,7 @@ import pytest
 from method3.phase1_state_seeding.subgoal_buffer import (
     SubgoalBuffer,
     SubgoalBufferEntry,
+    skill_ordinal,
 )
 from method3.phase1_state_seeding.terminal_descriptor import DESCRIPTOR_DIM
 from method3.phase2_mi_selection.subgoal_replay import Phase2SubgoalReplay
@@ -214,7 +215,60 @@ class TestRcaRegression:
 
 
 # ─────────────────────────────────────────────────────────────
-# 6) skill ordinal sort — buf.skill_ids() 가 string sort 일 때 회귀 방지
+# 6) skill ordinal sort — load() + Phase2SubgoalReplay 둘 다 회귀 방지
+# ─────────────────────────────────────────────────────────────
+class TestSkillOrdinalUtility:
+    """``skill_ordinal`` helper 의 정확성."""
+    def test_basic(self):
+        assert skill_ordinal("skill_0") == 0
+        assert skill_ordinal("skill_2") == 2
+        assert skill_ordinal("skill_10") == 10
+        assert skill_ordinal("skill_99") == 99
+
+    def test_sort_yields_call_order(self):
+        ids = ["skill_0", "skill_1", "skill_10", "skill_11", "skill_2",
+               "skill_3", "skill_9"]
+        # string sort 함정: skill_10 < skill_2
+        assert sorted(ids) != ["skill_0", "skill_1", "skill_2", "skill_3",
+                               "skill_9", "skill_10", "skill_11"]
+        # numeric sort 는 호출 순서 (sk0, sk1, sk2, sk3, sk9, sk10, sk11)
+        assert sorted(ids, key=skill_ordinal) == ["skill_0", "skill_1",
+            "skill_2", "skill_3", "skill_9", "skill_10", "skill_11"]
+
+
+class TestSubgoalBufferLoadOrder:
+    """``SubgoalBuffer.load()`` 가 self._skills 를 *호출 순서* (skill_0, 1, 2,
+    ..., 10, 11, ...) 로 채워야 함 — 옛 코드의 string sort 함정 회귀 방지.
+    """
+    def test_load_preserves_numeric_order(self, tmp_path):
+        from method3.phase1_state_seeding.terminal_descriptor import DESCRIPTOR_DIM
+        import numpy as np
+        buf = SubgoalBuffer()
+        buf.set_file(tmp_path / "buf.npz")
+        key = np.zeros(DESCRIPTOR_DIM, dtype=np.float64)
+        # save 시 의도적으로 random 순서로 append
+        for i in [0, 1, 10, 11, 2, 3, 9]:
+            buf.append(SubgoalBufferEntry(
+                skill_id=f"skill_{i}",
+                subgoal=np.array([i, 0, 0], dtype=np.float64),
+                terminal_region_key=key,
+                end_state_keys=key.reshape(1, -1),
+                episode_id="episode_01",
+            ))
+        buf.save()
+        # 새 buffer 객체로 load → self._skills 의 dict order 가 numeric sort
+        buf2 = SubgoalBuffer()
+        buf2.set_file(tmp_path / "buf.npz")
+        buf2.load()
+        loaded_order = list(buf2._skills.keys())
+        assert loaded_order == ["skill_0", "skill_1", "skill_2", "skill_3",
+                                "skill_9", "skill_10", "skill_11"], (
+            f"load 후 dict order 가 numeric sort 가 아님: {loaded_order}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# 7) Phase2SubgoalReplay — string sort 함정 회귀 방지 (기존)
 # ─────────────────────────────────────────────────────────────
 class TestSkillOrdinalSort:
     """RCA (session_20260524_233421/phase2/episode_71): type-aware lookup 의

@@ -89,6 +89,18 @@ def _safe_skill_name(skill_id) -> str:
     return re.sub(r"[^0-9A-Za-z._-]", "_", str(skill_id))
 
 
+def skill_ordinal(skill_id) -> int:
+    """``skill_NN`` 의 숫자 부분 추출 — Phase1SubgoalSelector 가 commit 시
+    ``skill_0, skill_1, ..., skill_N`` 순서대로 stamp 하므로 이 값이 *episode
+    안 호출 순서*. ``skill_ids()`` 가 *string sort* (``skill_10 < skill_2``)
+    인 함정을 피하기 위해 *모든 caller* 가 이 helper 로 정렬할 것을 권장.
+
+    NN 매치 실패 시 매우 큰 값 (목록 말미로 정렬). 안전한 fallback.
+    """
+    m = re.search(r"(\d+)", str(skill_id))
+    return int(m.group(1)) if m else 10 ** 9
+
+
 def _as_npz_path(path: str | Path) -> Path:
     """버퍼 파일 경로가 ``.npz`` 확장자를 갖도록 정규화한다.
 
@@ -329,7 +341,16 @@ class SubgoalBuffer:
         if self._file is None or not self._file.exists():
             return
         with np.load(self._file, allow_pickle=False) as data:
-            skills = sorted({m.split("::", 1)[0] for m in data.files if "::" in m})
+            # *호출 순서* (skill_0, skill_1, ..., skill_N) 로 정렬해 self._skills
+            # dict insert order 를 보존한다. 옛 코드의 ``sorted({...})`` (string
+            # sort) 는 ``skill_10 < skill_2`` 함정 — type-aware lookup 의 매핑
+            # 순서가 호출 순서와 어긋나 lift/move 가 다른 object 로 향하던
+            # RCA 의 *근본 원인* 이었다. ``skill_ordinal`` helper 로 numeric
+            # sort 하여 모든 caller 가 일관된 순서를 보게 한다.
+            skills = sorted(
+                {m.split("::", 1)[0] for m in data.files if "::" in m},
+                key=skill_ordinal,
+            )
             for s in skills:
                 if f"{s}::key" not in data.files:
                     continue

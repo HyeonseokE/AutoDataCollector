@@ -40,10 +40,52 @@ class Phase2SubgoalReplay:
     # 구분하도록 하는 마커.
     is_phase2_replay = True
 
-    def __init__(self, buffer_path: str | Path) -> None:
+    def __init__(
+        self,
+        buffer_path: str | Path,
+        num_seeds: int | None = None,
+        schedule_mode: str = "round_robin",
+        episodes_per_seed: int | None = None,
+    ) -> None:
+        """Phase1 도달 subgoal buffer 를 seed-aware 로 replay 한다.
+
+        Args:
+            buffer_path: Phase1 ``subgoal_buffer.npz`` 경로.
+            num_seeds: 전체 seed 수. seed-aware lookup 의 backfill 용 — buffer
+                entry 에 ``seed_index`` 가 stamp 되어 있지 않은 *legacy* buffer
+                에 대해서만 이 값으로 episode_id → seed_index 를 복원한다
+                (round_robin: ``(ep_num-1) % num_seeds``; seed_major:
+                ``(ep_num-1) // episodes_per_seed``). stamp 된 buffer 는 우선.
+            schedule_mode: backfill 가정의 schedule. ``round_robin`` 또는
+                ``seed_major``. 기본값 round_robin (현재 실험 default).
+            episodes_per_seed: seed_major backfill 에 필요. round_robin 에선 무시.
+        """
         buf = SubgoalBuffer()
         buf.set_file(Path(buffer_path))
         buf.load()
+
+        self._num_seeds = int(num_seeds) if num_seeds else None
+        self._schedule_mode = str(schedule_mode)
+        self._episodes_per_seed = (
+            int(episodes_per_seed) if episodes_per_seed else None
+        )
+
+        def _ep_to_seed(eid: str) -> int:
+            """episode_id 에서 seed_index 를 round_robin/seed_major 가정으로 추정."""
+            if self._num_seeds is None or self._num_seeds <= 0:
+                return -1
+            m = re.search(r"(\d+)", str(eid))
+            if not m:
+                return -1
+            n = int(m.group(1))
+            if self._schedule_mode == "round_robin":
+                return (n - 1) % self._num_seeds
+            if self._schedule_mode == "seed_major":
+                if not self._episodes_per_seed or self._episodes_per_seed <= 0:
+                    return -1
+                return (n - 1) // self._episodes_per_seed
+            return -1
+
         # {episode_id: [(subgoal_xyz, skill_type), ...]} — episode 내 호출 순서.
         # SubgoalBuffer 는 ordinal key(skill_0, skill_1, ...) 로 저장되므로
         # entry 를 start_t(=staging 순서) 로 정렬하면 곧 호출 순서다.
@@ -51,6 +93,13 @@ class Phase2SubgoalReplay:
         # (caller 의 skill_type 명시 받아 같은 type 의 다음 entry 반환 — 한 skill
         # 안 여러 select_subgoal 호출 시 cursor 단순 +1 의 over-advance 회피).
         _staged: dict[str, list[tuple]] = {}
+        # {seed_index: [episode_id, ...]} — seed-aware lookup. entry stamp 우선,
+        # 없으면 backfill (num_seeds + schedule_mode 가 둘 다 정해진 경우만).
+        # episode_id 기준 de-dup → 다중 entry 의 같은 ep 는 1번만 등록.
+        _eps_by_seed_set: dict[int, set[str]] = {}
+        # {episode_id: seed_index} — 진단/로그용.
+        self._seed_by_episode: dict[str, int] = {}
+
         for skill_id in buf.skill_ids():
             for e in buf.entries(skill_id):
                 eid = str(e.episode_id)
@@ -62,6 +111,14 @@ class Phase2SubgoalReplay:
                      np.asarray(e.subgoal, dtype=float),
                      str(getattr(e, "skill_type", "")))
                 )
+                # seed-aware index: entry stamp 우선, 누락 시 backfill.
+                si = int(getattr(e, "seed_index", -1))
+                if si < 0:
+                    si = _ep_to_seed(eid)
+                if si >= 0:
+                    _eps_by_seed_set.setdefault(si, set()).add(eid)
+                    self._seed_by_episode.setdefault(eid, si)
+
         # {eid: [subgoal_xyz, ...]} — cursor fallback path 용 (legacy 호환).
         self._by_episode: dict[str, list[np.ndarray]] = {}
         # {eid: [skill_type, ...]} — type-aware lookup 용 (호출 순서 동일 인덱스).
@@ -71,6 +128,14 @@ class Phase2SubgoalReplay:
             self._by_episode[eid] = [xyz for _, xyz, _ in lst]
             self._by_episode_types[eid] = [t for _, _, t in lst]
 
+        # seed 별 sorted episode pool (deterministic rotation).
+        self._eps_by_seed: dict[int, list[str]] = {
+            si: sorted(eids) for si, eids in _eps_by_seed_set.items()
+        }
+        # seed 별 rotation cursor — 같은 seed pool 의 ep 들을 균등 분산 사용.
+        # set_episode 호출 순서대로 +1, pool size 로 wrap-around.
+        self._seed_cursor: dict[int, int] = {}
+
         self._episode_id: str = ""
         # cursor (legacy fallback) — skill_type 빈 caller 호환.
         self._cursor: int = 0
@@ -79,28 +144,94 @@ class Phase2SubgoalReplay:
         # advance 방지). set_episode 에서 빈 dict 로 reset.
         self._type_cursors: dict[str, int] = {}
 
+        # 진단 로그 — seed-aware coverage 보고.
+        if self._eps_by_seed:
+            _per_seed = sorted(
+                (si, len(eids)) for si, eids in self._eps_by_seed.items()
+            )
+            print(
+                f"[Phase2SubgoalReplay] seed-aware index built: "
+                f"{len(self._eps_by_seed)} seeds, "
+                f"pool sizes: {_per_seed[:10]}"
+                f"{'...' if len(_per_seed) > 10 else ''}"
+            )
+        else:
+            print(
+                "[Phase2SubgoalReplay] ⚠ seed-aware index EMPTY — "
+                "entry seed_index 도 num_seeds backfill 도 없음. "
+                "set_episode 는 legacy cycle fallback 으로 동작 "
+                "(seed-mismatch 위험)."
+            )
+
     def n_episodes(self) -> int:
         return len(self._by_episode)
 
-    def set_episode(self, episode_id: str) -> None:
+    def set_episode(self, episode_id: str, seed_index: int = -1) -> None:
         """episode 전환 — replay 커서를 0 으로 리셋.
 
-        Phase2 는 ``phase2/episode_{N}`` 으로 쌓이고 N 은 Phase1 episode 수
-        다음부터 이어진다 (예: Phase1 episode_01~40 → Phase2 episode_41~).
-        buffer 는 Phase1 의 episode_01~M 만 보유하므로, buffer 에 직접 매치되지
-        않는 episode_id 는 번호를 buffer episode 범위로 cycle 매핑한다 — Phase2
-        의 k 번째 episode 가 Phase1 의 k 번째 도달 subgoal set 을 replay 하도록
-        (episode_41 → episode_01, episode_42 → episode_02, ...).
+        매핑 우선순위 (방법론 정합 + seed-mismatch 회피):
+
+        1. **Exact match** — ``episode_id`` 가 buffer 에 있으면 그대로
+           (Phase1 자기 episode replay 시).
+        2. **Seed-aware** — ``seed_index ≥ 0`` 이고 그 seed 의 buffer pool 이
+           비어있지 않으면 그중 하나를 rotation 으로 선택. **현재 reset 의 seed
+           와 동일한 seed 의 Phase1 episode subgoal 만 replay** — approach 와
+           pick descent 사이 seed-mismatch 가 원천 차단된다.
+        3. **Legacy cycle fallback (위험)** — 1·2 둘 다 실패 시 옛 cycle 매핑
+           (``eps[(N-1) % len(eps)]``). seed 무관 매핑이라 mismatch 위험. 경고
+           로그 출력. ``__init__`` 의 num_seeds backfill 도 없이 도착한 경우에만
+           이 분기에 도달한다.
+
+        Args:
+            episode_id: 현재 Phase2 episode 식별자 (e.g. ``"episode_69"``).
+            seed_index: 현재 episode reset 의 0-based seed index. -1 면 모름.
         """
         eid = str(episode_id)
-        if eid not in self._by_episode and self._by_episode:
+
+        # 1) exact match
+        if eid in self._by_episode:
+            self._episode_id = eid
+            self._cursor = 0
+            self._type_cursors = {}
+            return
+
+        # 2) seed-aware rotation
+        if seed_index >= 0 and seed_index in self._eps_by_seed:
+            pool = self._eps_by_seed[seed_index]
+            sc = self._seed_cursor.get(seed_index, 0)
+            chosen = pool[sc % len(pool)]
+            self._seed_cursor[seed_index] = sc + 1
+            print(
+                f"[Phase2SubgoalReplay] {eid} (seed={seed_index}) → {chosen} "
+                f"(seed-aware rotation; pool={len(pool)}, "
+                f"cursor={sc % len(pool)})"
+            )
+            self._episode_id = chosen
+            self._cursor = 0
+            self._type_cursors = {}
+            return
+
+        # 3) LEGACY cycle fallback — seed-mismatch 가능
+        if self._by_episode:
             eps = sorted(self._by_episode.keys())
             m = re.search(r"(\d+)", eid)
             if m:
                 mapped = eps[(int(m.group(1)) - 1) % len(eps)]
-                print(f"[Phase2SubgoalReplay] {eid} → {mapped} "
-                      f"(buffer 범위로 cycle 매핑; buffer={len(eps)} episodes)")
-                eid = mapped
+                _why = (
+                    "seed_index 미전달" if seed_index < 0
+                    else f"seed={seed_index} 가 buffer pool 에 없음"
+                )
+                print(
+                    f"[Phase2SubgoalReplay] ⚠ {eid} → {mapped} "
+                    f"(SEED-BLIND cycle fallback; {_why}; "
+                    f"buffer={len(eps)} episodes) — seed mismatch 위험"
+                )
+                self._episode_id = mapped
+                self._cursor = 0
+                self._type_cursors = {}
+                return
+
+        # 4) buffer 비었음 — 호출부에서 nominal fallback
         self._episode_id = eid
         self._cursor = 0
         self._type_cursors = {}

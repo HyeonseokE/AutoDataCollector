@@ -1147,14 +1147,32 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         try:
             from method3.phase2_mi_selection.subgoal_replay import Phase2SubgoalReplay
-            replay = Phase2SubgoalReplay(buf_path)
+            # seed-aware replay 를 위해 schedule context 주입 — entry 에 seed_index
+            # stamp 가 없는 legacy buffer 도 (num_seeds, schedule_mode) 로 backfill.
+            # readiness hook 의 schedule_mode 가 source-of-truth (line 5299).
+            _num_seeds = int(getattr(self, "num_random_seeds", 0) or 0) or None
+            _hook_cfg = getattr(
+                getattr(self, "_phase1_readiness_hook", None), "cfg", None
+            )
+            _sched = getattr(_hook_cfg, "schedule_mode", "seed_major")
+            _eps_per = (
+                max(1, int(self.total_episodes) // int(self.num_random_seeds))
+                if getattr(self, "total_episodes", 0) and _num_seeds
+                else None
+            )
+            replay = Phase2SubgoalReplay(
+                buf_path,
+                num_seeds=_num_seeds,
+                schedule_mode=str(_sched),
+                episodes_per_seed=_eps_per,
+            )
         except Exception as e:
             print(f"[Method3 phase2] subgoal replay 생성 실패: {e}")
             import traceback; traceback.print_exc()
             return
         self._phase2_subgoal_replay = replay
         print(f"[Method3 phase2] subgoal replay READY — "
-              f"{replay.n_episodes()} episodes 기록 (episode 별 cursor replay)")
+              f"{replay.n_episodes()} episodes 기록 (seed-aware rotation)")
         # _skills 가 이미 있으면 즉시 부착; 아직 lazy-init 전이면 _create_skills
         # 의 retro-attach 가 부착한다.
         self._attach_phase2_subgoal_replay()
@@ -2165,12 +2183,18 @@ class ForwardAndResetPipeline(BasePipeline):
 
         # Phase2 — episode 별 Phase1 도달 subgoal replay 컨텍스트 전환.
         # current_episode 는 episode 루프가 이 호출 직전에 설정한다 → episode_NN
-        # 의 기록 subgoal 로 replay 커서를 리셋한다.
+        # 의 기록 subgoal 로 replay 커서를 리셋한다. seed_index 도 함께 전달해
+        # 같은 seed 의 Phase1 episode 만 replay (seed-aware) — approach 와 pick
+        # descent 의 seed-mismatch 방지.
         _replay = getattr(self, "_phase2_subgoal_replay", None)
         if _replay is not None:
             try:
                 from method3.episode_lifecycle import episode_id as _mk_ep_id
-                _replay.set_episode(_mk_ep_id(int(self.current_episode)))
+                _seed_idx = int(getattr(self, "_current_batch_index", -1))
+                _replay.set_episode(
+                    _mk_ep_id(int(self.current_episode)),
+                    seed_index=_seed_idx,
+                )
             except Exception as _e:
                 print(f"[Method3 phase2] subgoal replay set_episode 실패: {_e}")
 
@@ -3569,7 +3593,13 @@ class ForwardAndResetPipeline(BasePipeline):
                             from method3.episode_lifecycle import episode_id as _mk_ep_id
                             _ep_n = getattr(self, "current_episode", None)
                             _ep_id = _mk_ep_id(_ep_n) if _ep_n else ""
-                            _subgoal_sel.flush_episode(episode_id=_ep_id)
+                            # 0-based seed_index — Phase2SubgoalReplay 가 같은 seed 의
+                            # Phase1 episode 만 replay 하도록 anchor (cross-seed mismatch
+                            # 방지). episode loop 가 직전 line 에서 set 한 값.
+                            _seed_idx = int(getattr(self, "_current_batch_index", -1))
+                            _subgoal_sel.flush_episode(
+                                episode_id=_ep_id, seed_index=_seed_idx,
+                            )
                         else:
                             _subgoal_sel.discard_episode()
                     except Exception as _e:

@@ -126,6 +126,11 @@ class SubgoalBufferEntry:
     phase: str = "phase1"
     natural_language: str = ""           # metadata — skill.natural_language
     skill_type: str = ""                 # metadata — skill.type
+    # round_robin/seed_major schedule 의 0-based seed index. -1 = unknown
+    # (legacy buffer 또는 호출부가 모를 때). Phase2SubgoalReplay 가 같은 seed
+    # 의 Phase1 episode 만 replay 하도록 anchor — 이 필드가 없으면 cross-seed
+    # mismatch 가 발생한다 (final_method3_spec/results/RCA 참고).
+    seed_index: int = -1
 
 
 @dataclass
@@ -308,6 +313,8 @@ class SubgoalBuffer:
                 [(e.start_t, e.end_t) for e in entries], dtype=np.int64)
             arrays[f"{s}::nl"] = np.array([e.natural_language for e in entries])
             arrays[f"{s}::skilltype"] = np.array([e.skill_type for e in entries])
+            arrays[f"{s}::seedidx"] = np.array(
+                [e.seed_index for e in entries], dtype=np.int64)
         if not arrays:
             return
         self._file.parent.mkdir(parents=True, exist_ok=True)
@@ -332,9 +339,10 @@ class SubgoalBuffer:
                 endlen = data[f"{s}::endlen"]
                 episodes = data[f"{s}::episode"]
                 span = data[f"{s}::span"]
-                # nl/skilltype 은 구버전 npz 에 없을 수 있음 → fallback "".
+                # nl/skilltype/seedidx 는 구버전 npz 에 없을 수 있음 → fallback.
                 nls = data[f"{s}::nl"] if f"{s}::nl" in data.files else None
                 stypes = data[f"{s}::skilltype"] if f"{s}::skilltype" in data.files else None
+                seedidxs = data[f"{s}::seedidx"] if f"{s}::seedidx" in data.files else None
                 offsets = np.concatenate([[0], np.cumsum(endlen)])
                 entries: list[SubgoalBufferEntry] = []
                 for i in range(keys.shape[0]):
@@ -349,5 +357,6 @@ class SubgoalBuffer:
                         end_t=int(span[i, 1]),
                         natural_language=(str(nls[i]) if nls is not None else ""),
                         skill_type=(str(stypes[i]) if stypes is not None else ""),
+                        seed_index=(int(seedidxs[i]) if seedidxs is not None else -1),
                     ))
                 self._skills[s] = entries

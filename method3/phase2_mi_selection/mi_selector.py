@@ -113,6 +113,20 @@ class Phase2MIConfig:
     #   Q2_med:                 argmedian U_VLA s.t. M̃_MI ≤ -τ_MI   (mid-novelty negative-MI)
     # fallback (eligible=∅): Q1/Q3/Q1_med → argmax M_MI ; Q2/Q4/Q2_med → argmin M_MI.
     selection_mode: str = "Q1"
+    # Q1 의 chosen 전략 ablation — paper default 는 argmax (extreme uncertainty),
+    # "argmedian" 은 eligible 의 U_VLA 중간값 chosen (outlier-robust variant).
+    # active learning literature 의 BADGE/cluster-based 방향과 정렬. paper 의
+    # Table 6 ablation 으로 비교 가능.
+    #   "argmax"     : paper default — eligible 중 가장 헷갈리는 cand
+    #   "argmedian"  : eligible 의 U_VLA 중간값 cand (robust)
+    q1_chosen_strategy: str = "argmax"
+    # OOD/ID gate — D_phase1 (ID) U_VLA distribution 의 quantile 로 결정 (예: p95).
+    # None 이면 implicit median split (기존 동작 유지, backward compat). 값이
+    # 주어지면 Q1/Q2 는 U_VLA ≥ tau_U_ID 만 OOD eligible, Q3/Q4 는 < tau_U_ID
+    # 만 ID eligible 로 분리한다 — Q1 의 "진짜 OOD 인지" 가 algorithm 수준에서
+    # 강제됨. uvla_id_stats.json 의 stats[tau_U_strategy] 값을 method3_setup.py
+    # 가 자동 주입한다 (ckpt-bound sidecar).
+    tau_U_ID: Optional[float] = None
     amb_agg: str = "mean"         # §9.4 covered aggregation: "mean" | "max"
     min_covered_windows: int = 1  # §9.1 T_min — 미만이면 under-covered
     debug_verbose: bool = False
@@ -406,6 +420,19 @@ class Phase2MISelector:
             for j, i in enumerate(eligible):
                 u_vla[i] = float(u_scores[j])
 
+        # Stage 2b — tau_U_ID gate (OOD/ID 분리). D_phase1 의 ID U_VLA
+        # distribution quantile (예: p95) 을 기준으로 eligible 을 다시 좁힌다.
+        # tau_U_ID is None 이면 backward compat — gate 없음 (기존 동작 유지).
+        eligible_pre_gate = list(eligible)  # report 용 (gate 적용 전)
+        _ood_gate_applied = False
+        if cfg.tau_U_ID is not None and vla_scorer is not None and eligible:
+            tau = float(cfg.tau_U_ID)
+            if _mode in ("Q1", "Q2"):
+                eligible = [i for i in eligible if u_vla[i] >= tau]
+            else:  # Q3, Q4 — ID side
+                eligible = [i for i in eligible if u_vla[i] < tau]
+            _ood_gate_applied = True
+
         _t_uvla = _t_mod.perf_counter()
         _a = self._t_acc
         _at = get_amb_timing()
@@ -443,21 +470,34 @@ class Phase2MISelector:
         # fallback (eligible=∅): positive-side → argmax M_MI ; negative-side → argmin M_MI.
         _positive_side = _mode in ("Q1", "Q3", "Q1_med")
         _side = "≥+τ_MI" if _positive_side else "≤-τ_MI"
+        _u_side = (
+            f" ∧ U_VLA≥τ_U_ID({cfg.tau_U_ID:.4f})"
+            if _ood_gate_applied and _mode in ("Q1", "Q2")
+            else f" ∧ U_VLA<τ_U_ID({cfg.tau_U_ID:.4f})"
+            if _ood_gate_applied and _mode in ("Q3", "Q4")
+            else ""
+        )
         if eligible:
             if vla_scorer is not None:
-                if _mode in ("Q1", "Q2"):
+                if _mode == "Q1" and cfg.q1_chosen_strategy == "argmedian":
+                    # Ablation variant — eligible 의 U_VLA 중간값 chosen.
+                    # extreme outlier (argmax) 대신 robust middle.
+                    eligible_sorted = sorted(eligible, key=lambda i: u_vla[i])
+                    chosen = eligible_sorted[len(eligible_sorted) // 2]
+                    rule = f"argmedian U_VLA s.t. M̃_MI{_side}{_u_side}  [{_mode}+median]"
+                elif _mode in ("Q1", "Q2"):
                     chosen = max(eligible, key=lambda i: u_vla[i])
-                    rule = f"argmax U_VLA s.t. M̃_MI{_side}  [{_mode}]"
+                    rule = f"argmax U_VLA s.t. M̃_MI{_side}{_u_side}  [{_mode}]"
                 elif _mode in ("Q1_med", "Q2_med"):
                     # argmedian — eligible 을 U_VLA 로 sort 후 가운데 index 선택.
                     # 짝수면 lower-middle (numpy 의 partition 처럼).
                     _sorted = sorted(eligible, key=lambda i: u_vla[i])
                     chosen = _sorted[len(_sorted) // 2 if len(_sorted) % 2 == 1
                                      else max(len(_sorted) // 2 - 1, 0)]
-                    rule = f"argmedian U_VLA s.t. M̃_MI{_side}  [{_mode}]"
+                    rule = f"argmedian U_VLA s.t. M̃_MI{_side}{_u_side}  [{_mode}]"
                 else:  # Q3, Q4
                     chosen = min(eligible, key=lambda i: u_vla[i])
-                    rule = f"argmin U_VLA s.t. M̃_MI{_side}  [{_mode}]"
+                    rule = f"argmin U_VLA s.t. M̃_MI{_side}{_u_side}  [{_mode}]"
             else:
                 # vla_scorer=None backward-compat — U_VLA 대신 M_MI 정렬.
                 if _positive_side:
@@ -478,8 +518,12 @@ class Phase2MISelector:
             accepted = False
 
         u_chosen: Optional[float] = float(u_vla[chosen]) if vla_scorer is not None else None
+        _gate_str = (
+            f" gate(τ_U={cfg.tau_U_ID:.4f}: {len(eligible_pre_gate)}→{len(eligible)})"
+            if _ood_gate_applied else ""
+        )
         self._dbg(
-            f"batch K={len(candidates)} eligible={len(eligible)} | "
+            f"batch K={len(candidates)} eligible={len(eligible)}{_gate_str} | "
             f"chose cand#{chosen} M_MI={m_mi[chosen]:.4f} M̃_MI={m_mi_norm[chosen]:.4f} "
             f"U_VLA={u_chosen if u_chosen is not None else 'n/a'} "
             f"accepted={accepted} rule='{rule}'"

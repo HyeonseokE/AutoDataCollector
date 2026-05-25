@@ -623,7 +623,7 @@ def generate_random_positions(
             occupied = [occ for occ in occupied if occ["name"] != obj_name]
             if pix2robot is not None:
                 try:
-                    INTRA_SEED_MARGIN_PX = 15  # 같은 시드 내 물체 간 최소 간격 (pixels)
+                    INTRA_SEED_MARGIN_PX = 60  # 같은 시드 내 물체 간 최소 간격 (pixels) — 15→60 (조작물체끼리 거리 강화)
                     new_px = pix2robot.robot_to_pixel(position[0], position[1])
                     occupied.append({
                         "name": obj_name,

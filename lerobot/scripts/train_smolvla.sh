@@ -224,3 +224,43 @@ if [ "$NUM_GPUS" -gt 1 ]; then
 else
     python -m lerobot.scripts.lerobot_train "${TRAIN_ARGS[@]}"
 fi
+
+# -------- post-train: D_phase1 (ID) U_VLA distribution sidecar JSON --------
+# paper §3.4 식 (18) 의 U_VLA 를 D_phase1 random sample 에 대해 계산하여
+# {ckpt}/uvla_id_stats.json sidecar 로 저장. server boot 시 이 JSON 을 자동
+# lookup 하여 Phase2 selector 의 OOD/ID gate (tau_U_ID) 로 사용한다.
+#
+# 비활성화: SKIP_UVLA_ID=1 ./train_smolvla.sh
+if [ "${SKIP_UVLA_ID:-0}" = "1" ]; then
+    echo ""
+    echo "[uvla_id] SKIP_UVLA_ID=1 — sidecar generation skipped."
+else
+    # 가장 최근 checkpoint 디렉터리 (예: outputs/.../checkpoints/001400/).
+    LAST_CKPT_DIR=$(ls -dt "$OUTPUT_DIR/checkpoints/"*/ 2>/dev/null | head -1)
+    LAST_CKPT="${LAST_CKPT_DIR%/}/pretrained_model"
+    DATASET_NAME="${DATASET_REPO_ID##*/}"
+    PARQUET="$PROJECT_ROOT/results/skill_dct/${DATASET_NAME}.parquet"
+
+    echo ""
+    echo "========= [uvla_id] post-train sidecar JSON ========="
+    echo " ckpt    : $LAST_CKPT"
+    echo " dataset : $DATASET_REPO_ID"
+    echo " parquet : $PARQUET"
+    echo "====================================================="
+    if [ -d "$LAST_CKPT" ] && [ -f "$PARQUET" ]; then
+        python "$PROJECT_ROOT/tools/eval_phase1_uvla_distribution.py" \
+            --vla "$LAST_CKPT" \
+            --dataset "$DATASET_REPO_ID" \
+            --parquet "$PARQUET" \
+            --n_samples "${UVLA_N_SAMPLES:-100}" \
+            --R "${UVLA_R:-4}" \
+            --sigma "${UVLA_SIGMA:-0.5}" \
+            --agg "${UVLA_AGG:-mean}" \
+            --device "$DEVICE" \
+            || echo "[uvla_id][WARN] sidecar generation failed (non-fatal)."
+    else
+        echo "[uvla_id][WARN] ckpt or parquet missing — skip."
+        echo "                ckpt    exists=$([ -d "$LAST_CKPT" ] && echo y || echo n)"
+        echo "                parquet exists=$([ -f "$PARQUET" ] && echo y || echo n)"
+    fi
+fi

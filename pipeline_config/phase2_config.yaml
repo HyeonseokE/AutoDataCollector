@@ -18,10 +18,10 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_distribute_chocolatepies_20260525_170417/checkpoints/last/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_close_pot_20260525_214402/checkpoints/000750/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
-phase1_dataset_path: "CoRL2026/table1/ours_distribute_chocolatepies"
+phase1_dataset_path: "CoRL2026/table1/ours_close_pot"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
@@ -224,7 +224,7 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  skill_dct_parquet: "results/skill_dct/ours_distribute_chocolatepies.parquet"  # P_phase1 build 의 sidecar (repo-relative)
+  skill_dct_parquet: "results/skill_dct/ours_close_pot.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
 
 # --- server-local SkillVectorDB 영속화 ---

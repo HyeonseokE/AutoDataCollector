@@ -1559,7 +1559,10 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"[Method3 phase2] selector failed: {e} — RNG fallback")
                 return None
 
-            # Verbose log — client 측에서도 paradigm 의 실 작동 확인 가능.
+            # Verbose log — client-side local selector 결과 (grpc 모드에선 거의
+            # 안 도는 dead path). grpc_planner_adapter 의 라벨과 일관성 유지:
+            #   accepted=True  → TRUE (bold green)
+            #   accepted=False → FALSE (bold yellow) + 다음 줄 reason
             try:
                 eligible = list(getattr(result, "eligible_indices", []) or [])
                 u_vla = getattr(result, "u_vla_chosen", None)
@@ -1567,10 +1570,31 @@ class ForwardAndResetPipeline(BasePipeline):
                 _r = (f"ΔH_A={rep.delta_h_a:.3f}, ΔH_A|S={rep.delta_h_a_given_s:.3f}, "
                       f"M̃_MI={rep.q2_norm:+.2f}, U_VLA={rep.u_vla:.3f}"
                       if rep is not None else "no report")
+                _G = "\033[1;92m"; _Y = "\033[1;93m"; _DIM_Y = "\033[93m"; _R = "\033[0m"
+                if result.accepted:
+                    _label = f"{_G}TRUE{_R}"
+                    _reason_line = ""
+                else:
+                    _label = f"{_Y}FALSE{_R}"
+                    # reason — under 비율 + eligible 0 분기
+                    _n_under = sum(1 for r in result.reports
+                                   if getattr(r, "under_covered", False)) if result.reports else 0
+                    _K = len(p2_cands)
+                    if _n_under == _K:
+                        _why = (f"all {_K} candidates under-covered "
+                                f"(buffer never observed this region) "
+                                f"→ eligible=0, argmax M_MI fallback")
+                    elif len(eligible) == 0:
+                        _why = (f"eligible=0 (under={_n_under}/{_K}, no candidate "
+                                f"satisfies M̃_MI ≥ τ_MI) → argmax M_MI fallback")
+                    else:
+                        _why = (f"chosen #{result.chosen_index} outside eligible "
+                                f"(under_covered or reject)")
+                    _reason_line = f"\n  {_DIM_Y}└─ reason: {_why}{_R}"
                 print(
                     f"[Phase2-Selection] cands={len(p2_cands)} eligible={len(eligible)} "
-                    f"chosen=#{result.chosen_index} accepted={result.accepted} "
-                    f"u_vla_chosen={u_vla} | {_r}"
+                    f"chosen=#{result.chosen_index} {_label} "
+                    f"u_vla_chosen={u_vla} | {_r}{_reason_line}"
                 )
             except Exception as e:
                 print(f"[Phase2-Selection] verbose log failed: {e}")

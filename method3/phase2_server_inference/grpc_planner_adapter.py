@@ -170,13 +170,32 @@ class GrpcPlannerClient:
             print(f"  [Skill Perturbation] grpc plan_and_select failed: {e}")
             return []
 
-        # ANSI red — paradigm 의 selection 결과를 client 터미널에 즉시 출력.
+        # selection 결과를 client 터미널에 즉시 출력 — TRUE(green) / FALLBACK(yellow)
+        # 라벨 + fallback 시 reason 한 줄. PNG 시각화의 라벨과 짝.
         _summary = _summarize_score_report(
             resp.get("score_report_json", ""),
             chosen_index=resp.get("chosen_index", -1),
         )
-        _label = "used_fallback" if resp.get("used_fallback", False) else "accepted"
-        print(f"\033[91m[Phase2-Selection] skill={effective_skill_id} {_label} | {_summary}\033[0m", flush=True)
+        _is_fallback = bool(resp.get("used_fallback", False))
+        _G = "\033[1;92m"   # bold green
+        _Y = "\033[1;93m"   # bold yellow
+        _DIM_Y = "\033[93m"  # plain yellow (reason)
+        _R = "\033[0m"
+        if _is_fallback:
+            _label = f"{_Y}FALLBACK{_R}"
+            _reason = _fallback_reason(
+                resp.get("score_report_json", ""),
+                chosen_index=resp.get("chosen_index", -1),
+            )
+            _reason_line = f"\n  {_DIM_Y}└─ reason: {_reason}{_R}" if _reason else ""
+        else:
+            _label = f"{_G}TRUE{_R}"
+            _reason_line = ""
+        print(
+            f"[Phase2-Selection] skill={effective_skill_id} {_label} | "
+            f"{_summary}{_reason_line}",
+            flush=True,
+        )
 
         # candidate dump 참조 누적 — server 가 dump 한 npz 파일명 = selection_id.
         # episode 종료 시 client 가 pop_dump_refs() 로 가져가 scp + 오버레이.
@@ -198,6 +217,39 @@ class GrpcPlannerClient:
             cost=float(traj.get("cost", 0.0)),
             times=times if times.size else None,
         )]
+
+
+def _fallback_reason(json_str: str, chosen_index: int = -1) -> str:
+    """fallback 시 1-line reason — under_covered 비율 + chosen 의 under 으로 추론.
+
+    server 의 Phase2MISelector 가 fallback (eligible=∅) 으로 가는 3 가지 케이스:
+      - 모든 candidate under_covered (buffer 가 그 영역 미관측)
+      - under 이 일부지만 M̃_MI ≥ τ_MI 만족 0
+      - server-side curobo 가 0 valid candidates 반환 (used_fallback=True 자체)
+    """
+    if not json_str:
+        return "server returned used_fallback (no score report — likely 0 valid curobo candidates)"
+    try:
+        import json as _json
+        reports = _json.loads(json_str)
+    except Exception:
+        return "score report parse failed"
+    if not reports:
+        return "empty score report (server-side curobo returned 0 candidates)"
+    K = len(reports)
+    under = sum(1 for r in reports if r.get("under_covered"))
+    chosen = next((r for r in reports if int(r.get("i", -1)) == int(chosen_index)),
+                  None)
+    chosen_under = bool(chosen.get("under_covered", False)) if chosen else False
+    if under == K:
+        return (f"all {K} candidates under-covered "
+                f"(buffer never observed this region) → eligible=0, "
+                f"argmax M_MI fallback, NOT accepted to buffer")
+    if chosen_under:
+        return (f"chosen #{chosen_index} under-covered "
+                f"(under={under}/{K}); eligible was empty → fallback argmax M_MI")
+    return (f"eligible=0 (under={under}/{K}, no candidate satisfies "
+            f"M̃_MI ≥ τ_MI) → fallback argmax M_MI")
 
 
 def _summarize_score_report(json_str: str, chosen_index: int = -1) -> str:

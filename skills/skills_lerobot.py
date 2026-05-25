@@ -1875,10 +1875,10 @@ class LeRobotSkills:
                 self.planner.calibration_limits.upper_limits_radians,
             )
 
-        # Coarse 5°-spaced sweep over the same ±20° band move_to_position's
+        # Coarse 5°-spaced sweep over the same ±50° band move_to_position's
         # retry accepts. Offset 0 first so feasible candidates short-circuit
         # on the first solve; infeasible ones pay the full sweep.
-        PITCH_TOLERANCE_DEG = 20.0
+        PITCH_TOLERANCE_DEG = 50.0
         offsets_deg = [0.0]
         step = 5.0
         d = step
@@ -2279,17 +2279,17 @@ class LeRobotSkills:
 
         if not trajectory.ik_converged:
             if ik_target_pitch is not None:
-                # IK failed with pitch constraint - retry with relaxed pitch range (±20°)
-                PITCH_TOLERANCE_DEG = 20.0
+                # IK failed with pitch constraint - retry with relaxed pitch range (±50°)
+                PITCH_TOLERANCE_DEG = 50.0
                 pitch_tolerance_rad = np.radians(PITCH_TOLERANCE_DEG)
                 original_pitch = ik_target_pitch
 
                 self._log(f"  WARNING: IK failed with pitch={np.degrees(original_pitch):.1f}°. "
                          f"Retrying within ±{PITCH_TOLERANCE_DEG}° range...")
 
-                # Try multiple pitch values within ±20° range
-                # Order: 0, ±1, ±2, ... ±20 degrees from original
-                pitch_offsets_deg = [i for j in range(21) for i in ((-j, j) if j > 0 else (0,))]
+                # Try multiple pitch values within ±50° range
+                # Order: 0, ±1, ±2, ... ±50 degrees from original
+                pitch_offsets_deg = [i for j in range(51) for i in ((-j, j) if j > 0 else (0,))]
                 best_trajectory = None
                 best_ik_info = None
                 best_pitch_offset = None
@@ -2888,6 +2888,19 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
 
+        # Release any payload attached to the planner's collision body. Pair
+        # with mark_held() in execute_pick_object — once the gripper opens,
+        # the held object physically leaves the gripper, so subsequent transit
+        # plans must NOT include its volume on the robot. Backends without
+        # the hook silently skip.
+        if self._skill_planner_client is not None:
+            try:
+                self._skill_planner_client.mark_released()
+            except AttributeError:
+                pass
+            except Exception as e:
+                self._log(f"  [Skill Perturbation] mark_released failed: {e}")
+
     def gripper_close(self, duration: float = 1.5, skill_description: Optional[str] = None, verification_question: Optional[str] = None):
         """
         Close gripper with recording support.
@@ -3154,6 +3167,22 @@ class LeRobotSkills:
         self._pick_z = actual_z
         self._log(f"  Actual pick z: {actual_z*100:.1f}cm (nominal: {pick_z*100:.1f}cm, diff: {(actual_z - pick_z)*1000:.1f}mm)")
         self._log(f"  Saved pitch: {np.degrees(self._saved_pitch):.1f}°")
+
+        # Tell the skill planner a payload is now attached to the gripper so
+        # subsequent transit plans route around obstacles WITH the payload's
+        # volume. Default dims describe a pot lid (16×16×4cm) — appropriate
+        # for "lid"-class objects; harmless overestimate for smaller items.
+        # Backends without the hook (local CuroboBackend with no mark_held,
+        # legacy adapters) silently skip via AttributeError.
+        if self._skill_planner_client is not None:
+            try:
+                _payload_name = f"held_{object_name}" if object_name else "held_object"
+                self._skill_planner_client.mark_held(name=_payload_name)
+                self._log(f"  [Skill Perturbation] mark_held: {_payload_name}")
+            except AttributeError:
+                pass
+            except Exception as e:
+                self._log(f"  [Skill Perturbation] mark_held failed: {e}")
 
         self._log("[Execute Pick Object] Complete")
         return True

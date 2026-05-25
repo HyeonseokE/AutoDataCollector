@@ -74,6 +74,12 @@ class GrpcPlannerClient:
         # (episode 종료) 가 0 으로 reset 한다. caller 가 plan_batch(skill_id=)
         # 로 명시 override 하지 않는 한 server 로 보내는 ordinal 키.
         self._skill_call_index = 0
+        # Held-object state (lid / grasped payload). skills_lerobot calls
+        # mark_held() right after a successful pick, mark_released() right
+        # after gripper release. Each subsequent plan_and_select RPC carries
+        # this state so the server attaches/detaches the payload to the
+        # gripper's collision body before planning. None → no payload.
+        self._held_object: dict | None = None
 
     def pop_dump_refs(self) -> list[tuple[str, str]]:
         """누적된 (selection_id, skill_id) 목록을 반환하고 비운다.
@@ -165,6 +171,7 @@ class GrpcPlannerClient:
                 n_candidates=int(n),
                 seed=int(seed) if seed is not None else 0,
                 is_transit=True,
+                held_object=self._held_object,
             )
         except Exception as e:
             print(f"  [Skill Perturbation] grpc plan_and_select failed: {e}")
@@ -250,6 +257,33 @@ def _summarize_score_report(json_str: str, chosen_index: int = -1) -> str:
     def update_scene(self, obstacles) -> None:  # noqa: ARG002
         # Silent no-op for now — server's curobo uses its yaml's static workspace.
         return None
+
+    # ------------------------------------------------------------------
+    # Held-object lifecycle — skills_lerobot signals grasp/release here so
+    # subsequent plan_and_select RPCs carry the payload state. Server uses
+    # the field to attach/detach via curobo's AttachmentManager.
+    # ------------------------------------------------------------------
+    def mark_held(
+        self,
+        name: str = "held_lid",
+        dims=(0.16, 0.16, 0.04),
+        pose_offset=(0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0),
+        link_name: str = "gripper_frame_link",
+    ) -> None:
+        """Declare that an object is now grasped. Default dims describe a
+        typical pot lid (16cm × 16cm × 4cm). pose_offset is in the link
+        frame — default is 3cm below the TCP."""
+        self._held_object = {
+            "name": str(name),
+            "link_name": str(link_name),
+            "dims": tuple(float(x) for x in dims),
+            "pose_offset": tuple(float(x) for x in pose_offset),
+        }
+
+    def mark_released(self) -> None:
+        """Declare that any previously-held payload is no longer grasped.
+        Next plan_and_select will omit held_object, server detaches."""
+        self._held_object = None
 
     # ------------------------------------------------------------------
     # Lifecycle helpers used by orchestrator

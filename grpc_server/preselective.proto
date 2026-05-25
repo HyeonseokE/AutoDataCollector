@@ -63,6 +63,22 @@ message PlanRequest {
   int32 n_candidates = 7;         // K — passed straight to curobo.plan_batch
   int32 seed = 8;                 // RNG seed for plan_batch + tie-break
   bool is_transit = 9;            // false → server returns no_op (skip selection)
+  // Currently-held grasped object (e.g. lid after pick). When set the server
+  // attaches it as collision spheres on the named gripper link BEFORE planning
+  // so the chosen trajectory routes around obstacles WITH the payload's volume.
+  // Absent / empty `name` → server detaches any previously attached object
+  // (transitions between plans where the gripper is empty).
+  HeldObject held_object = 10;
+}
+
+// Geometric description of an object currently grasped by the robot.
+// Pose offset is in the attach LINK's frame, so the obstacle moves with the
+// link automatically via curobo's attachment manager.
+message HeldObject {
+  string name = 1;                // free-form label (e.g. "held_lid")
+  string link_name = 2;           // attach link, e.g. "gripper_frame_link"
+  repeated float dims = 3;        // [x_m, y_m, z_m] cuboid extents
+  repeated float pose_offset = 4; // [x, y, z, qw, qx, qy, qz] in link frame
 }
 
 message PlanResponse {

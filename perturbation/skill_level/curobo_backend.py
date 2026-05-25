@@ -321,6 +321,105 @@ class CuroboBackend:
             print(f"[curobo:update_scene] FAILED: {e}", flush=True)
             return {"added": 0, "removed": 0, "kept": 0, "error": f"update_world failed: {e}"}
 
+    # ── Grasped-object attachment ──────────────────────────────────────────
+    # When the robot grasps an object (e.g. lid) the planner must add the
+    # object's volume to the robot's collision body so subsequent transit
+    # paths route the *combined* gripper+payload around obstacles. Curobo's
+    # AttachmentManager handles the kinematics chain: spheres are fit to the
+    # payload and merged into the named link's collision-sphere set.
+    #
+    # The local backend manages a single attached object at a time
+    # (typical pick-and-place pattern). Repeated attach calls implicitly
+    # detach the previous payload first.
+
+    def attach_held_object(
+        self,
+        name: str = "held_object",
+        dims=(0.16, 0.16, 0.04),
+        pose_offset=(0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0),
+        link_name: str = "gripper_frame_link",
+        joint_state=None,
+    ) -> dict:
+        """Attach a cuboid payload to the named gripper link.
+
+        Args:
+            name: label, used purely for logging.
+            dims: payload extents in meters [x, y, z] in the link's local frame.
+            pose_offset: payload pose in the link frame
+                         [x, y, z, qw, qx, qy, qz]. Default 3cm below TCP.
+            link_name: robot link to attach to. Default matches our URDF's
+                       gripper frame link.
+            joint_state: current robot joint configuration (np.ndarray, length
+                         matches planner.joint_names). If None, the planner's
+                         default_joint_state is used (typically home pose) —
+                         OK for static scenes but may misplace the attached
+                         spheres if the robot is in an extreme configuration.
+
+        Returns:
+            {"attached": bool, "name": str, "link": str, "error"?: str}
+        """
+        try:
+            from curobo.geom.types import Cuboid
+        except Exception as e:
+            return {"attached": False, "error": f"Cuboid import failed: {e}"}
+
+        # Build a 1-cuboid payload in the link's local frame. The attachment
+        # manager fits spheres to this geometry; pose_offset is interpreted
+        # as the payload pose relative to the attach link's origin.
+        payload = Cuboid(
+            name=name,
+            pose=list(pose_offset),
+            dims=list(dims),
+        )
+
+        # Prepare joint_state for the attachment manager. It expects the
+        # planner's JointState dataclass with the full DOF vector.
+        if joint_state is None:
+            js = self._planner.default_joint_state
+        else:
+            import numpy as np
+            q = np.asarray(joint_state, dtype=float).reshape(-1)
+            if q.shape[0] != self._n_dof:
+                # Caller passed arm-only DoF; pad with defaults for the rest.
+                full = self._default_full.copy()
+                full[: min(q.shape[0], self._n_dof)] = q[: min(q.shape[0], self._n_dof)]
+                q = full
+            q_t = self._torch.as_tensor(q, dtype=self._dtype, device=self._dev).view(1, -1)
+            js = self._JointState(position=q_t)
+
+        try:
+            self._planner.attachment_manager.attach(
+                joint_states=js,
+                obstacles=[payload],
+                link_name=link_name,
+            )
+            print(
+                f"[curobo:attach] {name!r} → {link_name} dims={dims} offset={pose_offset[:3]}",
+                flush=True,
+            )
+            self._attached_object_name = name
+            return {"attached": True, "name": name, "link": link_name}
+        except Exception as e:
+            print(f"[curobo:attach] FAILED ({name}): {e}", flush=True)
+            return {"attached": False, "error": str(e)}
+
+    def detach_held_object(self, link_name: str = "gripper_frame_link") -> dict:
+        """Detach any payload from the named link. Idempotent — calling with
+        nothing attached is a silent no-op (returns detached=False)."""
+        try:
+            self._planner.attachment_manager.detach(link_name=link_name)
+            prev = getattr(self, "_attached_object_name", None)
+            self._attached_object_name = None
+            print(
+                f"[curobo:detach] payload removed from {link_name}"
+                + (f" (was {prev!r})" if prev else " (nothing attached)"),
+                flush=True,
+            )
+            return {"detached": True, "previous": prev}
+        except Exception as e:
+            print(f"[curobo:detach] FAILED: {e}", flush=True)
+            return {"detached": False, "error": str(e)}
+
     def close(self) -> None:
         """Release GPU resources held by curobo (CUDA graphs, trajopt/IK
         solver state, kinematics tables). **Idempotent** — safe to call

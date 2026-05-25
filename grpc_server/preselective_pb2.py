@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12preselective.proto\x12\x0cpreselective\"q\n\x0c\x46rameMessage\x12\x10\n\x08skill_id\x18\x01 \x01(\t\x12\x13\n\x0binstruction\x18\x02 \x01(\t\x12\r\n\x05state\x18\x03 \x01(\x0c\x12\x14\n\x0c\x61\x63tion_chunk\x18\x04 \x01(\x0c\x12\x15\n\rimages_pickle\x18\x05 \x01(\x0c\"\xa5\x01\n\x0eIngestResponse\x12\x17\n\x0f\x66rames_ingested\x18\x01 \x01(\x05\x12\x45\n\rbuffer_totals\x18\x02 \x03(\x0b\x32..preselective.IngestResponse.BufferTotalsEntry\x1a\x33\n\x11\x42ufferTotalsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"\xb9\x01\n\x0bPlanRequest\x12\x10\n\x08skill_id\x18\x01 \x01(\t\x12\x12\n\nstart_qpos\x18\x02 \x01(\x0c\x12\x11\n\tgoal_qpos\x18\x03 \x01(\x0c\x12\r\n\x05state\x18\x04 \x01(\x0c\x12\x15\n\rimages_pickle\x18\x05 \x01(\x0c\x12\x13\n\x0binstruction\x18\x06 \x01(\t\x12\x14\n\x0cn_candidates\x18\x07 \x01(\x05\x12\x0c\n\x04seed\x18\x08 \x01(\x05\x12\x12\n\nis_transit\x18\t \x01(\x08\"\x8e\x01\n\x0cPlanResponse\x12 \n\x18\x63hosen_trajectory_pickle\x18\x01 \x01(\x0c\x12\x14\n\x0c\x63hosen_index\x18\x02 \x01(\x05\x12\x19\n\x11score_report_json\x18\x03 \x01(\t\x12\x14\n\x0cselection_id\x18\x04 \x01(\t\x12\x15\n\rused_fallback\x18\x05 \x01(\x08\"N\n\rCommitRequest\x12\x15\n\rselection_ids\x18\x01 \x03(\t\x12\x12\n\njudge_true\x18\x02 \x01(\x08\x12\x12\n\nepisode_id\x18\x03 \x01(\t\"\xb0\x01\n\x0e\x43ommitResponse\x12\x11\n\tcommitted\x18\x01 \x01(\x05\x12\x0f\n\x07\x64ropped\x18\x02 \x01(\x05\x12\x45\n\rbuffer_totals\x18\x03 \x03(\x0b\x32..preselective.CommitResponse.BufferTotalsEntry\x1a\x33\n\x11\x42ufferTotalsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"\x81\x02\n\nServerInfo\x12\x1a\n\x12smolvla_checkpoint\x18\x01 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\x02 \x01(\t\x12\x18\n\x10\x63urobo_robot_cfg\x18\x03 \x01(\t\x12\x14\n\x0c\x62uffer_total\x18\x04 \x01(\x05\x12\x46\n\x10\x62uffer_per_skill\x18\x05 \x03(\x0b\x32,.preselective.ServerInfo.BufferPerSkillEntry\x12\x18\n\x10selector_summary\x18\x06 \x01(\t\x1a\x35\n\x13\x42ufferPerSkillEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"\x07\n\x05\x45mpty2\xb0\x02\n\x14PreselectiveAcquirer\x12\x46\n\rPlanAndSelect\x12\x19.preselective.PlanRequest\x1a\x1a.preselective.PlanResponse\x12K\n\x0e\x43ommitToBuffer\x12\x1b.preselective.CommitRequest\x1a\x1c.preselective.CommitResponse\x12K\n\rIngestEpisode\x12\x1a.preselective.FrameMessage\x1a\x1c.preselective.IngestResponse(\x01\x12\x36\n\x05Ready\x12\x13.preselective.Empty\x1a\x18.preselective.ServerInfob\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12preselective.proto\x12\x0cpreselective\"q\n\x0c\x46rameMessage\x12\x10\n\x08skill_id\x18\x01 \x01(\t\x12\x13\n\x0binstruction\x18\x02 \x01(\t\x12\r\n\x05state\x18\x03 \x01(\x0c\x12\x14\n\x0c\x61\x63tion_chunk\x18\x04 \x01(\x0c\x12\x15\n\rimages_pickle\x18\x05 \x01(\x0c\"\xa5\x01\n\x0eIngestResponse\x12\x17\n\x0f\x66rames_ingested\x18\x01 \x01(\x05\x12\x45\n\rbuffer_totals\x18\x02 \x03(\x0b\x32..preselective.IngestResponse.BufferTotalsEntry\x1a\x33\n\x11\x42ufferTotalsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"\xe8\x01\n\x0bPlanRequest\x12\x10\n\x08skill_id\x18\x01 \x01(\t\x12\x12\n\nstart_qpos\x18\x02 \x01(\x0c\x12\x11\n\tgoal_qpos\x18\x03 \x01(\x0c\x12\r\n\x05state\x18\x04 \x01(\x0c\x12\x15\n\rimages_pickle\x18\x05 \x01(\x0c\x12\x13\n\x0binstruction\x18\x06 \x01(\t\x12\x14\n\x0cn_candidates\x18\x07 \x01(\x05\x12\x0c\n\x04seed\x18\x08 \x01(\x05\x12\x12\n\nis_transit\x18\t \x01(\x08\x12-\n\x0bheld_object\x18\n \x01(\x0b\x32\x18.preselective.HeldObject\"P\n\nHeldObject\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x11\n\tlink_name\x18\x02 \x01(\t\x12\x0c\n\x04\x64ims\x18\x03 \x03(\x02\x12\x13\n\x0bpose_offset\x18\x04 \x03(\x02\"\x8e\x01\n\x0cPlanResponse\x12 \n\x18\x63hosen_trajectory_pickle\x18\x01 \x01(\x0c\x12\x14\n\x0c\x63hosen_index\x18\x02 \x01(\x05\x12\x19\n\x11score_report_json\x18\x03 \x01(\t\x12\x14\n\x0cselection_id\x18\x04 \x01(\t\x12\x15\n\rused_fallback\x18\x05 \x01(\x08\"N\n\rCommitRequest\x12\x15\n\rselection_ids\x18\x01 \x03(\t\x12\x12\n\njudge_true\x18\x02 \x01(\x08\x12\x12\n\nepisode_id\x18\x03 \x01(\t\"\xb0\x01\n\x0e\x43ommitResponse\x12\x11\n\tcommitted\x18\x01 \x01(\x05\x12\x0f\n\x07\x64ropped\x18\x02 \x01(\x05\x12\x45\n\rbuffer_totals\x18\x03 \x03(\x0b\x32..preselective.CommitResponse.BufferTotalsEntry\x1a\x33\n\x11\x42ufferTotalsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"\x81\x02\n\nServerInfo\x12\x1a\n\x12smolvla_checkpoint\x18\x01 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\x02 \x01(\t\x12\x18\n\x10\x63urobo_robot_cfg\x18\x03 \x01(\t\x12\x14\n\x0c\x62uffer_total\x18\x04 \x01(\x05\x12\x46\n\x10\x62uffer_per_skill\x18\x05 \x03(\x0b\x32,.preselective.ServerInfo.BufferPerSkillEntry\x12\x18\n\x10selector_summary\x18\x06 \x01(\t\x1a\x35\n\x13\x42ufferPerSkillEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"\x07\n\x05\x45mpty2\xb0\x02\n\x14PreselectiveAcquirer\x12\x46\n\rPlanAndSelect\x12\x19.preselective.PlanRequest\x1a\x1a.preselective.PlanResponse\x12K\n\x0e\x43ommitToBuffer\x12\x1b.preselective.CommitRequest\x1a\x1c.preselective.CommitResponse\x12K\n\rIngestEpisode\x12\x1a.preselective.FrameMessage\x1a\x1c.preselective.IngestResponse(\x01\x12\x36\n\x05Ready\x12\x13.preselective.Empty\x1a\x18.preselective.ServerInfob\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -44,21 +44,23 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_INGESTRESPONSE_BUFFERTOTALSENTRY']._serialized_start=266
   _globals['_INGESTRESPONSE_BUFFERTOTALSENTRY']._serialized_end=317
   _globals['_PLANREQUEST']._serialized_start=320
-  _globals['_PLANREQUEST']._serialized_end=505
-  _globals['_PLANRESPONSE']._serialized_start=508
-  _globals['_PLANRESPONSE']._serialized_end=650
-  _globals['_COMMITREQUEST']._serialized_start=652
-  _globals['_COMMITREQUEST']._serialized_end=730
-  _globals['_COMMITRESPONSE']._serialized_start=733
-  _globals['_COMMITRESPONSE']._serialized_end=909
+  _globals['_PLANREQUEST']._serialized_end=552
+  _globals['_HELDOBJECT']._serialized_start=554
+  _globals['_HELDOBJECT']._serialized_end=634
+  _globals['_PLANRESPONSE']._serialized_start=637
+  _globals['_PLANRESPONSE']._serialized_end=779
+  _globals['_COMMITREQUEST']._serialized_start=781
+  _globals['_COMMITREQUEST']._serialized_end=859
+  _globals['_COMMITRESPONSE']._serialized_start=862
+  _globals['_COMMITRESPONSE']._serialized_end=1038
   _globals['_COMMITRESPONSE_BUFFERTOTALSENTRY']._serialized_start=266
   _globals['_COMMITRESPONSE_BUFFERTOTALSENTRY']._serialized_end=317
-  _globals['_SERVERINFO']._serialized_start=912
-  _globals['_SERVERINFO']._serialized_end=1169
-  _globals['_SERVERINFO_BUFFERPERSKILLENTRY']._serialized_start=1116
-  _globals['_SERVERINFO_BUFFERPERSKILLENTRY']._serialized_end=1169
-  _globals['_EMPTY']._serialized_start=1171
-  _globals['_EMPTY']._serialized_end=1178
-  _globals['_PRESELECTIVEACQUIRER']._serialized_start=1181
-  _globals['_PRESELECTIVEACQUIRER']._serialized_end=1485
+  _globals['_SERVERINFO']._serialized_start=1041
+  _globals['_SERVERINFO']._serialized_end=1298
+  _globals['_SERVERINFO_BUFFERPERSKILLENTRY']._serialized_start=1245
+  _globals['_SERVERINFO_BUFFERPERSKILLENTRY']._serialized_end=1298
+  _globals['_EMPTY']._serialized_start=1300
+  _globals['_EMPTY']._serialized_end=1307
+  _globals['_PRESELECTIVEACQUIRER']._serialized_start=1310
+  _globals['_PRESELECTIVEACQUIRER']._serialized_end=1614
 # @@protoc_insertion_point(module_scope)

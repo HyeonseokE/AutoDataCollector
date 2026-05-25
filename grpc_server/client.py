@@ -67,6 +67,7 @@ class PreselectiveClient:
         n_candidates: int,
         seed: int = 0,
         is_transit: bool = True,
+        held_object: dict | None = None,
     ) -> dict[str, Any]:
         """Send context + goal to server, receive chosen trajectory.
 
@@ -89,6 +90,19 @@ class PreselectiveClient:
             seed=int(seed),
             is_transit=bool(is_transit),
         )
+        # Optional held-object attachment (lid/grasped payload). Caller signals
+        # this state via mark_held()/mark_released() on the adapter; absent →
+        # server detaches anything previously attached.
+        if held_object and held_object.get("name"):
+            req.held_object.name = str(held_object.get("name") or "")
+            req.held_object.link_name = str(
+                held_object.get("link_name") or "gripper_frame_link"
+            )
+            for v in (held_object.get("dims") or (0.16, 0.16, 0.04)):
+                req.held_object.dims.append(float(v))
+            pose = held_object.get("pose_offset") or (0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0)
+            for v in pose:
+                req.held_object.pose_offset.append(float(v))
         resp = self.stub.PlanAndSelect(req, timeout=self.timeout_s)
 
         if resp.used_fallback:

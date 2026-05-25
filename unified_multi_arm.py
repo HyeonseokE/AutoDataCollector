@@ -1804,6 +1804,23 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 color = GREEN if prediction == 'TRUE' else RED
                 print(f"  Judge: {color}{prediction}{RESET_COLOR}")
 
+            # Method3 bi-arm bug fix — forward dataset 의 마지막 ep 가 judge!=TRUE
+            # 이면 *방금 add 된 frame* 을 dataset 에서 즉시 제거 (single-arm 의
+            # discard 분기와 동일 효과). 미수정 시 매 judge=FALSE 시도마다 dataset
+            # 잔재 누적 → resume 시 폴더 1 ↔ dataset N 의 비대칭 발생.
+            judge_pred_now = result['judge'].get('prediction', 'UNCERTAIN')
+            if judge_pred_now != 'TRUE' and self.record_dataset and self.dataset_recorder:
+                try:
+                    from lerobot.datasets.dataset_tools import delete_episodes as _del_eps
+                    _ds = getattr(self.dataset_recorder, "_dataset", None)
+                    if _ds is not None and _ds.meta.total_episodes > 0:
+                        _last = _ds.meta.total_episodes - 1
+                        _del_eps(_ds, [_last])
+                        print(f"  {YELLOW}[Recording] judge={judge_pred_now} → "
+                              f"forward dataset 의 마지막 ep (idx={_last}) 삭제{RESET_COLOR}")
+                except Exception as _e:
+                    print(f"  {YELLOW}[Recording] FALSE-ep delete 실패: {_e}{RESET_COLOR}")
+
             # Post-judge callback
             if post_judge_callback:
                 post_judge_callback(result)

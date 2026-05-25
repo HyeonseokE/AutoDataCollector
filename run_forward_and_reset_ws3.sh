@@ -76,6 +76,11 @@ RESUME_SESSION="./results/session_20260524_144452"
 # 다른 quadrant 로 전환 시: results/table6_quadrant/Q{1,2,3,4} 중 선택.
 # 새 Phase1 cycle 시작 시: RESUME_SESSION="" 비움.
 
+# Skip restore 토글 — resume 모드에서만 의미. true 면 _restore_to_seed (물리적
+# robot 으로 seed 위치 복원) 단계를 skip 하고 바로 episode 루프 진입. 워크스페이스
+# 가 이미 정상이거나 사용자가 수동으로 정리해 둔 경우 사용.
+RESUME_SKIP_RESTORE=false
+
 # ============================================================
 # Multi-turn LLM 코드 생성 설정
 # true: crop-then-point 멀티턴 (LLM이 이미지 보고 검출→crop pointing→코드 생성)
@@ -351,6 +356,10 @@ fi
 
 if [ -n "$RESUME_SESSION" ]; then
     EXTRA_ARGS="$EXTRA_ARGS --resume $RESUME_SESSION"
+    if [ "$RESUME_SKIP_RESTORE" = "true" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --skip-restore"
+        echo "[Resume] skip-restore = true (physical seed restore 단계 SKIP)"
+    fi
 fi
 
 if [ ${#RESETSPACE_PER_ROBOT[@]} -gt 0 ]; then

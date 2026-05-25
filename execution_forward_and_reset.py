@@ -5397,6 +5397,7 @@ class ForwardAndResetPipeline(BasePipeline):
         visualize_detection: bool = False,
         save_dir: Optional[str] = None,
         skip_reset: bool = False,
+        skip_restore: bool = False,
     ) -> Dict:
         """Resume: 이전 세션의 미완료 배치만 골라서 재시도.
 
@@ -5561,7 +5562,10 @@ class ForwardAndResetPipeline(BasePipeline):
             if seed_positions[first_incomplete] is None and first_incomplete > 0:
                 print(f"\n{MAGENTA}{BOLD}  Generating seed_{first_incomplete+1}...{RESET}")
                 seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
-            if seed_positions[first_incomplete] is not None:
+            if skip_restore:
+                print(f"\n{YELLOW}  [Resume] --skip-restore — physical restore skipped. "
+                      f"Workspace must already be in correct state.{RESET}")
+            elif seed_positions[first_incomplete] is not None:
                 print(f"\n{CYAN}{BOLD}  Restoring to seed_{first_incomplete+1}...{RESET}")
                 self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
             else:
@@ -5767,6 +5771,15 @@ def main():
         type=str,
         default=None,
         help="Resume from a previous session directory (e.g., results/session_20260319_174942)"
+    )
+
+    parser.add_argument(
+        "--skip-restore",
+        action="store_true",
+        default=False,
+        help="Resume 시 물리적 seed restore (_restore_to_seed) 를 skip. "
+             "워크스페이스가 이미 정상이거나 수동으로 정리해 둔 경우 사용. "
+             "fresh session 에는 영향 없음."
     )
 
     parser.add_argument(
@@ -6038,6 +6051,7 @@ def main():
             visualize_detection=args.visualize_detection,
             save_dir=args.save,
             skip_reset=args.skip_reset,
+            skip_restore=args.skip_restore,
         )
     else:
         all_results = pipeline.run_multiple_episodes(

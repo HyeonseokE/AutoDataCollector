@@ -1743,6 +1743,20 @@ class UnifiedMultiArmPipeline(BasePipeline):
             if point_labels:
                 self.multi_arm._point_labels = point_labels
 
+            # Method3 bi-arm — episode 별 perturbation RNG seed 좌/우 각자 set.
+            # LeRobotSkills.move_to_position 의 selector 호출 조건 중 하나가
+            # `self._perturbation_rng is not None`. 이 호출이 없으면 selector
+            # 부착 (set_subgoal_selector) 됐어도 select_subgoal / stage_executed
+            # 가 영원히 skip → _pending 비어있음 → buffer 0. single-arm 은 매
+            # episode 시작 시 set_perturbation_rng 호출 (line 1815 등) — bi-arm
+            # 도 동일 패턴 필요.
+            try:
+                _ep_seed = int(getattr(self, 'current_episode', 1)) * 1000003 + 1
+                self.multi_arm.left_arm.set_perturbation_rng(_ep_seed)
+                self.multi_arm.right_arm.set_perturbation_rng(_ep_seed + 1)
+            except Exception as _e:
+                print(f"  [Method3 bi-arm] set_perturbation_rng 실패: {_e}")
+
             execution_success = self.execute_code(code, self.detected_positions)
             result['forward']['execution_success'] = execution_success
 

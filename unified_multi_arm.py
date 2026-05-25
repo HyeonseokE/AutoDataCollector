@@ -81,8 +81,14 @@ class UnifiedMultiArmPipeline(BasePipeline):
         detect_model: str = None,
         resetspace_per_robot: Dict[int, str] = None,
         recording_config: str = None,
+        # Method3 phase — "phase1" (subgoal seeding, default) or "phase2" (MI selection).
+        # Single-arm 과 동일한 의미. bi-arm 은 per-arm buffer 로 운영.
+        method3_phase: str = "phase1",
     ):
         assert len(robot_ids) >= 2, f"Multi-arm requires >= 2 robots, got {robot_ids}"
+        if method3_phase not in ("phase1", "phase2"):
+            raise ValueError(
+                f"method3_phase must be 'phase1' or 'phase2', got {method3_phase!r}")
         self.robot_ids = robot_ids
         self.left_id = robot_ids[0]
         self.right_id = robot_ids[1]
@@ -111,6 +117,22 @@ class UnifiedMultiArmPipeline(BasePipeline):
         self.recording_fps = recording_fps
         self.recording_config = recording_config
         self.resume_recording = resume_recording
+
+        # Method3 — phase 식별 + per-arm selector/replay 슬롯 (lazy init in
+        # _setup_method3_per_arm). buffer 파일은 session_dir 안의
+        # subgoal_buffer_{left,right}.npz 으로 분리 저장한다.
+        self.method3_phase = method3_phase
+        # Per-arm selectors (Phase1) / replays (Phase2). dict[side -> obj].
+        # side ∈ {"left", "right"}.
+        self._subgoal_selectors: Dict[str, object] = {}
+        self._phase2_subgoal_replays: Dict[str, object] = {}
+        # Resume 후 cleanup 결과 (TRUE-only kept eps). reconcile 에 사용.
+        self._resume_kept_true_episodes = None
+        # Phase2 server gRPC client (lazy, 공유 1 client — server 측이 arm
+        # context 받도록 향후 확장 필요).
+        self._skill_planner_grpc_client = None
+        # Session dir cache — Phase1SubgoalSelector binding 에 사용.
+        self._session_dir: Optional[str] = None
 
         # State
         self.camera = None
@@ -168,7 +190,202 @@ class UnifiedMultiArmPipeline(BasePipeline):
             recording_fps=self.recording_fps,
             **detect_kwargs,
         )
+        # Method3 — Phase1 buffer-aware selector 를 per-arm 으로 부착.
+        # MultiArmSkills 생성 직후 호출 (skills 가 존재해야 set_subgoal_selector
+        # 가능). 실패해도 (config 없거나 phase=phase2 등) silent return.
+        try:
+            self._setup_buffer_aware_subgoal_per_arm()
+        except Exception as _e:
+            print(f"[Method3 bi-arm] _setup_buffer_aware_subgoal_per_arm skipped: {_e}")
         return True  # connect()는 LLM 코드에서 호출
+
+    # ─────────────────────────────────────────────
+    # Method3 — Phase1 buffer-aware subgoal (per-arm)
+    # ─────────────────────────────────────────────
+
+    def _load_phase1_config_file(self) -> dict | None:
+        """Phase1 전용 config (pipeline_config/phase1_config.yaml) 로드. 없으면 None."""
+        path = Path(__file__).resolve().parent / "pipeline_config" / "phase1_config.yaml"
+        if not path.exists():
+            return None
+        try:
+            from method3.config import load_phase1_config
+            cfg = load_phase1_config(path)
+            print(f"[Method3 bi-arm] Phase1 config ← {path}")
+            return cfg
+        except Exception as e:
+            print(f"[Method3 bi-arm] phase1_config.yaml 읽기 실패: {e}")
+            return None
+
+    def _read_phase_flags(
+        self, section: dict, default_fwd: bool = True, default_reset: bool = False,
+    ) -> tuple[bool, bool, bool]:
+        """enabled_forward/enabled_reset → (any, fwd, reset). single-arm 과 동일."""
+        if not section:
+            return (False, False, False)
+        if "enabled_forward" in section or "enabled_reset" in section:
+            fwd = bool(section.get("enabled_forward", default_fwd))
+            reset = bool(section.get("enabled_reset", default_reset))
+        elif "enabled" in section:
+            fwd = bool(section["enabled"])
+            reset = default_reset
+        else:
+            return (False, False, False)
+        return (fwd or reset, fwd, reset)
+
+    def _setup_buffer_aware_subgoal_per_arm(self) -> None:
+        """Phase1 buffer-aware selector 를 *per-arm* 으로 설치.
+
+        single-arm 의 ``_setup_buffer_aware_subgoal`` 와 동일 cfg 를 읽되,
+        Phase1SubgoalSelector + SubgoalBuffer 를 *좌/우 각각* 2개 생성하여
+        ``self.multi_arm.left_arm.set_subgoal_selector()`` /
+        ``self.multi_arm.right_arm.set_subgoal_selector()`` 로 부착한다.
+
+        buffer 파일명: ``subgoal_buffer_left.npz`` / ``subgoal_buffer_right.npz``
+        (yaml 의 ``buffer_file`` 의 stem 에 ``_{side}`` suffix 자동 부여).
+        relative path 면 ``<session_dir>/<file>`` 으로 finalize 시 resolve.
+
+        ``method3_phase == "phase2"`` 면 Phase1 selector 설치 건너뜀.
+        """
+        self._subgoal_phase = {"forward": False, "reset": False}
+        if getattr(self, "method3_phase", "phase1") == "phase2":
+            _has_replay = bool(self._phase2_subgoal_replays)
+            self._subgoal_phase = {"forward": _has_replay, "reset": False}
+            print("[Method3 bi-arm] phase=phase2 → Phase1 selector skipped "
+                  f"(replay forward={'ON' if _has_replay else 'OFF'})")
+            return
+
+        # cfg source — phase1_config.yaml 우선, recording_config 폴백
+        pert_raw: dict | None = self._load_phase1_config_file()
+        if pert_raw is None and self.recording_config:
+            try:
+                import yaml as _yaml
+                rc_path = Path(self.recording_config)
+                if rc_path.exists():
+                    with open(rc_path, "r") as f:
+                        rc = _yaml.safe_load(f) or {}
+                    pert_raw = (rc.get("perturbation") or {}).get("subgoal") or {}
+            except Exception as e:
+                print(f"[Method3 bi-arm] recording_config 읽기 실패: {e}")
+                return
+        if not pert_raw:
+            return
+        any_en, fwd, reset = self._read_phase_flags(pert_raw)
+        if not any_en:
+            return
+        self._subgoal_phase = {"forward": fwd, "reset": reset}
+
+        try:
+            from method3.phase1_state_seeding import (
+                Phase1SubgoalConfig, Phase1SubgoalSelector, ReachabilityConfig,
+                SubgoalBuffer,
+            )
+        except Exception as e:
+            print(f"[Method3 bi-arm] method3 import 실패: {e}")
+            return
+
+        # cfg build (single-arm 과 동일 로직)
+        reach_raw = pert_raw.get("reachability") or {}
+        def _opt_float(v): return None if v is None else float(v)
+        def _opt_bounds(v): return tuple(float(x) for x in v) if v else None
+        reachability = ReachabilityConfig(
+            z_min=_opt_float(reach_raw.get("z_min")),
+            z_max=_opt_float(reach_raw.get("z_max")),
+            x_bounds=_opt_bounds(reach_raw.get("x_bounds")),
+            y_bounds=_opt_bounds(reach_raw.get("y_bounds")),
+        )
+        _per_skill_raw = pert_raw.get("per_skill") or {}
+        _int_keys = {"n_candidates"}
+        per_skill_overrides: dict = {}
+        for _sk, _ov in _per_skill_raw.items():
+            if not _ov:
+                continue
+            per_skill_overrides[str(_sk)] = {
+                str(_k): (int(_v) if _k in _int_keys else float(_v))
+                for _k, _v in _ov.items()
+            }
+        cfg = Phase1SubgoalConfig(
+            sigma=float(pert_raw.get("sigma", 0.05)),
+            clip_factor=float(pert_raw.get("clip_factor", 2.0)),
+            n_candidates=int(pert_raw.get("n_candidates", 32)),
+            k_nn=int(pert_raw.get("k_nn", 5)),
+            end_fraction=float(pert_raw.get("end_fraction", 0.2)),
+            preview_points=int(pert_raw.get("preview_points", 20)),
+            eps=float(pert_raw.get("eps", 1e-6)),
+            s_min=float(pert_raw.get("s_min", 0.01)),
+            min_buffer_size=int(pert_raw.get("min_buffer_size", 8)),
+            candidate_dist=str(pert_raw.get("candidate_dist", "uniform_ball")),
+            robot_origin=(0.0, 0.0, 0.0),
+            max_resample=200,
+            reachability=reachability,
+            per_skill_overrides=per_skill_overrides,
+            debug_verbose=bool(pert_raw.get("debug_verbose", False)),
+        )
+        # buffer_file: per-arm suffix 부여
+        raw_buffer_file = pert_raw.get("buffer_file")  # e.g. "subgoal_buffer.npz"
+        self._subgoal_buffer_file_template = raw_buffer_file  # finalize 단계에서 _{side} 부여
+
+        # per-arm selector 생성 + 각 arm 에 부착
+        for side, arm_obj in (("left", self.multi_arm.left_arm),
+                              ("right", self.multi_arm.right_arm)):
+            buffer = SubgoalBuffer()  # 파일 binding 은 finalize 에서
+            selector = Phase1SubgoalSelector(buffer, cfg)
+            arm_obj.set_subgoal_selector(selector)
+            self._subgoal_selectors[side] = selector
+
+        print(
+            f"[Method3 bi-arm] Phase1 buffer-aware selectors ENABLED (per-arm) "
+            f"K={cfg.n_candidates} dist={cfg.candidate_dist} k_nn={cfg.k_nn} "
+            f"min_buf={cfg.min_buffer_size} buffer_template={raw_buffer_file or 'memory'} "
+            f"forward={fwd} reset={reset}"
+        )
+
+    def _finalize_subgoal_buffer_per_arm(self, session_dir: str | None) -> None:
+        """session_dir 가 확정된 후 per-arm buffer 파일 binding + preload.
+
+        - ``buffer_file: "subgoal_buffer.npz"`` → left: ``subgoal_buffer_left.npz``,
+          right: ``subgoal_buffer_right.npz`` 로 자동 변환.
+        - trace 파일도 per-arm 분리: ``subgoal_phase1_trace_{side}.jsonl``.
+        - ``method3_phase == phase2`` 이거나 selector 미설치 시 silent return.
+        """
+        raw_template = getattr(self, "_subgoal_buffer_file_template", None)
+        if not self._subgoal_selectors or not raw_template:
+            return
+        base_path = Path(raw_template)
+        for side, selector in self._subgoal_selectors.items():
+            # stem 에 _{side} suffix 부여
+            per_arm_name = f"{base_path.stem}_{side}{base_path.suffix}"
+            path = Path(per_arm_name) if not base_path.is_absolute() else base_path.with_name(per_arm_name)
+            if not path.is_absolute():
+                base = Path(session_dir) if session_dir else Path(".")
+                path = base / path
+            try:
+                selector.buffer.set_file(path)
+                selector.buffer.load()
+                if session_dir and hasattr(selector, "set_trace_file"):
+                    trace_path = Path(session_dir) / f"subgoal_phase1_trace_{side}.jsonl"
+                    selector.set_trace_file(trace_path)
+                print(
+                    f"\033[92m[Method3 bi-arm:{side}] buffer file → {selector.buffer.file_path()} "
+                    f"(preloaded {selector.buffer.total_size()} entries over "
+                    f"{len(selector.buffer.skill_ids())} skills)\033[0m"
+                )
+            except Exception as e:
+                print(f"[Method3 bi-arm:{side}] buffer binding 실패: {e}")
+
+    def _flush_subgoal_buffers_per_arm(self, episode_id: str, judge_true: bool) -> None:
+        """judge 결과에 따라 per-arm selector 의 _pending 을 commit (TRUE) 또는 폐기 (FALSE).
+
+        single-arm 의 line 3558~3572 블록에 해당. 호출 site: judge 직후.
+        """
+        for side, selector in self._subgoal_selectors.items():
+            try:
+                if judge_true:
+                    selector.flush_episode(episode_id=episode_id)
+                else:
+                    selector.discard_episode()
+            except Exception as e:
+                print(f"[Method3 bi-arm:{side}] flush/discard 실패: {e}")
 
     def _init_camera(self) -> bool:
         """Initialize camera via PipelineCamera."""
@@ -1526,11 +1743,17 @@ class UnifiedMultiArmPipeline(BasePipeline):
         visualize_detection: bool = False,
         save_dir: Optional[str] = None,
         skip_reset: bool = False,
+        skip_forward: bool = False,
     ) -> Dict:
         """
         Run multiple episodes sequentially.
         Same interface as ForwardAndResetPipeline.run_multiple_episodes().
+
+        Note: ``skip_forward`` is accepted for API parity with the single-arm
+        path but not yet plumbed through the bi-arm loop. Pass False (default).
         """
+        if skip_forward:
+            print("[UnifiedMultiArmPipeline] WARN — skip_forward=True 는 bi-arm 에서 아직 미지원, 무시함")
         self.total_episodes = num_episodes
         self.instruction = instruction
 
@@ -1540,6 +1763,15 @@ class UnifiedMultiArmPipeline(BasePipeline):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = str(Path(save_dir) / f"session_{timestamp}")
         Path(session_dir).mkdir(parents=True, exist_ok=True)
+
+        # Method3 — session_dir 가 확정됐으니 per-arm buffer 파일 binding +
+        # readiness trace 등록. selector 가 아직 없으면 (multi_arm 미생성 시)
+        # silent no-op. 첫 episode 시작 전에 호출.
+        self._session_dir = session_dir
+        try:
+            self._finalize_subgoal_buffer_per_arm(session_dir)
+        except Exception as _e:
+            print(f"[Method3 bi-arm] finalize_subgoal_buffer skipped: {_e}")
 
         # Results accumulator
         all_results = {
@@ -1625,6 +1857,18 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 if seed_positions[0] is None and self.first_episode_positions is not None:
                     seed_positions[0] = copy.deepcopy(self.first_episode_positions)
                     self._all_previous_seed_positions.append(seed_positions[0])
+
+                # Method3 — per-arm subgoal buffer commit/discard. judge=TRUE 면
+                # 좌/우 각 selector 의 _pending 을 buffer 에 commit (npz 저장),
+                # 아니면 폐기. dataset add 와 별개 흐름 — 둘 다 try 안.
+                try:
+                    from method3.episode_lifecycle import episode_id as _mk_ep_id
+                    _ep_id = _mk_ep_id(int(episode_num))
+                    _judge_true = (result['judge'].get('prediction') == 'TRUE'
+                                   and result['forward']['execution_success'])
+                    self._flush_subgoal_buffers_per_arm(_ep_id, _judge_true)
+                except Exception as _e:
+                    print(f"[Method3 bi-arm] flush per-arm skipped: {_e}")
 
                 # Update summary
                 s = all_results['summary']
@@ -1749,6 +1993,15 @@ class UnifiedMultiArmPipeline(BasePipeline):
         session_dir = str(resume_session_dir)
         episodes_per_seed = max(1, num_episodes // max(1, self.num_random_seeds))
 
+        # Method3 — resume 시점에 session_dir 가 이미 있음. per-arm buffer
+        # 파일 binding + preload. cleanup 결과의 kept_true_episodes 는 추후
+        # reconcile 단계에서 처리 (Step 8 — 다음 turn).
+        self._session_dir = session_dir
+        try:
+            self._finalize_subgoal_buffer_per_arm(session_dir)
+        except Exception as _e:
+            print(f"[Method3 bi-arm] finalize_subgoal_buffer skipped: {_e}")
+
         # Load previous state
         print(f"\n{YELLOW}[Resume] Loading previous session: {session_dir}{RESET_COLOR}")
         batch_slots, seed_positions = self._load_resume_state(session_dir)
@@ -1843,6 +2096,16 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 judge_pred = result['judge'].get('prediction', 'UNCERTAIN')
                 from pipeline.save_logs import save_batch_info
                 save_batch_info(episode_dir, batch_index, slot, judge_pred)
+
+                # Method3 — per-arm subgoal buffer commit/discard (resume path)
+                try:
+                    from method3.episode_lifecycle import episode_id as _mk_ep_id
+                    _ep_id = _mk_ep_id(int(episode_num))
+                    _judge_true = (judge_pred == 'TRUE'
+                                   and result['forward']['execution_success'])
+                    self._flush_subgoal_buffers_per_arm(_ep_id, _judge_true)
+                except Exception as _e:
+                    print(f"[Method3 bi-arm] flush per-arm (resume) skipped: {_e}")
 
                 if seed_positions[0] is None and self.first_episode_positions is not None:
                     seed_positions[0] = copy.deepcopy(self.first_episode_positions)

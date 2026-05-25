@@ -6131,6 +6131,7 @@ def main():
             detect_model=args.detect_model,
             resetspace_per_robot=resetspace_per_robot,
             recording_config=args.recording_config,
+            method3_phase=args.phase,
         )
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기

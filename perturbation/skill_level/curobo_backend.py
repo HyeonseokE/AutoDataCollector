@@ -255,7 +255,7 @@ class CuroboBackend:
         than aborting the episode.
         """
         try:
-            from curobo.geom.types import SceneCfg, Cuboid
+            from curobo._src.geom.types import SceneCfg, Cuboid
         except Exception:
             return {"added": 0, "removed": 0, "kept": 0, "error": "curobo SceneCfg/Cuboid import failed"}
 
@@ -359,7 +359,7 @@ class CuroboBackend:
             {"attached": bool, "name": str, "link": str, "error"?: str}
         """
         try:
-            from curobo.geom.types import Cuboid
+            from curobo._src.geom.types import Cuboid
         except Exception as e:
             return {"attached": False, "error": f"Cuboid import failed: {e}"}
 

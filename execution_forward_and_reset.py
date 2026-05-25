@@ -1163,24 +1163,31 @@ class ForwardAndResetPipeline(BasePipeline):
             _hook_cfg = getattr(
                 getattr(self, "_phase1_readiness_hook", None), "cfg", None
             )
-            _sched = "round_robin"  # safer default
+            # 우선순위 (주석과 *코드* 가 일치하도록): session_config > hook > default.
+            # session_config 가 *옛 session 의 진실* (resume 시 그 session 의 episode
+            # 들이 어떤 schedule 로 commit 됐는지) 이므로 SoT. hook cfg 는 session_config
+            # 가 없을 때 (fresh run, session_config 빌드 전) fallback.
+            _sched: str | None = None
+            _sched_src = "default"
             try:
                 _scfg_path = Path(session_dir) / "session_config.json"
                 if _scfg_path.exists():
                     import json as _json
                     with open(_scfg_path, "r", encoding="utf-8") as _f:
                         _sc = _json.load(_f)
-                    if isinstance(_sc.get("schedule_mode"), str):
-                        _sched = _sc["schedule_mode"]
+                    _v = _sc.get("schedule_mode")
+                    if isinstance(_v, str) and _v:
+                        _sched, _sched_src = _v, "session_config.json"
             except Exception as _e:
                 print(f"[Method3 phase2] session_config schedule_mode 읽기 실패: {_e}")
-            # hook cfg override (fresh run 의 경우 session_config 가 아직 없을 수 있음)
-            if _hook_cfg is not None and hasattr(_hook_cfg, "schedule_mode"):
+            if _sched is None and _hook_cfg is not None:
                 _hk = getattr(_hook_cfg, "schedule_mode", None)
                 if isinstance(_hk, str) and _hk:
-                    _sched = _hk
+                    _sched, _sched_src = _hk, "readiness_hook.cfg"
+            if _sched is None:
+                _sched = "round_robin"  # safer default — 옛 seed_major default 는 RCA 의 원흉
             print(f"[Method3 phase2] schedule_mode resolved → {_sched!r} "
-                  f"(num_seeds={_num_seeds})")
+                  f"(source={_sched_src}, num_seeds={_num_seeds})")
             _eps_per = (
                 max(1, int(self.total_episodes) // int(self.num_random_seeds))
                 if getattr(self, "total_episodes", 0) and _num_seeds

@@ -16,7 +16,9 @@ subgoal 을 호출 순서대로(= episode 내 frame 순서) 반환한다.
 """
 from __future__ import annotations
 
+import json
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -143,6 +145,9 @@ class Phase2SubgoalReplay:
         # 같은 skill 안 여러 select_subgoal 호출 시 cursor 1 만 advance (over-
         # advance 방지). set_episode 에서 빈 dict 로 reset.
         self._type_cursors: dict[str, int] = {}
+        # jsonl trace 경로 (opt-in) — set_trace_file 로 바인딩. None = 비활성.
+        # 명시적 init 으로 deterministic attribute 보장 (linter/IDE 친화).
+        self._trace_path: str | None = None
 
         # 진단 로그 — seed-aware coverage 보고.
         if self._eps_by_seed:
@@ -271,15 +276,13 @@ class Phase2SubgoalReplay:
 
     def _trace_set_episode(self, eid, seed_index, branch, chosen, detail) -> None:
         """set_episode 호출 결과를 jsonl 한 줄로 append (forward_log 와 무관)."""
-        path = getattr(self, "_trace_path", None)
+        path = self._trace_path
         if not path:
             return
         try:
-            import json as _json, time as _time
-            from pathlib import Path as _Path
-            _Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
             rec = {
-                "ts": _time.time(),
+                "ts": time.time(),
                 "called_with": {"episode_id": eid, "seed_index": seed_index},
                 "branch": branch,
                 "chosen_episode": chosen,
@@ -287,7 +290,7 @@ class Phase2SubgoalReplay:
                 "seed_cursor_snapshot": dict(self._seed_cursor),
             }
             with open(path, "a", encoding="utf-8") as f:
-                f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception as e:
             print(f"[Phase2SubgoalReplay] trace write failed: {e}")
 

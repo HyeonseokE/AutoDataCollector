@@ -187,9 +187,18 @@ class Phase2SubgoalReplay:
             seed_index: 현재 episode reset 의 0-based seed index. -1 면 모름.
         """
         eid = str(episode_id)
+        # 진입 마크 — 어느 분기로 가든 호출 사실은 무조건 보이게 (RCA 진단용).
+        print(
+            f"[Phase2SubgoalReplay] set_episode CALLED — "
+            f"episode_id={eid!r} seed_index={seed_index}"
+        )
 
         # 1) exact match
         if eid in self._by_episode:
+            print(
+                f"[Phase2SubgoalReplay] {eid} EXACT MATCH (buffer 에 동일 ep) "
+                f"— cursor 0 reset"
+            )
             self._episode_id = eid
             self._cursor = 0
             self._type_cursors = {}
@@ -232,6 +241,10 @@ class Phase2SubgoalReplay:
                 return
 
         # 4) buffer 비었음 — 호출부에서 nominal fallback
+        print(
+            f"[Phase2SubgoalReplay] ⚠ {eid} → BUFFER EMPTY "
+            f"(self._by_episode 가 빔) — select_subgoal 이 nominal 폴백"
+        )
         self._episode_id = eid
         self._cursor = 0
         self._type_cursors = {}

@@ -1118,6 +1118,11 @@ class ForwardAndResetPipeline(BasePipeline):
         self._setup_phase2_subgoal_replay(session_dir)
 
     def _setup_phase2_subgoal_replay(self, session_dir: str | None) -> None:
+        # 진단 — setup 진입 자체를 보고 (resume 등에서 skip 의심 회피).
+        print(
+            f"[Method3 phase2] _setup_phase2_subgoal_replay ENTERED — "
+            f"session_dir={session_dir!r}"
+        )
         """Phase2 — Phase1 도달 subgoal 을 episode 별로 replay 하도록 설치.
 
         Phase1 은 buffer-aware 섭동으로 subgoal 을 *옮겨* 상태 다양성을 키웠고,
@@ -2187,6 +2192,13 @@ class ForwardAndResetPipeline(BasePipeline):
         # 같은 seed 의 Phase1 episode 만 replay (seed-aware) — approach 와 pick
         # descent 의 seed-mismatch 방지.
         _replay = getattr(self, "_phase2_subgoal_replay", None)
+        # 진단 — replay 가 None 이면 set_episode 가 아예 호출 안 됨을 가시화.
+        print(
+            f"[Method3 phase2] _seed_episode_perturbation: "
+            f"current_episode={getattr(self, 'current_episode', 'MISSING')} "
+            f"_current_batch_index={getattr(self, '_current_batch_index', 'MISSING')} "
+            f"_phase2_subgoal_replay={'PRESENT' if _replay is not None else 'NONE (set_episode skip)'}"
+        )
         if _replay is not None:
             try:
                 from method3.episode_lifecycle import episode_id as _mk_ep_id

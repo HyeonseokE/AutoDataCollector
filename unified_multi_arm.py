@@ -637,16 +637,38 @@ class UnifiedMultiArmPipeline(BasePipeline):
             except Exception as e:
                 print(f"[Method3 bi-arm:{side}] reconcile 실패: {e}")
 
-    # ── Step 9: phase gate (no-op stub — MultiArmSkills 가 systems_disabled 없으면) ──
+    # ── Step 9: phase gate — reset 단계 selector 임시 detach ──
     def _phase_gate(self, phase: str):
-        """Phase 별 system enable/disable context manager.
+        """phase ("forward"/"reset") 의 enabled flag (_subgoal_phase) 기준으로
+        좌/우 selector 를 그 단계 동안 임시 detach 하는 context manager.
 
-        single-arm 의 _phase_gate 와 동일 의도. MultiArmSkills 가 systems_disabled
-        를 노출하지 않으면 nullcontext (no-op) 반환. 향후 left/right 동시 disable
-        하도록 확장 가능.
+        yaml `enabled_reset: false` 가 의미 가지려면 reset execute_code 동안
+        selector 가 *비활성* 이어야 — 그렇지 않으면 reset 의 transit move 도
+        stage_executed 호출 → _pending 에 누적 → flush 시 forward buffer 와
+        섞임. single-arm 의 systems_disabled 와 동일 효과.
         """
-        from contextlib import nullcontext
-        return nullcontext()
+        from contextlib import contextmanager, nullcontext
+        sg = getattr(self, "_subgoal_phase", {"forward": False, "reset": False})
+        if sg.get(phase, False):
+            return nullcontext()   # phase enabled — selector 그대로
+
+        @contextmanager
+        def _detach():
+            # 좌/우 selector backup + None 으로 detach
+            saved = {}
+            try:
+                for side, arm_obj in (("left", self.multi_arm.left_arm),
+                                      ("right", self.multi_arm.right_arm)):
+                    saved[side] = getattr(arm_obj, "_subgoal_selector", None)
+                    if saved[side] is not None:
+                        arm_obj.set_subgoal_selector(None)
+                yield
+            finally:
+                for side, arm_obj in (("left", self.multi_arm.left_arm),
+                                      ("right", self.multi_arm.right_arm)):
+                    if saved.get(side) is not None:
+                        arm_obj.set_subgoal_selector(saved[side])
+        return _detach()
 
     def _init_camera(self) -> bool:
         """Initialize camera via PipelineCamera."""
@@ -1985,10 +2007,14 @@ class UnifiedMultiArmPipeline(BasePipeline):
                 # _reset_target_positions: codegen에서 계산된 target (per-arm, label remapped)
                 reset_current = getattr(self, '_reset_current_positions', {})
                 reset_target = getattr(self, '_reset_target_positions', target_positions)
-                reset_success = self.execute_code(reset_code, {}, extra_globals={
-                    "current_positions": reset_current,
-                    "target_positions": reset_target,
-                })
+                # Method3 — yaml `enabled_reset: false` 면 reset execute_code
+                # 동안 좌/우 selector 임시 detach (transit move 가 stage_executed
+                # 호출 안 하도록). single-arm 의 systems_disabled 와 동일 효과.
+                with self._phase_gate("reset"):
+                    reset_success = self.execute_code(reset_code, {}, extra_globals={
+                        "current_positions": reset_current,
+                        "target_positions": reset_target,
+                    })
                 result['reset']['execution_success'] = reset_success
 
                 if self.record_dataset and self.reset_dataset_recorder:

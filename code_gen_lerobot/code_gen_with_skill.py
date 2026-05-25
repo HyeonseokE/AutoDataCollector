@@ -663,15 +663,12 @@ def lerobot_code_gen_multi_turn(
         label = obj["label"]
         ymin, xmin, ymax, xmax = obj["box_2d"]
 
-        # obstacle 스킵: needs_manipulation=false AND expected_points도 비어있을 때만
-        # plate 등 placement target은 needs_manipulation=false이지만 expected_points가 있으므로 스킵 안 함
-        strategy = obj.get("manipulation_strategy", {})
-        if strategy and strategy.get("needs_manipulation") is False:
-            expected_pts = strategy.get("expected_points", [])
-            if not expected_pts:
-                print(f"\n{GRAY}" + _log(f"Skip — {label} (obstacle, no points needed)", step=f"Crop{i}") + f"{RESET}")
-                continue
-
+        # obstacle skip 제거 (2026-05-25 사용자 요청).
+        # 이전 동작: needs_manipulation=False + expected_points=[] 면 Turn 2 skip →
+        # LLM 이 block 을 fluky 하게 obstacle 분류하면 grasp center pixel 못 얻어
+        # bbox center fallback 으로 강제 → pick 정확도 저하. 모든 valid_objects
+        # 에 Turn 2 시도 (LLM 의 expected_points 부재 시에도 bbox 중심으로
+        # crop+pointing 시도 — 잘못된 obstacle 분류의 안전망).
         print(f"\n{YELLOW}" + _log(f"Crop — {label}", step=f"Crop{i}") + f"{RESET}")
 
         # ── Overhead crop ──

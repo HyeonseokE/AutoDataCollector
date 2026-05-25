@@ -2298,17 +2298,17 @@ class LeRobotSkills:
 
         if not trajectory.ik_converged:
             if ik_target_pitch is not None:
-                # IK failed with pitch constraint - retry with relaxed pitch range (±20°)
-                PITCH_TOLERANCE_DEG = 20.0
+                # IK failed with pitch constraint - retry with relaxed pitch range (±50°)
+                PITCH_TOLERANCE_DEG = 50.0
                 pitch_tolerance_rad = np.radians(PITCH_TOLERANCE_DEG)
                 original_pitch = ik_target_pitch
 
                 self._log(f"  WARNING: IK failed with pitch={np.degrees(original_pitch):.1f}°. "
                          f"Retrying within ±{PITCH_TOLERANCE_DEG}° range...")
 
-                # Try multiple pitch values within ±20° range
-                # Order: 0, ±1, ±2, ... ±20 degrees from original
-                pitch_offsets_deg = [i for j in range(21) for i in ((-j, j) if j > 0 else (0,))]
+                # Try multiple pitch values within ±50° range
+                # Order: 0, ±1, ±2, ... ±50 degrees from original
+                pitch_offsets_deg = [i for j in range(51) for i in ((-j, j) if j > 0 else (0,))]
                 best_trajectory = None
                 best_ik_info = None
                 best_pitch_offset = None

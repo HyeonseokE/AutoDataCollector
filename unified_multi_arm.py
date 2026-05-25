@@ -1884,6 +1884,20 @@ class UnifiedMultiArmPipeline(BasePipeline):
             _save_bi(episode_root, getattr(self, '_current_batch_index', 0),
                      getattr(self, '_current_slot', 0), judge_pred)
 
+            # Method3 bi-arm — forward judge 직후 buffer flush 도 즉시.
+            # 미수정 시 _flush_subgoal_buffers_per_arm 가 self.run() return 후
+            # (reset 끝 후) 호출돼서, reset 단계에서 Ctrl+C 면 _pending lose.
+            # forward judge=TRUE 가 batch_info 영구화와 동시에 buffer 도 영구화.
+            try:
+                from method3.episode_lifecycle import episode_id as _mk_ep_id
+                _ep_n = getattr(self, 'current_episode', None)
+                if _ep_n:
+                    _ep_id = _mk_ep_id(int(_ep_n))
+                    _judge_true = (judge_pred == 'TRUE' and execution_success)
+                    self._flush_subgoal_buffers_per_arm(_ep_id, _judge_true)
+            except Exception as _e:
+                print(f"  {YELLOW}[Method3 bi-arm] early buffer flush 실패: {_e}{RESET_COLOR}")
+
             # ══════════════════════════════════════
             # PHASE 2: RESET EXECUTION
             # ══════════════════════════════════════

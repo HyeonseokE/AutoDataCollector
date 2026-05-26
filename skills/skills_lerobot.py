@@ -159,6 +159,11 @@ class LeRobotSkills:
         # Phase1 reembedding 의 seg.skill_index (DB 의 skill_{k} 키) 와 같은
         # namespace 라야 Phase2 plan_batch 의 server-side DB lookup 이 정합.
         self._episode_skill_base = 0
+        # transit-only ordinal — move_to_position(is_transit=True) 호출마다 ++.
+        # subgoal_buffer (Phase1 SubgoalSelector 가 transit 만 stage) 와 동일
+        # namespace. connect() 시 0 으로 reset 한다. reembedding adapter 도
+        # transit-only filter+re-index 라 server DB lookup 도 같은 namespace.
+        self._transit_call_index = 0
         LeRobotSkills._last_instance = self  # 후처리에서 접근 가능하도록
 
         # LeRobot dataset recording callback
@@ -470,6 +475,12 @@ class LeRobotSkills:
         # 순서를 만드려면 base 를 snapshot 해 빼야 한다 (skill_sequence 는 instance
         # 전역 — episode 마다 reset 되지 않음).
         self._episode_skill_base = len(self.skill_sequence)
+        # transit-only ordinal counter — episode 시작마다 0 으로 reset.
+        # move_to_position(is_transit=True) 호출 시 plan_batch 직전 read+증가.
+        # subgoal_buffer / reembedding adapter (transit-only filter) 와 동일
+        # namespace 라 Phase2 server DB lookup + Phase2SubgoalReplay cursor 가
+        # 같은 ordinal 에서 매칭된다.
+        self._transit_call_index = 0
 
         # Load configuration
         if not self.robot_config_path.exists():
@@ -1783,6 +1794,10 @@ class LeRobotSkills:
                 home_pitch = float(self.kinematics.get_gripper_pitch(goal_joint_rad))
                 _feas = (lambda xyz: self._home_pitch_feasible(
                             xyz, current_joints_rad, home_pitch))
+                # move_initial 도 buffer 의 한 ordinal 차지 (skill_0/5/10/15
+                # = move_initial). buffer cursor + reembedding ordinal 정합
+                # 위해 transit-call counter 도 같이 ++.
+                self._transit_call_index += 1
                 _sel = self._subgoal_selector.select_subgoal(
                     current_ee=current_ee,
                     nominal_goal=home_xyz,
@@ -2450,15 +2465,14 @@ class LeRobotSkills:
                 and self._perturbation_rng is not None
                 and trajectory.ik_converged):
             seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
-            # Phase2 candidate 의 vector DB partition 키 = episode-내 skill ordinal.
-            # plan_batch 시점엔 이 move 의 _set_skill_recording 이 아직 안 돌아
-            # skill_sequence 에 미반영 → len(skill_sequence) - _episode_skill_base
-            # 가 곧 이 skill 의 0-based ordinal index. Phase1 reembedding 의
-            # seg.skill_index (lerobot_skill_segment_adapter.py:147) 와 동일
-            # namespace 라야 server-side DB lookup 이 같은 partition 을 hit 한다.
-            # 단순 plan_batch 호출 카운터 (transit-only) 는 non-transit/gripper
-            # skill 을 건너뛰어 DB key 와 어긋난다 — 반드시 skill_sequence 기반.
-            _skill_ordinal = f"skill_{len(self.skill_sequence) - self._episode_skill_base}"
+            # Phase2 candidate 의 vector DB partition 키 = transit-only ordinal.
+            # subgoal_buffer (Phase1 SubgoalSelector 가 transit-only stage) +
+            # reembedding adapter (transit-only filter+re-index) 와 동일
+            # namespace. 단순 transit 호출 카운터 — connect() 가 0 으로 reset,
+            # 매 plan_batch 직전 read+증가. non-transit (gripper_*, descent) 는
+            # 이 분기에 들어오지 않으므로 카운터에 영향 없음.
+            _skill_ordinal = f"skill_{self._transit_call_index}"
+            self._transit_call_index += 1
             self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={_skill_ordinal} [{skill_type_val}])")
             try:
                 cands = self._skill_planner_client.plan_batch(

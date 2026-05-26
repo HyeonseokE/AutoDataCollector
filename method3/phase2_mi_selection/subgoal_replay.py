@@ -45,21 +45,28 @@ class Phase2SubgoalReplay:
         buf.set_file(Path(buffer_path))
         buf.load()
         # {episode_id: [subgoal_xyz, ...]} — episode 내 ordinal(=호출 순서).
-        # SubgoalBuffer 는 ordinal key(skill_0, skill_1, ...)로 저장되므로
-        # entry 를 start_t(=staging 순서) 로 정렬하면 곧 호출 순서다.
+        # SubgoalBuffer 는 ordinal key(skill_0, skill_1, ...)로 저장된다.
+        # 정렬 우선순위: (start_t, skill_id 의 numeric 부분). start_t 가 모두
+        # 동일(-1 placeholder)이어도 skill_id 의 정수 인덱스로 결정되도록 — buffer
+        # iteration 의 lexicographic 순서(skill_10 이 skill_2 보다 앞)를 회피.
         _staged: dict[str, list[tuple]] = {}
         for skill_id in buf.skill_ids():
+            try:
+                _kidx = int(str(skill_id).split("_", 1)[1])
+            except (ValueError, IndexError):
+                _kidx = 0
             for e in buf.entries(skill_id):
                 eid = str(e.episode_id)
                 if not eid:
                     # episode_id 미태깅 entry 는 replay 순서를 특정할 수 없어 제외.
                     continue
                 _staged.setdefault(eid, []).append(
-                    (int(e.start_t), np.asarray(e.subgoal, dtype=float)))
+                    (int(e.start_t), int(_kidx),
+                     np.asarray(e.subgoal, dtype=float)))
         self._by_episode: dict[str, list[np.ndarray]] = {}
         for eid, lst in _staged.items():
-            lst.sort(key=lambda t: t[0])
-            self._by_episode[eid] = [xyz for _, xyz in lst]
+            lst.sort(key=lambda t: (t[0], t[1]))
+            self._by_episode[eid] = [xyz for _, _, xyz in lst]
 
         self._episode_id: str = ""
         self._cursor: int = 0

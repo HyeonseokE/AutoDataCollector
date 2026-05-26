@@ -30,7 +30,7 @@ ROBOT_IDS=(4)
 #   phase1 — Phase1 buffer-aware subgoal seeding (default).
 #   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
 # ============================================================
-PHASE="phase1"
+PHASE="phase2"
 
 ### ==================== [single arm task] ==================
 ## pick and place
@@ -81,7 +81,7 @@ RESUME_SESSION="./results/session_20260526_043001"
 # Skip restore 토글 — resume 모드에서만 의미. true 면 _restore_to_seed (물리적
 # robot 으로 seed 위치 복원) 단계를 skip 하고 바로 episode 루프 진입. 워크스페이스
 # 가 이미 정상이거나 사용자가 수동으로 정리해 둔 경우 사용.
-RESUME_SKIP_RESTORE=true
+RESUME_SKIP_RESTORE=false
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

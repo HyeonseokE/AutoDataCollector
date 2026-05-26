@@ -238,8 +238,12 @@ class PreselectiveAcquirerServicer(
                     "pose": [geom.x, geom.y, geom.z, geom.qx, geom.qy, geom.qz, geom.qw],
                     "dims": [geom.dim_x, geom.dim_y, geom.dim_z],
                 }
-            self.curobo.update_world(dynamic_obstacles if dynamic_obstacles else None)
+            # Empty obstacle 이면 update_world 호출 자체 skip — calling it on every
+            # plan_batch invalidates curobo motion_gen's trajopt cache
+            # (NoneType.replay AttributeError on next plan). 기본 scene (table) 은
+            # planner init 에서 한 번만 등록되고 그대로 유지.
             if dynamic_obstacles:
+                self.curobo.update_world(dynamic_obstacles)
                 print(f"[server] scene update — {len(dynamic_obstacles)} dynamic cuboid: "
                       f"{list(dynamic_obstacles.keys())}", flush=True)
         except Exception as e:

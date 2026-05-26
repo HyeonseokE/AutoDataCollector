@@ -102,12 +102,13 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                 For pick approach, use: gripper_action="open", gripper_start_fraction=0.3
                 (gripper opens during the last 70% of the approach).
             - gripper_action="close": gripper closes during the motion.
-                For place retreat, use: gripper_action="close", gripper_start_fraction=0.7
-                (gripper closes during the last 30% of the retreat).
+                NOTE: Do NOT use gripper_action="close" on the place retreat.
+                The retreat after execute_place_object MUST be a PURE z-lift
+                (no gripper_action). Runtime applies stack-aware clearance
+                (place_z + object_height + 2cm) via clearance-lead Bezier.
 
             When gripper_action is used, write skill_description as a compound sentence:
                 "Approach <obj> and open gripper"
-                "Retreat from <target> and close gripper"
 
         Args:
             position: Target position [x, y, z] in meters in world frame.

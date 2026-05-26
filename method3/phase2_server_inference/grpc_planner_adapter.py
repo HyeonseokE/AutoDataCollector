@@ -154,6 +154,15 @@ class GrpcPlannerClient:
             _rs if _rs is not None else start_qpos, dtype=np.float32,
         )
 
+        # Dynamic obstacles — server-side curobo update_world() 가 매 plan_batch
+        # 직전 호출되어 trajopt 가 이 cuboid 들을 회피한다. provider 가
+        # _latest_obstacles() 를 노출하면 사용, 아니면 비어있음 (default scene).
+        _obstacles = {}
+        try:
+            _obstacles = self._provider._latest_obstacles() or {}
+        except Exception:
+            _obstacles = {}
+
         try:
             resp = self._client.plan_and_select(
                 skill_id=effective_skill_id,
@@ -165,6 +174,7 @@ class GrpcPlannerClient:
                 n_candidates=int(n),
                 seed=int(seed) if seed is not None else 0,
                 is_transit=True,
+                current_positions=_obstacles,
             )
         except Exception as e:
             print(f"  [Skill Perturbation] grpc plan_and_select failed: {e}")

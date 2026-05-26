@@ -125,6 +125,8 @@ class CuroboBackend:
 
         from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
         from curobo.types import JointState, GoalToolPose
+        from curobo._src.geom.types import SceneCfg
+        self._SceneCfg = SceneCfg  # 의 — 의 — instance method 의 — 의 — 의 — 의
 
         self._torch = torch
         self._JointState = JointState
@@ -185,7 +187,10 @@ class CuroboBackend:
         # 추후 robot 별 base mount 가 다르면 config 로 분리.
         # [RESTORED 2026-05-26] 4db51cf 의 scene_model 이 f389def 의 K_via
         # refactor 시점에 의도치 않게 누락 — 재추가.
-        _scene_model = {
+        # _default_scene_dict — table 의 — 의 — base layer. update_world() 가
+        # dynamic obstacle (block/plate 등) 의 — 의 — 의 — 의 — 의 — 의 — 의
+        # 의 — 의 — 의 — copy 후 merge 한다.
+        self._default_scene_dict = {
             "cuboid": {
                 "table": {
                     "dims": [2.0, 2.0, 0.02],
@@ -193,6 +198,7 @@ class CuroboBackend:
                 },
             },
         }
+        _scene_model = self._default_scene_dict
         mp_cfg = MotionPlannerCfg.create(
             robot=robot_cfg_abs,
             num_trajopt_seeds=config.num_trajopt_seeds,
@@ -303,6 +309,32 @@ class CuroboBackend:
             self.close()
         except Exception:
             pass
+
+    def update_world(self, dynamic_obstacles: Optional[Dict[str, Dict]] = None) -> None:
+        """Runtime scene update — table + dynamic cuboid obstacles 등록.
+
+        매 plan_batch 직전 호출하여 trajopt 가 그 시점의 실제 obstacle 위치를
+        회피하도록 한다. dynamic_obstacles 가 None/{} 면 default (table only) 로
+        reset.
+
+        Args:
+            dynamic_obstacles: ``{name: {"pose": [x,y,z, qx,qy,qz,qw],
+                                        "dims": [dx,dy,dz]}}``. 좌표/단위 모두
+                base_link frame 의 meter. caller (client) 가 pix2robot 변환과
+                object_height 추정을 마친 후 넘긴다.
+        """
+        scene_dict = {
+            "cuboid": dict(self._default_scene_dict["cuboid"]),  # shallow copy
+        }
+        if dynamic_obstacles:
+            for name, geom in dynamic_obstacles.items():
+                # name 중복 회피 — table 과 같은 이름 사용 시 dynamic 이 우선.
+                scene_dict["cuboid"][name] = {
+                    "dims": list(geom["dims"]),
+                    "pose": list(geom["pose"]),
+                }
+        scene_cfg = self._SceneCfg.create(scene_dict)
+        self._planner.update_world(scene_cfg)
 
     def plan_batch(
         self,

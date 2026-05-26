@@ -228,6 +228,23 @@ class PreselectiveAcquirerServicer(
             # to its own cartesian path.
             return preselective_pb2.PlanResponse(used_fallback=True)
 
+        # 0. Dynamic scene update — client 가 current_positions 를 넘기면
+        # curobo trajopt 의 collision world 에 cuboid obstacle 로 register.
+        # 비어있으면 default (table only) 로 reset.
+        try:
+            dynamic_obstacles = {}
+            for name, geom in (request.current_positions or {}).items():
+                dynamic_obstacles[name] = {
+                    "pose": [geom.x, geom.y, geom.z, geom.qx, geom.qy, geom.qz, geom.qw],
+                    "dims": [geom.dim_x, geom.dim_y, geom.dim_z],
+                }
+            self.curobo.update_world(dynamic_obstacles if dynamic_obstacles else None)
+            if dynamic_obstacles:
+                print(f"[server] scene update — {len(dynamic_obstacles)} dynamic cuboid: "
+                      f"{list(dynamic_obstacles.keys())}", flush=True)
+        except Exception as e:
+            print(f"[server] update_world failed (continuing with default scene): {e}", flush=True)
+
         # 1. curobo plan_batch
         try:
             cands = self.curobo.plan_batch(

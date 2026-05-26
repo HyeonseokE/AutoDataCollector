@@ -50,6 +50,22 @@ message IngestResponse {
   map<string, int32> buffer_totals = 2;   // skill_id → entry count after ingest
 }
 
+// Dynamic obstacle geometry (cuboid) for runtime curobo scene update.
+// caller (client) 가 pix2robot 변환 + object_height 추정 마친 후 전달한다.
+// 단위: base_link frame 의 meter. quaternion 은 (qx,qy,qz,qw).
+message ObstacleGeometry {
+  float x = 1;        // cuboid center x (base_link, m)
+  float y = 2;        // cuboid center y (base_link, m)
+  float z = 3;        // cuboid center z (base_link, m)
+  float qx = 4;       // quaternion x  (default 0)
+  float qy = 5;       // quaternion y  (default 0)
+  float qz = 6;       // quaternion z  (default 0)
+  float qw = 7;       // quaternion w  (default 1 = identity rotation)
+  float dim_x = 8;    // cuboid dimension x (m)
+  float dim_y = 9;    // cuboid dimension y (m)
+  float dim_z = 10;   // cuboid dimension z (m)
+}
+
 message PlanRequest {
   string skill_id = 1;            // partition key for buffer (e.g. "move_to")
   bytes start_qpos = 2;           // np.save: shape (DOF,) float32
@@ -63,6 +79,10 @@ message PlanRequest {
   int32 n_candidates = 7;         // K — passed straight to curobo.plan_batch
   int32 seed = 8;                 // RNG seed for plan_batch + tie-break
   bool is_transit = 9;            // false → server returns no_op (skip selection)
+  // Dynamic obstacles — server-side curobo.update_world() 가 매 plan_batch
+  // 직전 호출되어 trajopt 가 이 cuboid 들을 회피한다. 비어있으면 default
+  // scene (table only) 그대로. label 은 dict key 로 사용 (e.g. "red_block").
+  map<string, ObstacleGeometry> current_positions = 10;
 }
 
 message PlanResponse {

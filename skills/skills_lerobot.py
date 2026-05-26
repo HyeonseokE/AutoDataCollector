@@ -310,6 +310,57 @@ class LeRobotSkills:
         """
         self._skill_candidate_selector = selector_fn
 
+    def _latest_obstacles(self) -> Dict[str, Dict]:
+        """current_positions → {name: {"pose": [x,y,z,qx,qy,qz,qw], "dims": [dx,dy,dz]}}.
+
+        Server-side curobo update_world() 에 넘길 dynamic obstacle 들. 매
+        plan_batch 직전 GrpcPlannerClient adapter 가 자동 호출.
+
+        self._exec_positions (= caller's positions dict, contains VLM-detected
+        object positions w/ bbox_px) 를 base 로 변환:
+          - position[0..2]  → cuboid center (base_link, m)
+          - object name 의 — 의 — substring match 로 — preset dims 적용:
+              "block" → 0.04 × 0.04 × 0.025 m
+              "plate" → 0.10 × 0.10 × 0.005 m
+              "dish"  → 0.12 × 0.12 × 0.020 m
+              default → 0.05 × 0.05 × 0.05 m
+
+        bbox_px → meter 정밀 변환은 후속 — preset 으로 70-80% 충분.
+        positions 없거나 _exec_positions=None 이면 {} 반환 (= scene 미변경).
+        """
+        if self._exec_positions is None:
+            return {}
+        # preset table — name lowercase substring match.
+        _PRESETS = [
+            ("block", (0.04, 0.04, 0.025)),
+            ("plate", (0.10, 0.10, 0.005)),
+            ("dish",  (0.12, 0.12, 0.020)),
+        ]
+        _DEFAULT_DIMS = (0.05, 0.05, 0.05)
+        out: Dict[str, Dict] = {}
+        for name, info in self._exec_positions.items():
+            if not isinstance(info, dict):
+                continue
+            pos = info.get("position")
+            if pos is None or len(pos) < 3:
+                continue
+            lname = name.lower()
+            dims = _DEFAULT_DIMS
+            for key, preset in _PRESETS:
+                if key in lname:
+                    dims = preset
+                    break
+            # cuboid center z = position[2] + dim_z/2 (= half-height above
+            # detected top surface; detection 의 position[2] 가 top z 가정).
+            # 단, detection 이 center z 면 그대로. 보수적으로 detected z 가
+            # cuboid 의 *center* 라 가정해 추가 보정 안 함 — 안전.
+            out[name] = {
+                "pose": [float(pos[0]), float(pos[1]), float(pos[2]),
+                         0.0, 0.0, 0.0, 1.0],
+                "dims": [float(dims[0]), float(dims[1]), float(dims[2])],
+            }
+        return out
+
     def set_skill_planner_client(self, client, n_candidates: int = 4) -> None:
         """Attach a skill planner client. Pass None to detach.
 
@@ -2081,6 +2132,20 @@ class LeRobotSkills:
                 f"(subgoal selector 호출 여부 무관)"
             )
 
+        # Stack-aware retreat z auto-clamp — LLM 의 retreat 호출이 고정
+        # approach_height(0.15m) 으로 들어와도, 누적 stack 이 깊어 clearance_z
+        # 가 더 크면 final z 가 via z 보다 낮아지는 모순을 막기 위해 끌어올린다.
+        # (clearance Bezier 가 via 까지 띄웠다가 다시 내리는 비효율 + 끝지점에서
+        # 막 놓은 stack top 을 스칠 위험 차단.)
+        if _holding_clearance_z is not None and target_position[2] < _holding_clearance_z:
+            _orig_target_z = float(target_position[2])
+            target_position = np.asarray(target_position, dtype=float).copy()
+            target_position[2] = float(_holding_clearance_z) + 0.005  # +5mm 여유
+            self._log(
+                f"  [stack-aware retreat] target z {_orig_target_z:.3f}m → "
+                f"{target_position[2]:.3f}m (clearance_z={_holding_clearance_z:.3f}m)"
+            )
+
         if (is_transit
                 and self._subgoal_selector is not None
                 and self._perturbation_rng is not None):
@@ -2268,17 +2333,17 @@ class LeRobotSkills:
 
         if not trajectory.ik_converged:
             if ik_target_pitch is not None:
-                # IK failed with pitch constraint - retry with relaxed pitch range (±50°)
-                PITCH_TOLERANCE_DEG = 50.0
+                # IK failed with pitch constraint - retry with relaxed pitch range (±20°)
+                PITCH_TOLERANCE_DEG = 20.0
                 pitch_tolerance_rad = np.radians(PITCH_TOLERANCE_DEG)
                 original_pitch = ik_target_pitch
 
                 self._log(f"  WARNING: IK failed with pitch={np.degrees(original_pitch):.1f}°. "
                          f"Retrying within ±{PITCH_TOLERANCE_DEG}° range...")
 
-                # Try multiple pitch values within ±50° range
-                # Order: 0, ±1, ±2, ... ±50 degrees from original
-                pitch_offsets_deg = [i for j in range(51) for i in ((-j, j) if j > 0 else (0,))]
+                # Try multiple pitch values within ±20° range
+                # Order: 0, ±1, ±2, ... ±20 degrees from original
+                pitch_offsets_deg = [i for j in range(21) for i in ((-j, j) if j > 0 else (0,))]
                 best_trajectory = None
                 best_ik_info = None
                 best_pitch_offset = None
@@ -3197,8 +3262,11 @@ class LeRobotSkills:
         else:
             # Placing on another object: use saved pick_z offset from surface,
             # plus per-robot z_offset (same residual-bias absorber as pick).
+            # STACK_PLACE_LIFT: stack place 전용 z 조절 (signed, meter).
+            # +면 release 더 위, -면 더 깊게. default 0.0 = 어제 baseline 동일.
+            STACK_PLACE_LIFT = 0.005
             pick_z = getattr(self, '_pick_z', self.pick_offset)
-            place_z = target_surface_height + pick_z + self.z_offset
+            place_z = target_surface_height + pick_z + self.z_offset + STACK_PLACE_LIFT
             if place_z < MIN_PLACE_Z:
                 self._log(f"  [Place Z-Fix] {place_z*100:.1f}cm < min {MIN_PLACE_Z*100:.0f}cm, clamping to {MIN_PLACE_Z*100:.0f}cm")
                 place_z = MIN_PLACE_Z
@@ -3233,25 +3301,23 @@ class LeRobotSkills:
             print("Error: Failed to reach place position")
             return False
 
-        # Standard stationary release at place point (pre-33135af behavior).
-        # Open the gripper in place — the next transit (retreat) is responsible
-        # for lifting via _post_place_clearance_z, which is set below.
         release_desc = f"release object on {target_name}" if target_name else None
-        self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
-        # --- Disabled (lift-while-open variant, 33135af) -----------------
-        # # Lift while opening gripper — same pattern as bimanual_place_object.
-        # # Releasing at contact + lifting separately can drag/disturb
-        # # deformable objects; combining the two prevents that.
-        # RELEASE_LIFT = 0.03  # 3cm lift while gripper opens
-        # lift_position = [final_position[0], final_position[1], final_position[2] + RELEASE_LIFT]
-        # self.move_to_position(
-        #     lift_position,
-        #     target_pitch=saved_pitch,
-        #     target_name=place_label,
-        #     skill_description=release_desc,
-        #     gripper_action="open",
-        #     gripper_open_ratio=gripper_open_ratio,
-        # )
+        # Lift-while-open variant (33135af) — gripper open + 3cm 위로 lift 를
+        # 한 motion 으로 결합. payload 해방으로 인한 sag drop 이 일어날 시간이
+        # 없도록 이미 위로 가는 중에 release. deformable disturb 도 같이 방지.
+        RELEASE_LIFT = 0.03  # 3cm lift while gripper opens
+        lift_position = [final_position[0], final_position[1], final_position[2] + RELEASE_LIFT]
+        self.move_to_position(
+            lift_position,
+            target_pitch=saved_pitch,
+            target_name=place_label,
+            skill_description=release_desc,
+            gripper_action="open",
+            gripper_open_ratio=gripper_open_ratio,
+            is_transit=False,
+        )
+        # --- Disabled (stationary release at place point) -----------------
+        # self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
         # ------------------------------------------------------------------
 
         # Post-place retreat clearance — 방금 놓은 물체를 빈 그리퍼가 치고

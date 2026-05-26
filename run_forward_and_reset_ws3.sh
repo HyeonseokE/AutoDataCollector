@@ -38,9 +38,11 @@ PHASE="phase1"
 # RESET_INSTRUCTION=""
 
 ## stack
-INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
-RESET_INSTRUCTION=""
+# INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
+# RESET_INSTRUCTION=""
 
+INSTRUCTION="Sort each colored block onto the plate of the matching color."
+RESET_INSTRUCTION="remove every colored block from the plates."
 
 # [필수] 에피소드 반복 횟수
 NUM_EPISODES=100  # 30→100 확장 (2026-05-20 마이그레이션). 기존 30 episode 는 seed 당 10 slot 의 0..2 위치로 재배치됨 — scripts/migrate_session_episodes_per_seed.py 참고
@@ -70,7 +72,7 @@ RECORD_DATASET=true
 # Phase2 cycle (PHASE="phase2") 은 *반드시* Phase1 session 을 이어받아야 한다 —
 # Phase2 episode 가 session/phase2/ 하위에 phase1 에 이어 쌓이고 phase1 의
 # seed_*_setup 을 재사용한다 (chain 이 episode_* → phase1/ 로 reorg 한 상태).
-RESUME_SESSION="./results/session_20260524_144452"
+RESUME_SESSION="./results/session_20260526_043001"
 # Table 6 Quadrant Validation — Q1 (Useful OOD) Phase2 수집.
 # Phase1 / seed_*_setup 은 session_20260523_013722 의 것을 symlink 공유 (fair).
 # 다른 quadrant 로 전환 시: results/table6_quadrant/Q{1,2,3,4} 중 선택.
@@ -79,7 +81,7 @@ RESUME_SESSION="./results/session_20260524_144452"
 # Skip restore 토글 — resume 모드에서만 의미. true 면 _restore_to_seed (물리적
 # robot 으로 seed 위치 복원) 단계를 skip 하고 바로 episode 루프 진입. 워크스페이스
 # 가 이미 정상이거나 사용자가 수동으로 정리해 둔 경우 사용.
-RESUME_SKIP_RESTORE=false
+RESUME_SKIP_RESTORE=true
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정

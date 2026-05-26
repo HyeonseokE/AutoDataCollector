@@ -67,6 +67,7 @@ class PreselectiveClient:
         n_candidates: int,
         seed: int = 0,
         is_transit: bool = True,
+        current_positions: dict[str, dict] | None = None,
     ) -> dict[str, Any]:
         """Send context + goal to server, receive chosen trajectory.
 
@@ -78,6 +79,19 @@ class PreselectiveClient:
           - used_fallback : bool (true → server didn't run selection;
                                   client should fall back to its own plan)
         """
+        # current_positions: {name: {pose: [x,y,z,qx,qy,qz,qw], dims: [dx,dy,dz]}}
+        # → preselective_pb2.ObstacleGeometry map field.
+        _proto_obstacles = {}
+        if current_positions:
+            for name, geom in current_positions.items():
+                pose = geom.get("pose") or [0.0]*7
+                dims = geom.get("dims") or [0.0]*3
+                _proto_obstacles[name] = preselective_pb2.ObstacleGeometry(
+                    x=float(pose[0]), y=float(pose[1]), z=float(pose[2]),
+                    qx=float(pose[3]), qy=float(pose[4]),
+                    qz=float(pose[5]), qw=float(pose[6]),
+                    dim_x=float(dims[0]), dim_y=float(dims[1]), dim_z=float(dims[2]),
+                )
         req = preselective_pb2.PlanRequest(
             skill_id=str(skill_id),
             start_qpos=encode_ndarray(np.asarray(start_qpos, dtype=np.float32)),
@@ -88,6 +102,7 @@ class PreselectiveClient:
             n_candidates=int(n_candidates),
             seed=int(seed),
             is_transit=bool(is_transit),
+            current_positions=_proto_obstacles,
         )
         resp = self.stub.PlanAndSelect(req, timeout=self.timeout_s)
 

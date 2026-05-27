@@ -35,7 +35,7 @@ enable_phase2_early_stop: true # false → 공정비교용 (t=B 까지 강제 �
 dct_coeffs: 3                  # K — z^a ∈ R^{K·action_dim}
 
 # --- run 로그 ---
-verbose: false                 # true → [method3:acq] run narration 로그
+verbose: true                 # true → [method3:acq] run narration 로그
 
 # --- Phase2-readiness (§15.1) ---
 readiness:
@@ -51,11 +51,29 @@ mi_selection:
   #   Q2: argmax U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Harmful OOD — VLA novel + MI not-useful)
   #   Q3: argmin U_VLA  s.t.  M̃_MI ≥ +τ_MI   (Useful ID  — VLA familiar + MI useful)
   #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
-  # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
+  #   random : perturbation 생성 cand 중 uniform random pick (selection rule 자체
+  #            의 효과 검증용 baseline — Method3 의 useful-OOD 가 random 대비 더
+  #            나은 sample 을 고르는가? 의 ablation).
+  # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI ;
+  #                       random → under_covered 포함 전체에서 random pick.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
-  selection_mode: Q3   # Useful ID — argmin U_VLA s.t. M̃_MI ≥ +τ_MI
-                       # = "MI-aligned + VLA-familiar": Phase1 분포 정합 cand 중
-                       # VLA 가 가장 자신 있어 하는 것 (negative control of Q1)
+  selection_mode: Q1   # Useful OOD (Method3 default) — argmax U_VLA s.t. M̃_MI ≥ +τ_MI
+                       # = "MI-aligned + VLA-uncertain": Phase1 분포 정합 cand 중
+                       # VLA 가 가장 헷갈리는 것 (paper main claim)
+                       # ablation: "random" 으로 토글 (selection rule 무력화).
+  # Q1 chosen 전략 ablation:
+  #   "argmax"     : paper default — eligible 중 가장 헷갈리는 cand
+  #   "argmedian"  : eligible 의 U_VLA 중간값 cand (outlier-robust variant)
+  q1_chosen_strategy: argmedian
+  # OOD/ID gate — D_phase1 (ID) U_VLA distribution 의 quantile 을 threshold τ_U_ID
+  # 로 사용. server boot 시 {ckpt}/uvla_id_stats.json 의 stats[<strategy>] 값을
+  # 자동 로드해 Phase2MIConfig.tau_U_ID 에 주입한다. JSON sidecar 가 없으면
+  # tau_U_ID=None — gate 미적용 (기존 implicit median split 으로 fallback).
+  #   "p90" / "p95" / "p99"     — distribution quantile (paper-friendly)
+  #   "mean_plus_2sigma"        — Gaussian 95% (EnsembleDAgger 식)
+  #   null                       — gate 비활성 (backward compat)
+  tau_U_strategy: null   # gate 일단 비활성 (sidecar JSON 은 있으나 미적용).
+                         # 후에 "p90"/"p95"/"p99"/"mean_plus_2sigma" 로 켜기.
   # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율
@@ -258,7 +276,7 @@ remote:
   tmux_session: "phase2_server_pnp"          # 재시작 시 reuse
 
   # [선택] 동작 옵션
-  git_pull_before_start: true
+  git_pull_before_start: false
   ready_timeout_s: 360                   # smolvla 부팅 1~2분, pi05_base 2~5분 → 여유 360s
 
   # NVIDIA driver kernel/user-space mismatch workaround.

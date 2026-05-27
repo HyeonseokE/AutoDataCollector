@@ -165,14 +165,18 @@ def state_retrieval_key(
     vla_embedding: np.ndarray,
     proprioception: np.ndarray,
 ) -> np.ndarray:
-    """``e_i = [e_i^vla; p_i]`` — state retrieval key (문서 §7.3).
+    """``e_i = [e_i^vla; p_i_unit]`` — state retrieval key (문서 §7.3).
 
     proprioception 은 VLA encoder 입력이 아니라 embedding 뒤에 concat 된다.
+    [paradigm fix — scale balance] proprioception 을 L2 normalize 해서 vla
+    embedding (이미 unit ball) 과 magnitude 일치. 옛 구현은 raw servo space
+    (±100) 라 L2 distance 가 proprio dominated 됐다 (image part contribution ≈ 0).
     """
-    return np.concatenate([
-        np.asarray(vla_embedding, dtype=np.float64).reshape(-1),
-        np.asarray(proprioception, dtype=np.float64).reshape(-1),
-    ])
+    vla = np.asarray(vla_embedding, dtype=np.float64).reshape(-1)
+    prop = np.asarray(proprioception, dtype=np.float64).reshape(-1)
+    p_norm = np.linalg.norm(prop)
+    prop_unit = prop / max(p_norm, 1e-12)
+    return np.concatenate([vla, prop_unit])
 
 
 def build_phase1_vector_db(

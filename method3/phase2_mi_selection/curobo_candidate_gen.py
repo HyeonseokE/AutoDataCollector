@@ -33,6 +33,12 @@ from typing import Any, Iterable, Optional
 
 import numpy as np
 
+
+def _l2_unit(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """L2 normalize — paradigm scale balance (DB build 의 state_retrieval_key 와 쌍)."""
+    v = np.asarray(v, dtype=np.float64).reshape(-1)
+    return v / max(float(np.linalg.norm(v)), eps)
+
 from method3.dct.transform import traj_to_dct
 from method3.phase2_mi_selection.mi_selector import Phase2Candidate
 from method3.phase2_mi_selection.joint_servo_conversion import JointServoConverter
@@ -282,13 +288,16 @@ def candidates_from_trajectory_list(
         # robot_state 인자는 *legacy* (모든 τ 동일 → no forward dynamics).
         # proprios[τ] 가 candidate trajectory 의 *τ-step 후 expected state* 라
         # τ별 다양성 살아남고 ΔH_A|S 측정이 의미 있게 됨.
+        # [paradigm fix — scale balance] proprio 도 L2 normalize 해서 vla embedding
+        # (이미 unit ball) 과 magnitude 일치. seed_builder.state_retrieval_key 의 새
+        # 구현과 동일 path — DB build 와 cand state_key 양쪽 일관성 보장.
         if _shared_e_vla is not None:
             state_keys = np.stack([
-                np.concatenate([_shared_e_vla, proprios[tau]])
+                np.concatenate([_shared_e_vla, _l2_unit(proprios[tau])])
                 for tau in range(T)
             ])
         else:
-            state_keys = proprios.copy()
+            state_keys = np.stack([_l2_unit(proprios[tau]) for tau in range(T)])
 
         out.append(Phase2Candidate(
             skill_id=str(skill_id),

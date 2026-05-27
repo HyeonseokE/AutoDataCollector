@@ -141,10 +141,10 @@ class Phase2MIConfig:
         # 기존 yaml 들이 accept_threshold 만 지정하던 호환 경로를 보존.
         if self.accept_threshold is not None:
             self.tau_MI = float(self.accept_threshold)
-        # selection_mode validation (Table 6 Quadrant Validation).
-        if self.selection_mode not in ("Q1", "Q2", "Q3", "Q4", "Q1_med", "Q2_med"):
+        # selection_mode validation (Table 6 Quadrant Validation + random ablation).
+        if self.selection_mode not in ("Q1", "Q2", "Q3", "Q4", "random"):
             raise ValueError(
-                f"selection_mode must be one of Q1/Q2/Q3/Q4/Q1_med/Q2_med, "
+                f"selection_mode must be one of Q1/Q2/Q3/Q4/random, "
                 f"got {self.selection_mode!r}"
             )
 
@@ -477,7 +477,15 @@ class Phase2MISelector:
             if _ood_gate_applied and _mode in ("Q3", "Q4")
             else ""
         )
-        if eligible:
+        if _mode == "random":
+            # uniform random — paradigm baseline ablation. eligible 비면 전체
+            # cand 에서 random (under_covered 포함, M_MI 분포 무관). self._rng
+            # 사용으로 reproducibility 보장 (init 시 seed 통제 가능).
+            _pool = eligible if eligible else list(range(len(candidates)))
+            chosen = int(self._rng.choice(_pool))
+            rule = f"random pick from {len(_pool)} cand [{_mode}]"
+            accepted = bool(eligible)  # under_covered 만 있을 때만 False
+        elif eligible:
             if vla_scorer is not None:
                 if _mode == "Q1" and cfg.q1_chosen_strategy == "argmedian":
                     # Ablation variant — eligible 의 U_VLA 중간값 chosen.

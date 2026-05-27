@@ -199,6 +199,13 @@ class CuroboBackend:
             },
         }
         _scene_model = self._default_scene_dict
+        # scene_model 인자 안 보냄 — 의 — 보내면 curobo internal batch shape capture
+        # 가 single-config 모드 ([1, 6] reshape) 로 잡혀 batch=192 input 과 mismatch
+        # → 모든 plan_cspace 가 "shape [1, 6] invalid for input of size 1152" 로 fail.
+        # default scene (no collision world) 으로 init. table 충돌 회피는 robot 의
+        # z-limit + IK reach 가 자연 차단. dynamic obstacle 회피는 update_world()
+        # 가 호출되어야 발효되며, 현재 _latest_obstacles() 는 empty dict 반환이라
+        # 어차피 effective 안 됐다.
         mp_cfg = MotionPlannerCfg.create(
             robot=robot_cfg_abs,
             num_trajopt_seeds=config.num_trajopt_seeds,
@@ -207,7 +214,6 @@ class CuroboBackend:
             use_cuda_graph=config.use_cuda_graph,
             max_batch_size=mp_max_batch,
             max_goalset=self._n_goalset,
-            scene_model=_scene_model,
         )
         self._planner = MotionPlanner(mp_cfg)
         self.joint_names = list(self._planner.joint_names)

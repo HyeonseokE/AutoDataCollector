@@ -65,8 +65,8 @@ subgoal:
 #   stop ⇔ (ep ≥ B₁_min ∧ R_ready > τ_ready)  ∨  (ep ≥ B₁_max)
 readiness:
   enabled: true               # opt-in. true 로 바꿔야 hook 활성.
-  phase1_min: 40              # B₁_min — 이 미만에선 측정 skip
-  phase1_max: 60              # B₁_max — 도달 시 readiness 무관 강제 종료
+  phase1_min: 60              # B₁_min — 이 미만에선 측정 skip
+  phase1_max: 80              # B₁_max — 도달 시 readiness 무관 강제 종료
 
   # ── 1차 조건: state support 가 충분한가 ────────────────────────────────
   # "지금까지 모은 buffer 가 Phase2 후보의 state space 를 잘 덮고 있나"

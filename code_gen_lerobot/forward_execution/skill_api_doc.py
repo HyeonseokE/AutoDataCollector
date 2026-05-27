@@ -68,22 +68,22 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         retreat movements (lifting after pick/place), and transit movements between objects.
 
         APPROACH HEIGHT: for approach / transit / retreat moves above an object,
-        use z = 0.15 (15cm hover height) unless the task geometry requires otherwise.
+        use z = 0.12 (12cm hover height) unless the task geometry requires otherwise.
 
         STACK-AWARE APPROACH HEIGHT (mandatory for stacking):
             When picking from or placing onto a non-table surface (another block,
-            a stack, a dish edge), the fixed 0.15 hover is unsafe — perturbation
+            a stack, a dish edge), the fixed 0.12 hover is unsafe — perturbation
             can drop the EE into the target. Compute hover relative to the
             target's top z:
-                approach_h = max(0.15, target_position[2] + 0.10)
+                approach_h = max(0.12, target_position[2] + 0.10)
             Use this for BOTH the pre-hover move_to_position AND the post-place
             retreat move_to_position. Example for stacking blue on green:
                 green_pos = positions["green block"]["position"]
-                approach_h = max(0.15, green_pos[2] + 0.10)
+                approach_h = max(0.12, green_pos[2] + 0.10)
                 skills.move_to_position([green_pos[0], green_pos[1], approach_h], ...)
                 skills.execute_place_object(green_pos, is_table=False, ...)
                 skills.move_to_position([green_pos[0], green_pos[1], approach_h], ...)
-            Plain z=0.15 stays correct only when target_position[2] ≤ 0.05.
+            Plain z=0.12 stays correct only when target_position[2] ≤ 0.05.
 
         The world coordinate frame origin is at the rear-center of the workspace table
         on the table surface:
@@ -369,7 +369,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             purple_pos = positions["purple block"]["position"]
             target_pos = positions["yellow block"]["position"]
             # 5. Approach with integrated gripper open, then pick
-            skills.move_to_position([purple_pos[0], purple_pos[1], 0.15],
+            skills.move_to_position([purple_pos[0], purple_pos[1], 0.12],
                                     target_name="purple block",
                                     gripper_action="open", gripper_start_fraction=0.3)
             skills.execute_pick_object(purple_pos, object_name="purple block")

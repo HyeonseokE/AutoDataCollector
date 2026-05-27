@@ -52,12 +52,12 @@ class Phase2SubgoalReplay:
         buf = SubgoalBuffer()
         buf.set_file(Path(buffer_path))
         buf.load()
-        # {episode_id: [subgoal_xyz, ...]} — episode 내 ordinal(=호출 순서).
-        # SubgoalBuffer 는 ordinal key(skill_0, skill_1, ...)로 저장된다.
-        # 정렬 우선순위: (start_t, skill_id 의 numeric 부분). start_t 가 모두
-        # 동일(-1 placeholder)이어도 skill_id 의 정수 인덱스로 결정되도록 — buffer
-        # iteration 의 lexicographic 순서(skill_10 이 skill_2 보다 앞)를 회피.
-        _staged: dict[str, list[tuple]] = {}
+        # {episode_id: {kidx: subgoal_xyz}} — episode 내 skill_kidx 별 lookup.
+        # SubgoalBuffer 는 ordinal key(skill_0, skill_1, ...)로 저장. buffer 가
+        # *sparse* (transit-only 처럼 일부 kidx 만 존재) 인 경우에도 phase2 의
+        # RecordingContext._skill_call_index 와 직접 매칭 가능하도록 dict 사용.
+        # (list 인덱스로 lookup 하면 sparse 시 list[k] 가 의도 다른 kidx 의 값.)
+        _staged: dict[str, dict[int, np.ndarray]] = {}
         for skill_id in buf.skill_ids():
             try:
                 _kidx = int(str(skill_id).split("_", 1)[1])
@@ -68,13 +68,9 @@ class Phase2SubgoalReplay:
                 if not eid:
                     # episode_id 미태깅 entry 는 replay 순서를 특정할 수 없어 제외.
                     continue
-                _staged.setdefault(eid, []).append(
-                    (int(e.start_t), int(_kidx),
-                     np.asarray(e.subgoal, dtype=float)))
-        self._by_episode: dict[str, list[np.ndarray]] = {}
-        for eid, lst in _staged.items():
-            lst.sort(key=lambda t: (t[0], t[1]))
-            self._by_episode[eid] = [xyz for _, _, xyz in lst]
+                _staged.setdefault(eid, {})[int(_kidx)] = np.asarray(
+                    e.subgoal, dtype=float)
+        self._by_episode: dict[str, dict[int, np.ndarray]] = _staged
 
         self._episode_id: str = ""
         self._cursor: int = 0
@@ -124,7 +120,7 @@ class Phase2SubgoalReplay:
         replay 성공 시 ``chosen_index=1`` 로 *비(非)-nominal* 임을 표시한다.
         """
         nominal = np.asarray(nominal_goal, dtype=float).reshape(3)
-        recorded = self._by_episode.get(self._episode_id, [])
+        recorded = self._by_episode.get(self._episode_id, {})
         # paradigm 일관화 — cursor 자체 진행 대신 RecordingContext._skill_call_index
         # 로 직접 lookup. select_subgoal 은 plan_batch 와 같은 시점 (move_to_position
         # 안, set_skill_info *전*) 에 호출되므로 _skill_call_index 가 *현재* skill
@@ -136,9 +132,11 @@ class Phase2SubgoalReplay:
             # RecordingContext 미가용 시 legacy cursor fallback.
             k = self._cursor
             self._cursor = k + 1
-        if k < len(recorded):
+        xyz = recorded.get(k) if isinstance(recorded, dict) else (
+            recorded[k] if k < len(recorded) else None)
+        if xyz is not None:
             return SubgoalSelection(
-                chosen_goal=recorded[k].copy(),
+                chosen_goal=np.asarray(xyz, dtype=float).copy(),
                 chosen_index=1,        # !=0 → move-home 호출부가 적용
                 cold_start=False,
                 reports=[],

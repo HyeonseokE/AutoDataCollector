@@ -181,13 +181,16 @@ sync_one "ckpt"            "${ARTIFACT_CKPT:-}"
 sync_one "sidecar parquet" "${ARTIFACT_SIDECAR:-}"
 sync_one "vector DB"       "${ARTIFACT_VECTOR_DB:-}"
 
-# yaml config sync — server-side 가 local 의 phase2_config.yaml 을 직접 read
+# pipeline yaml config sync — server-side 가 local 의 yaml 을 직접 read
 # (curobo_robot_cfg_path, mi_selection.*, selector, policy.family 등). yaml
 # drift 가 발생하면 server-side 가 *옛 값* 으로 boot → cand DoF mismatch /
 # selection_mode mismatch / 등의 silent bug 유발 (예: 2026-05-28 RCA —
 # server-side yaml 의 curobo_robot_cfg_path 가 robot6 인 채 local 은 robot4
 # → action_descriptor shape mismatch (42,300) vs (1,250) → plan_and_select
 # INTERNAL error). 매 launch 마다 강제 sync.
+# NOTE: robot_configs/, assets/urdf/ 는 *각 repo 가 독립 관리* (env-specific
+# calibration · URDF path). 여기서는 sync 안 함 — 변경 시 양쪽 repo 모두 직접
+# update 해야 함.
 sync_one "phase2 yaml"     "pipeline_config/phase2_config.yaml"
 sync_one "phase1 yaml"     "pipeline_config/phase1_config.yaml"
 

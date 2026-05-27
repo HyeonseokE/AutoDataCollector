@@ -18,10 +18,10 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_sort_20260526_220641/checkpoints/000950/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260527_152525/checkpoints/001450/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
-phase1_dataset_path: "CoRL2026-CSI/sort_ours_100_table1"
+phase1_dataset_path: "CoRL2026-CSI/table3/stateseeding+random_pert"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
@@ -240,7 +240,7 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  skill_dct_parquet: "results/skill_dct/sort_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
+  skill_dct_parquet: "results/skill_dct/stateseeding+random_pert.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
 
 # --- server-local SkillVectorDB 영속화 ---
@@ -274,7 +274,7 @@ remote:
   #   ssh h100 'cd /home/csiwoo/CORL2026/AutoDataCollector && git worktree add ../AutoDataCollector-sort master'
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector-sort"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 2                              # 같은 GPU 2 공유 (sort + pnp 양쪽 SmolVLA, H100 80GB 충분)
+  gpu_id: 2                              # GPU2 — 사용자 지정 (table3/stateseeding+random_pert phase2)
   tmux_session: "phase2_server_sort"     # task/sort 전용 — pnp (phase2_server_pnp) 와 분리
 
   # [선택] 동작 옵션

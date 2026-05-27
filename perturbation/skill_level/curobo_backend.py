@@ -144,6 +144,25 @@ class CuroboBackend:
                 f"curobo robot config missing: {robot_cfg_abs}"
             )
 
+        # tool_frames hardcode — SO101 의 EE tip 은 *항상* gripper_frame_link.
+        # yaml 의 tool_frames 가 drift (예: moving_jaw_so101_v1_link, 옛 값)
+        # 되어도 항상 gripper_frame_link override → EE delta DCT FK 가 정상
+        # tool_pose 계산. 2026-05-28 RCA — yaml drift 시 FK fail → cand 가
+        # joint DCT 5DoF fallback → action_coverage shape mismatch.
+        # yaml file 은 그대로 두고 *load 후 dict 에서 강제* + temp file 로
+        # curobo 에 전달.
+        import yaml, tempfile
+        with open(robot_cfg_abs) as _f:
+            _robot_dict = yaml.safe_load(_f)
+        _kin = _robot_dict.setdefault("kinematics", {})
+        _kin["tool_frames"] = ["gripper_frame_link"]
+        _tmp_yaml = tempfile.NamedTemporaryFile(
+            "w", suffix=".yml", prefix="curobo_robot_cfg_override_", delete=False)
+        yaml.safe_dump(_robot_dict, _tmp_yaml)
+        _tmp_yaml.flush()
+        _tmp_yaml.close()
+        robot_cfg_abs = _tmp_yaml.name
+
         # Orientation retry ratios for IK. Mid-arc first (most physically
         # intuitive), then expand outward toward endpoints. Used by the
         # batched IK call to fold all orientations into a single GPU pass

@@ -19,6 +19,52 @@ LEROBOT_PATH = Path(__file__).parent.parent / "lerobot" / "src"
 if str(LEROBOT_PATH) not in sys.path:
     sys.path.insert(0, str(LEROBOT_PATH))
 
+
+def _has_collected_data(dataset_path: Path) -> bool:
+    """data/ 또는 videos/ 에 수집된 episode 가 있는지.
+
+    cleanup 의 destructive ``rmtree(dataset_path)`` 직전 안전 가드 — collected
+    data 가 있는 dataset 을 silent rmtree 하지 않게 fail-loud.
+    """
+    for sub in ("data", "videos"):
+        d = dataset_path / sub
+        if d.exists() and any(d.rglob("*.parquet" if sub == "data" else "*.mp4")):
+            return True
+    return False
+
+
+def _safe_rmtree_or_raise(dataset_path: Path, reason: str) -> None:
+    """data/videos 가 있으면 destructive rmtree 거부 — 사용자 명시 승인 요구.
+
+    옛 cleanup 은 dataset 의 모든 episode 가 "삭제 대상" 으로 분류되면 무조건
+    ``shutil.rmtree(dataset_path)`` 했다 — phase2 cycle 시작 시 cleanup 의
+    잘못된 매핑으로 phase1 의 60ep 가 *통째로 lost* 되는 root cause.
+
+    여기서는 data/videos 가 살아있으면 raise — silent destruction 차단.
+    """
+    if _has_collected_data(dataset_path):
+        raise AssertionError(
+            f"\n"
+            f"========================================\n"
+            f"REFUSING destructive rmtree (cleanup.py) — data/videos 에 수집된\n"
+            f"episode 가 존재. (reason: {reason})\n"
+            f"========================================\n"
+            f"Path: {dataset_path}\n"
+            f"\n"
+            f"옛 cleanup 가 phase2 cycle 의 잘못된 매핑으로 dataset 통째 삭제하던\n"
+            f"path 차단. cleanup 의 episode 분류 logic 가 잘못 추정한 결과로\n"
+            f"의도치 않은 data loss 가 발생할 수 있다.\n"
+            f"\n"
+            f"수동 결정:\n"
+            f"  1. backup (안전): cp -r {dataset_path} {dataset_path}.bak_$(date +%s)\n"
+            f"  2. session 의 episode 분류 결과 검토:\n"
+            f"     - phase1/ 와 phase2/ 의 episode 폴더 vs dataset 의 episode_index\n"
+            f"     - 매핑이 정합인지 확인\n"
+            f"  3. 진짜 폐기 (명시 승인): rm -rf {dataset_path}\n"
+            f"========================================"
+        )
+    shutil.rmtree(dataset_path)
+
 # Module-level ANSI color — dataset add/remove events 는 BLUE.
 # 모듈 top 에 정의해 함수 어디서든 NameError 없이 참조. 충돌 회피용 `_C_` prefix.
 _C_DS = "\033[94m"     # BLUE — dataset count change
@@ -147,7 +193,7 @@ def cleanup_dataset_for_resume(
             _dprint(f"[Cleanup] Recovery successful: {dataset.meta.total_episodes} episodes recovered")
         except Exception as e:
             _dprint(f"[Cleanup] Recovery failed ({e}) — removing dataset")
-            shutil.rmtree(dataset_path)
+            _safe_rmtree_or_raise(dataset_path, "cleanup branch destructive rmtree")
             return stats
 
     try:
@@ -156,7 +202,7 @@ def cleanup_dataset_for_resume(
         stats["dataset_episodes_before"] = actual_dataset_episodes
     except Exception as e:
         _dprint(f"[Cleanup] Warning: Cannot open dataset, removing: {e}")
-        shutil.rmtree(dataset_path)
+        _safe_rmtree_or_raise(dataset_path, f"LeRobotDataset open failed: {e}")
         return stats
 
     # early-return 경로에서도 dataset 변경 없음을 정확히 표시 — 디폴트 0 으로
@@ -265,7 +311,14 @@ def cleanup_dataset_for_resume(
     if len(dataset_indices_to_delete) >= actual_dataset_episodes:
         _dprint(f"[Cleanup] All episodes to be deleted, removing dataset entirely")
         del dataset
-        shutil.rmtree(dataset_path)
+        # ★ phase2 cycle 시작 시 cleanup 가 dataset 의 모든 episode 를 "삭제 대상"
+        # 으로 잘못 분류 → phase1 의 60ep 가 lost 되는 root cause path. 새 paradigm
+        # 에선 data/videos 있으면 fail-loud (사용자 명시 승인 요구).
+        _safe_rmtree_or_raise(
+            dataset_path,
+            f"all {actual_dataset_episodes} episodes classified as to-delete "
+            f"(phase2 cycle 의 cleanup 매핑 mismatch 일 가능성)"
+        )
         stats["dataset_episodes_after"] = 0
         return stats
 

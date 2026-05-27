@@ -223,9 +223,6 @@ class LeRobotSkills:
         # and picks argmax. See method3/phase1_state_seeding/subgoal_selector.py
         # and the 문서 final_method3_spec §4-5.
         self._subgoal_selector = None        # Phase1SubgoalSelector or None
-        # (skill_id, chosen_goal) staged at selection time, committed to the
-        # selector's buffer after the move executes (online buffer growth).
-        self._pending_subgoal_commit = None
 
         # Skill-level perturbation: curobo motion planner (in-process, GPU).
         # When attached + RNG set + is_transit, move_to_position swaps the
@@ -1713,7 +1710,6 @@ class LeRobotSkills:
         # Default: unperturbed home joints. Phase1 may replace ``end_normalized``
         # below with the IK solution at a perturbed xyz subgoal.
         end_normalized = self.initial_state.copy()
-        self._pending_subgoal_commit = None
 
         # Phase1 buffer-aware subgoal selection in EE xyz space. Home xyz =
         # FK(recorded home joints); home pitch held via IK to preserve the
@@ -1760,12 +1756,6 @@ class LeRobotSkills:
                     )
                     if ok:
                         end_normalized = self._radians_to_normalized(joints[:5])
-                        self._pending_subgoal_commit = {
-                            "start_ee": np.asarray(current_ee, dtype=float),
-                            "goal": chosen_xyz.copy(),
-                            "natural_language": _home_label,
-                            "skill_type": "move_initial",
-                        }
                         if getattr(self._subgoal_selector, "is_phase2_replay", False):
                             _tag = "Subgoal-Phase2"
                             _mode = "replayed seed subgoal"
@@ -1790,7 +1780,6 @@ class LeRobotSkills:
             except Exception as _e:
                 # Never let perturbation break home-go. Fall back to nominal.
                 self._log(f"  [Subgoal-Phase1] move_initial selection skipped: {_e}")
-                self._pending_subgoal_commit = None
 
         # paradigm 일관화 — select_subgoal 후 _set_skill_recording. 이 시점에
         # RecordingContext._skill_call_index 가 다음 호출 시점에 *현재* skill 의
@@ -1823,7 +1812,6 @@ class LeRobotSkills:
             return True
         finally:
             self._clear_skill_recording()
-            self._pending_subgoal_commit = None
 
     def _holding_pitch_feasible(
         self,
@@ -2056,7 +2044,6 @@ class LeRobotSkills:
             _lsuffix = {"close": "and close gripper",
                         "open": "and open gripper"}.get(gripper_action, "")
             label = f"{_lbase} {_lsuffix}".strip() if _lsuffix else _lbase
-        self._pending_subgoal_commit = None
         # clearance-lead ascent state (holding-phase perturbation 안전장치) —
         # holding move 가 subgoal-perturbation 되면 set 되고, IK 계획 직후의
         # clearance-lead Bezier 재구성 블록이 소비한다.
@@ -2149,14 +2136,6 @@ class LeRobotSkills:
                 f"({_mode}); target=[{target_position[0]:.3f}, "
                 f"{target_position[1]:.3f}, {target_position[2]:.3f}]"
             )
-            # Stage (skill_id, start_ee, chosen_goal) — committed to the
-            # subgoal buffer only on a TRUE episode (selector.flush_episode).
-            self._pending_subgoal_commit = {
-                "start_ee": np.asarray(current_ee, dtype=float),
-                "goal": target_position.copy(),
-                "natural_language": label,
-                "skill_type": _skill_id,
-            }
         elif (is_transit
                 and self._perturbation is not None
                 and self._perturbation_rng is not None):
@@ -2711,7 +2690,6 @@ class LeRobotSkills:
             return _moved
         finally:
             self._clear_skill_recording()
-            self._pending_subgoal_commit = None
 
     # Image resolution for normalized coordinate conversion (0–1000 → pixel)
     IMAGE_WIDTH = 640

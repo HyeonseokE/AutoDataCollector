@@ -24,6 +24,14 @@ import numpy as np
 from method3.phase1_state_seeding.subgoal_buffer import SubgoalBuffer
 from method3.phase1_state_seeding.subgoal_selector import SubgoalSelection
 
+# module-level optional import — RecordingContext 가 있는 환경에서만 paradigm
+# 일관화의 _skill_call_index 직접 lookup. select_subgoal 의 hot path 라 매 호출
+# import 회피.
+try:
+    from record_dataset.context import RecordingContext as _RecordingContext
+except Exception:
+    _RecordingContext = None
+
 
 class Phase2SubgoalReplay:
     """Phase1 기록 subgoal 을 episode·skill 순서대로 replay 하는 selector.
@@ -117,9 +125,18 @@ class Phase2SubgoalReplay:
         """
         nominal = np.asarray(nominal_goal, dtype=float).reshape(3)
         recorded = self._by_episode.get(self._episode_id, [])
-        k = self._cursor
-        if k < len(recorded):
+        # paradigm 일관화 — cursor 자체 진행 대신 RecordingContext._skill_call_index
+        # 로 직접 lookup. select_subgoal 은 plan_batch 와 같은 시점 (move_to_position
+        # 안, set_skill_info *전*) 에 호출되므로 _skill_call_index 가 *현재* skill
+        # 의 ordinal (곧 stamp 될 값). VDB partition key (build_skill_dct 의 episode-내
+        # skill_index) 와 같은 namespace.
+        if _RecordingContext is not None:
+            k = max(0, int(_RecordingContext._skill_call_index))
+        else:
+            # RecordingContext 미가용 시 legacy cursor fallback.
+            k = self._cursor
             self._cursor = k + 1
+        if k < len(recorded):
             return SubgoalSelection(
                 chosen_goal=recorded[k].copy(),
                 chosen_index=1,        # !=0 → move-home 호출부가 적용

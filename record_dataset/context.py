@@ -114,6 +114,20 @@ class RecordingContext:
     _current_goal_gripper: Optional[float] = None
     _skill_start_state: Optional[np.ndarray] = None
 
+    # Episode-내 skill 호출 순서 카운터 — set_skill_info 호출마다 +=1.
+    # P_phase1 DB partition key (build_skill_dct 의 episode-내 skill_index) 와
+    # 같은 단위. runtime cand 측은 이 값을 read 해 동일 namespace 보장.
+    # reset_episode 에서 0 으로 reset.
+    _skill_call_index: int = 0
+
+    # set_skill_info 호출 시 발동되는 callback 들. method3 paradigm 일관화 —
+    # subgoal_buffer staging 이 transit-only 분기에 묶이지 않게, 모든
+    # set_skill_info 호출 단위로 자동 발동. subgoal_selector 가 init 시점에
+    # ``register_on_skill_stamp`` 로 등록한다.
+    #   cb(skill_call_index, label, skill_type, goal_joint, goal_robot_xyzrpy,
+    #      goal_gripper, start_state)
+    _on_skill_stamp_callbacks: list = []
+
     # Sub-task level info (상위 계층 라벨, reset recording용)
     _current_subtask_label: Optional[str] = None
     _current_subtask_object_name: Optional[str] = None
@@ -434,6 +448,9 @@ class RecordingContext:
         verification_question: str = None,
     ) -> None:
         """스킬 정보 설정 (스킬 시작 시 호출)"""
+        # state 갱신 + counter 증가는 lock 안. callback 발동은 lock 밖 — callback
+        # 이 RecordingContext 의 다른 method 를 호출해도 deadlock 안 나도록 (Lock
+        # 은 non-reentrant) + lock 보유 시간 최소화.
         with cls._lock:
             cls._current_skill_label = label
             cls._current_skill_type = skill_type
@@ -442,8 +459,36 @@ class RecordingContext:
             cls._current_goal_robot_xyzrpy = np.asarray(goal_robot_xyzrpy, dtype=np.float32)
             cls._current_goal_gripper = float(goal_gripper)
             cls._skill_start_state = np.asarray(start_state, dtype=np.float32)
+            # P_phase1 DB partition key 정합 — DB 의 skill_index 와 같은 단위로
+            # 매 skill 호출마다 +1. runtime cand (skills_lerobot.move_to_position)
+            # 가 plan_batch 시점 (set_skill_info *이전*) 에 _skill_call_index 를
+            # 그대로 partition key 로 사용 (현재 진행 중인 skill 의 ordinal).
+            cls._skill_call_index += 1
+            _stamped_idx = cls._skill_call_index - 1
             if cls._is_active:
-                print(f"[RecordingContext] Skill: {skill_type} - {label}")
+                print(f"[RecordingContext] Skill: {skill_type} - {label} (call_index={_stamped_idx})")
+            # callback snapshot — lock 풀기 전 immutable view 확보.
+            _cbs = list(cls._on_skill_stamp_callbacks)
+            _snap_goal_joint = cls._current_goal_joint
+            _snap_goal_xyzrpy = cls._current_goal_robot_xyzrpy
+            _snap_goal_gripper = cls._current_goal_gripper
+            _snap_start_state = cls._skill_start_state
+
+        # 등록된 callback 들 발동 (lock 밖) — subgoal_selector 등이 모든 호출 단위로
+        # staging 트리거. callback 실패는 stamp 흐름과 격리.
+        for _cb in _cbs:
+            try:
+                _cb(
+                    skill_call_index=_stamped_idx,
+                    label=label,
+                    skill_type=skill_type,
+                    goal_joint=_snap_goal_joint,
+                    goal_robot_xyzrpy=_snap_goal_xyzrpy,
+                    goal_gripper=_snap_goal_gripper,
+                    start_state=_snap_start_state,
+                )
+            except Exception as _e:
+                print(f"[RecordingContext] on_skill_stamp callback error: {_e}")
 
     @classmethod
     def clear_skill_info(cls) -> None:
@@ -504,6 +549,27 @@ class RecordingContext:
             cls._start_time = time.time()
             cls._recorded_frames = 0
             cls._camera_errors = 0
+            # skill 호출 카운터 reset — DB partition key 정합.
+            cls._skill_call_index = 0
+
+    @classmethod
+    def register_on_skill_stamp(cls, cb) -> None:
+        """set_skill_info 호출 시 발동될 callback 등록.
+
+        method3 paradigm 일관화 — subgoal_buffer staging 등 모든 호출 단위
+        부수 작업을 단일 trigger 로 통합. callback 시그니처는 위 attribute
+        선언 주석 참고.
+        """
+        with cls._lock:
+            if cb not in cls._on_skill_stamp_callbacks:
+                cls._on_skill_stamp_callbacks.append(cb)
+
+    @classmethod
+    def unregister_on_skill_stamp(cls, cb) -> None:
+        """register_on_skill_stamp 로 등록한 callback 해제."""
+        with cls._lock:
+            if cb in cls._on_skill_stamp_callbacks:
+                cls._on_skill_stamp_callbacks.remove(cb)
 
     @classmethod
     def record_step(

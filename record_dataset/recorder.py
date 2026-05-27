@@ -152,6 +152,15 @@ class DatasetRecorder:
             def _has_complete_meta(p):
                 return (p / "meta" / "info.json").exists() and (p / "meta" / "tasks.parquet").exists()
 
+            # data/ 또는 videos/ 가 비어있지 않으면 = phase1/2 collected episodes
+            # 가 존재. meta 만 broken state 라도 *절대* destructive cleanup 금지.
+            def _has_collected_data(p):
+                for sub in ("data", "videos"):
+                    d = p / sub
+                    if d.exists() and any(d.rglob("*.parquet" if sub == "data" else "*.mp4")):
+                        return True
+                return False
+
             if self.resume and dataset_path.exists() and _has_complete_meta(dataset_path):
                 # Resume: open existing dataset for append (upstream lerobot v0.5.1 API)
                 print(f"[DatasetRecorder] Resume mode: opening existing dataset")
@@ -182,8 +191,31 @@ class DatasetRecorder:
                 # 새 데이터셋 생성. broken partial cache (meta dir 만 있고 tasks.parquet 없음)
                 # 가 있다면 먼저 제거 — 안 그러면 LeRobotDataset.create() 가 path 충돌로 fail.
                 if dataset_path.exists():
+                    # DATA-LOSS 방지: data/ 또는 videos/ 에 *수집된 episode 가 있으면*
+                    # meta 만 broken 인 상태라 destructive rmtree 절대 금지. 사용자가
+                    # 직접 meta/tasks.parquet 복구 (또는 명시적 rm -rf) 하도록 fail-loud.
+                    if _has_collected_data(dataset_path):
+                        raise AssertionError(
+                            f"\n"
+                            f"========================================\n"
+                            f"REFUSING auto-rmtree — data/ 또는 videos/ 에 수집된 episode 존재!\n"
+                            f"========================================\n"
+                            f"Path: {dataset_path}\n"
+                            f"State: meta is broken (tasks.parquet 등 결손) 이지만 raw data/video 는 보존됨.\n"
+                            f"\n"
+                            f"가능한 원인:\n"
+                            f"  - 이전 lerobot_edit_dataset 작업의 부분 실패\n"
+                            f"  - 이전 run 의 init 실패 후 meta cleanup 만 일부 진행됨\n"
+                            f"\n"
+                            f"수동 복구 절차:\n"
+                            f"  1. backup (안전): cp -r {dataset_path} {dataset_path}.bak_$(date +%s)\n"
+                            f"  2. meta 재구성 시도: meta/tasks.parquet 을 다른 dataset 에서 복사\n"
+                            f"     (또는 LeRobotDataset.create() 후 data/ videos/ rsync)\n"
+                            f"  3. 진짜 폐기: rm -rf {dataset_path}  (data 영구 손실 — 명시 승인)\n"
+                            f"========================================"
+                        )
                     import shutil
-                    print(f"[DatasetRecorder] Removing broken/partial cache: {dataset_path}")
+                    print(f"[DatasetRecorder] Removing broken/partial cache (data 없음 확인됨): {dataset_path}")
                     shutil.rmtree(dataset_path)
                 print(f"[DatasetRecorder] Creating dataset: {self.repo_id}")
                 print(f"  FPS: {self.fps}")

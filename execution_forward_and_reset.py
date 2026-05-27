@@ -707,10 +707,23 @@ class ForwardAndResetPipeline(BasePipeline):
             # None → 메모리 전용 (이 run 동안만 grow).
             self._subgoal_buffer_file = pert_raw.get("buffer_file")
             buffer = SubgoalBuffer()  # file 은 finalize 에서 바인딩
-            selector = Phase1SubgoalSelector(buffer, cfg)
+            # kinematics 주입 — paradigm 일관화 _on_skill_stamp callback 이
+            # start_state(joint) → start_ee 변환에 사용. _skills.kinematics
+            # 는 LeRobotSkills 가 connect() 후 노출.
+            _kin = getattr(self._skills, "kinematics", None)
+            selector = Phase1SubgoalSelector(buffer, cfg, kinematics=_kin)
             self._skills.set_subgoal_selector(selector)
             # Kept on self so finalize/teardown can reach the buffer.
             self._subgoal_selector = selector
+            # paradigm 일관화 — 모든 set_skill_info 호출 단위로 selector 가
+            # staging 트리거. RecordingContext.set_skill_info 가 발동되면
+            # selector._on_skill_stamp 가 stage_executed 호출.
+            try:
+                from record_dataset.context import RecordingContext as _RC
+                _RC.register_on_skill_stamp(selector._on_skill_stamp)
+                print(f"[Perturbation] subgoal_selector hook 등록 — 모든 set_skill_info 호출 단위 staging")
+            except Exception as _e:
+                print(f"[Perturbation] hook 등록 실패 (transit-only staging fallback): {_e}")
             _dist_desc = cfg.candidate_dist
             if cfg.candidate_dist == "hemisphere":
                 _dist_desc += f"(origin={cfg.robot_origin})"
@@ -1418,14 +1431,25 @@ class ForwardAndResetPipeline(BasePipeline):
         selector / vector_db 미준비면 silent skip — phase2 동작은 안 되지만 phase1
         경로는 영향 없음. hook signature: ``(cands, current_joints, goal_joint_rad,
         is_transit) -> int | None`` — None 반환 시 skills_lerobot 가 RNG fallback.
+
+        paradigm layering — grpc mode 면 server (plan_and_select) 가 Useful-OOD
+        selection 의 전체 책임. client-side hook 등록은 double-evaluation 만
+        발생시킨다 (server 의 chosen 1 cand 에 client 가 z-score normalize →
+        분산 0 → eligible=0 → fallback). 즉 grpc 면 hook attach 자체를 skip.
         """
         if self._phase2_selector is None:
             return
         if not hasattr(self, "_skills") or self._skills is None:
             return
+        if getattr(self, "_skill_planner_transport_mode", "local") == "grpc":
+            # server-side Useful-OOD selection 이 책임 — client noop.
+            print("[Method3 phase2] skill candidate hook SKIPPED — "
+                  "grpc mode (server-side Useful-OOD selection)")
+            return
         try:
             self._skills.set_skill_candidate_selector(self._make_phase2_skill_selector())
-            print("[Method3 phase2] skill candidate hook attached — Useful-OOD rule active")
+            print("[Method3 phase2] skill candidate hook attached "
+                  "(local mode) — Useful-OOD rule active")
         except Exception as e:
             print(f"[Method3 phase2] skill hook attach FAILED: {e}")
 
@@ -1450,7 +1474,13 @@ class ForwardAndResetPipeline(BasePipeline):
         cfg = CurobogenConfig(urdf_path=_urdf)
 
         def _hook(cands, current_joints, goal_joint_rad, is_transit) -> int | None:
-            """ξ* index 반환. None 이면 skills_lerobot 의 RNG fallback."""
+            """ξ* index 반환. None 이면 skills_lerobot 의 RNG fallback.
+
+            paradigm 명세 — 이 hook 은 *local mode* 에서만 등록된다
+            (``_attach_phase2_skill_hook`` 에서 grpc mode 면 attach 자체 skip).
+            local 에서 cands 는 항상 plan_batch 의 n_candidates 만큼이라
+            client-side z-score normalize 가 의미 있는 batch.
+            """
             if not cands:
                 return None
             # 현재 skill_id 는 skills_lerobot 호출자 가 hook 시그니처에 안 실어줌.
@@ -1855,6 +1885,10 @@ class ForwardAndResetPipeline(BasePipeline):
             (psf_raw.get("selector") or {}).get("chunk_size", 50)
         )
         transport = mode  # downstream branch uses `transport` 변수명
+        # paradigm layering 명시 — 다른 컴포넌트 (_attach_phase2_skill_hook 등) 가
+        # mode 별 분기 결정에 사용. grpc 면 server-side selection 가 책임 가져가
+        # client-side hook 등록 자체 skip (옛 double-evaluation bug 의 근본 차단).
+        self._skill_planner_transport_mode = mode
         print(
             f"[skill_planner_transport] mode={mode} (source={cfg_src or 'recording_config'})"
         )

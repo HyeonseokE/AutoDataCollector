@@ -101,24 +101,33 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     if len(descriptors) == 0:
         return None, "", None
 
-    # 모든 entry 의 descriptor(servo DCT) → servo → radians 복원.
+    # DB descriptor 는 EE delta DCT (seed_builder.ee_delta_dct_from_poses 결과,
+    # (L0, 6) [Δxyz + Δrpy]). 옛 paradigm 의 joint DCT 가정 + curobo FK 는
+    # 잘못된 visualization 산출 → 2026-05-28 RCA: descriptor 를 *EE delta DCT*
+    # 그대로 역변환 + cumulative sum 으로 absolute EE xyz path 복원.
     L0 = 50
-    joint_trajs: list[np.ndarray] = []
+    start_xyz = (np.asarray(start_ee_xyz, dtype=float).reshape(-1)[:3]
+                 if start_ee_xyz is not None else np.zeros(3))
+    ee_all: list[np.ndarray] = []
     for i in range(len(descriptors)):
         desc = np.asarray(descriptors[i], dtype=float)
-        dof = max(1, desc.size // L0)
-        servo = np.asarray(dct_to_traj(desc.reshape(L0, dof), L0), dtype=float)
-        if converter is not None:
-            try:
-                jt = np.asarray(
-                    converter.normalized_to_radians(servo), dtype=float)
-            except Exception:
-                jt = servo
-        else:
-            jt = servo
-        joint_trajs.append(jt)
-    # curobo FK 로 모든 entry 의 EE 경로 (batch).
-    ee_all = _ee_paths_via_fk(curobo_backend, joint_trajs)
+        # (L0, 6) Δxyz+Δrpy 로 reshape (size mismatch 시 skip).
+        if desc.size != L0 * 6:
+            ee_all.append(None)
+            continue
+        try:
+            delta = np.asarray(
+                dct_to_traj(desc.reshape(L0, 6), L0), dtype=float)
+        except Exception:
+            ee_all.append(None)
+            continue
+        # cumulative Δxyz + start = absolute EE xyz path (L0, 3).
+        # pose[0] = start, pose[t] = start + sum(delta[:t]).
+        xyz_path = np.empty((L0, 3), dtype=float)
+        xyz_path[0] = start_xyz
+        if L0 > 1:
+            xyz_path[1:] = start_xyz + np.cumsum(delta[:L0 - 1, :3], axis=0)
+        ee_all.append(xyz_path)
 
     # target_episode_id 가 주어지면 그 episode 의 entries 만 후보로 제한.
     # refs[i] 의 episode_id 가 매칭되는 index 만 enabled.

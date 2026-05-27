@@ -68,6 +68,7 @@ class PreselectiveClient:
         seed: int = 0,
         is_transit: bool = True,
         current_positions: dict[str, dict] | None = None,
+        target_phase1_episode_id: str = "",
     ) -> dict[str, Any]:
         """Send context + goal to server, receive chosen trajectory.
 
@@ -103,6 +104,7 @@ class PreselectiveClient:
             seed=int(seed),
             is_transit=bool(is_transit),
             current_positions=_proto_obstacles,
+            target_phase1_episode_id=str(target_phase1_episode_id or ""),
         )
         resp = self.stub.PlanAndSelect(req, timeout=self.timeout_s)
 

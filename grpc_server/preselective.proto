@@ -83,6 +83,14 @@ message PlanRequest {
   // 직전 호출되어 trajopt 가 이 cuboid 들을 회피한다. 비어있으면 default
   // scene (table only) 그대로. label 은 dict key 로 사용 (e.g. "red_block").
   map<string, ObstacleGeometry> current_positions = 10;
+
+  // Phase2 replay 의 의도된 phase1 episode_id (= cycle 매핑 결과,
+  // e.g. "episode_30" when phase2 ep_90 replays phase1 ep_30). 비어있으면
+  // server 가 nearest-neighbor 로 g.t. episode 추정 (= legacy 동작, 부정확).
+  // 값이 있으면 server-side candidate_dump 의 _extract_gt 가 *그 episode_id 의
+  // entries 중*에서만 g.t. 후보 lookup → visualization 의 g.t. label/trajectory
+  // 가 phase2 의 의도된 phase1 episode 와 정확 일치.
+  string target_phase1_episode_id = 11;
 }
 
 message PlanResponse {

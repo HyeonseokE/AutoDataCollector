@@ -100,6 +100,17 @@ class Phase2SubgoalReplay:
         self._episode_id = eid
         self._cursor = 0
 
+        # server-side g.t. visualization 정확도 — RecordingContext 에 매핑된
+        # phase1 episode_id 를 stamp. grpc adapter 가 plan_and_select 호출 시
+        # 이 값을 server 에 전달 → server-side _extract_gt 가 그 episode 의
+        # entries 만 g.t. 후보로 사용 (= visualization 의 g.t. label/trajectory
+        # 가 의도된 phase1 episode 와 정확 일치).
+        if _RecordingContext is not None:
+            try:
+                _RecordingContext._phase2_target_episode_id = eid
+            except Exception:
+                pass
+
     def select_subgoal(
         self,
         current_ee,

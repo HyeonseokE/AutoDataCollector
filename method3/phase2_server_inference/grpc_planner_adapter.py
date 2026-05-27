@@ -163,6 +163,16 @@ class GrpcPlannerClient:
         except Exception:
             _obstacles = {}
 
+        # Phase2 replay 의 의도된 phase1 episode_id — server 가 g.t. visualization
+        # 시 그 episode 의 entries 만 nearest-neighbor 후보로 사용.
+        # Phase2SubgoalReplay.set_episode 가 매 cycle 시작 시 stamp.
+        _target_phase1_ep = ""
+        try:
+            from record_dataset.context import RecordingContext as _RC
+            _target_phase1_ep = str(getattr(_RC, "_phase2_target_episode_id", "") or "")
+        except Exception:
+            _target_phase1_ep = ""
+
         try:
             resp = self._client.plan_and_select(
                 skill_id=effective_skill_id,
@@ -175,6 +185,7 @@ class GrpcPlannerClient:
                 seed=int(seed) if seed is not None else 0,
                 is_transit=True,
                 current_positions=_obstacles,
+                target_phase1_episode_id=_target_phase1_ep,
             )
         except Exception as e:
             print(f"  [Skill Perturbation] grpc plan_and_select failed: {e}")

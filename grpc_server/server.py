@@ -397,6 +397,10 @@ class PreselectiveAcquirerServicer(
                         top_image=raw_imgs.get("observation.images.camera2"),
                         # g.t. descriptor(servo DCT) → radians 변환용 calib.
                         servo_calib_path=self._candidate_cfg.servo_calibration_file,
+                        # client 가 매핑한 phase1 episode_id — _extract_gt 가
+                        # 그 episode 의 entries 만 g.t. 후보로 사용.
+                        target_phase1_episode_id=getattr(
+                            request, "target_phase1_episode_id", "") or "",
                     )
                     print(f"[server] candidate dump → {_dump}", flush=True)
                 except Exception as _de:

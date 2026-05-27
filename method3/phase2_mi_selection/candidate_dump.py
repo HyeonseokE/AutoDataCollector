@@ -64,7 +64,8 @@ def _goal_ee_xyz(curobo_backend, goal_qpos) -> np.ndarray | None:
 
 def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
                 goal_ee_xyz: np.ndarray, converter=None,
-                start_ee_xyz: np.ndarray | None = None):
+                start_ee_xyz: np.ndarray | None = None,
+                target_episode_id: str = ""):
     """P_phase1 DB 에서 이 skill segment 의 g.t. trajectory 를 복원.
 
     DB 의 ``<skill>::descriptors`` (DCT_50, servo-space) 를 모두 ``dct_to_traj``
@@ -75,6 +76,10 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     도달점(goal)만으로는 instance 를 구분할 수 없다 (time_index 2 의 move 와
     4 의 move 는 goal 이 비슷해도 start 가 다름). goal 만으로 nearest 하면
     엉뚱한 instance 의 g.t. 가 잡혀 "여러 동작이 합쳐진" 경로처럼 보인다.
+
+    ``target_episode_id`` 가 주어지면 *그 episode 의 entries 만* nearest 후보로
+    제한한다 (= Phase2SubgoalReplay 의 매핑된 phase1 episode). 빈 string 이면
+    legacy nearest-neighbor (= 모든 episode 의 entries 중 nearest).
 
     Returns:
         (gt_ee_path (T,3) | None, episode_id: str, gt_subgoal (3,) | None)
@@ -115,6 +120,23 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     # curobo FK 로 모든 entry 의 EE 경로 (batch).
     ee_all = _ee_paths_via_fk(curobo_backend, joint_trajs)
 
+    # target_episode_id 가 주어지면 그 episode 의 entries 만 후보로 제한.
+    # refs[i] 의 episode_id 가 매칭되는 index 만 enabled.
+    _enabled_mask = None
+    _target_ep = str(target_episode_id or "").strip()
+    if _target_ep and refs is not None:
+        _enabled_mask = np.zeros(len(ee_all), dtype=bool)
+        for i in range(len(ee_all)):
+            try:
+                _ref_ep = str(json.loads(str(refs[i])).get("episode_id", ""))
+            except Exception:
+                _ref_ep = ""
+            if _ref_ep == _target_ep:
+                _enabled_mask[i] = True
+        if not _enabled_mask.any():
+            # target episode 의 entry 가 DB 에 없음 → fallback 전체 nearest.
+            _enabled_mask = None
+
     # start+goal 동시 매칭 — entry 의 EE 경로 끝(=도달점)·시작과 비교.
     g = np.asarray(goal_ee_xyz, dtype=float).reshape(-1)[:3]
     s = (np.asarray(start_ee_xyz, dtype=float).reshape(-1)[:3]
@@ -122,6 +144,8 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     best, best_score = -1, float("inf")
     for i, ee in enumerate(ee_all):
         if ee is None:
+            continue
+        if _enabled_mask is not None and not _enabled_mask[i]:
             continue
         ee = np.asarray(ee, dtype=float)
         if ee.ndim != 2 or len(ee) < 2:
@@ -165,6 +189,7 @@ def dump_phase2_candidates(
     db_npz_path: str = _DEFAULT_DB_NPZ,
     top_image=None,
     servo_calib_path: str | None = None,
+    target_phase1_episode_id: str = "",
 ) -> str:
     """plan_and_select 한 회의 전체 후보 상태 + g.t. 를 npz 로 저장. 경로 반환.
 
@@ -212,7 +237,8 @@ def dump_phase2_candidates(
             _start_ee = _goal_ee_xyz(curobo_backend, start_qpos)
             gt_ee_path, gt_episode, gt_subgoal = _extract_gt(
                 curobo_backend, db_npz_path, skill_id, goal_ee, _conv,
-                start_ee_xyz=_start_ee)
+                start_ee_xyz=_start_ee,
+                target_episode_id=target_phase1_episode_id)
         except Exception:
             gt_ee_path, gt_episode, gt_subgoal = None, "", None
 

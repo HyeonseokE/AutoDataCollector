@@ -134,9 +134,15 @@ class Phase2MIConfig:
     debug_verbose: bool = False
     # EE delta DCT 전환 후 (2026-05-24): action descriptor 가 EE 공간 (6축 =
     # Δxyz+Δrpy) 으로 통일됨. joint-space 시절의 arm/full slicing 은 비활성
-    # (둘 다 6 → slicing 안 일어남). legacy yaml 호환을 위해 필드 자체는 유지.
-    arm_dof: Optional[int] = 6
-    full_dof: Optional[int] = 6  # = arm_dof → slicing 비활성
+    # SO101 single-arm — DB 는 (L0 × 6) [arm 5 + gripper 1] 로 build, curobo
+    # plan_batch 의 candidate trajectory 는 *arm-only 5 DoF* (gripper 미plan).
+    # action_coverage_gain 의 shape 매치 위해 비교 시점에 DB 의 gripper 축 제거.
+    # default 가 arm_dof < full_dof 라 slicing 항상 활성 (= 의도된 normal path).
+    # yaml override 가능하지만 변경 권장 안 함 (= robot DoF 와 1:1 매칭).
+    # 2026-05-28 RCA — 이전 default 6/6 시 slice 비활성 → DB(300) vs cand(250)
+    # mismatch → plan_and_select INTERNAL error.
+    arm_dof: Optional[int] = 5
+    full_dof: Optional[int] = 6  # = arm + gripper → slicing 활성
     dct_L0: int = 50  # DB 빌드 시 L0 — db_z reshape 용
 
     def __post_init__(self) -> None:

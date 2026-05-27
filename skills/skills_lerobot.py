@@ -1747,9 +1747,6 @@ class LeRobotSkills:
                 home_pitch = float(self.kinematics.get_gripper_pitch(goal_joint_rad))
                 _feas = (lambda xyz: self._home_pitch_feasible(
                             xyz, current_joints_rad, home_pitch))
-                # NOTE: 옛 `self._transit_call_index += 1` 제거.
-                # set_skill_info 호출 시 RecordingContext._skill_call_index 가
-                # 자동 +1 → SoT 통일. ordinal 정합은 plan_batch 시점 read 로.
                 _sel = self._subgoal_selector.select_subgoal(
                     current_ee=current_ee,
                     nominal_goal=home_xyz,
@@ -2395,17 +2392,10 @@ class LeRobotSkills:
                 and trajectory.ik_converged):
             seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
             # Phase2 candidate 의 vector DB partition 키 = RecordingContext 의
-            # episode-내 skill 호출 ordinal. RecordingContext.set_skill_info 가
-            # 매 호출마다 _skill_call_index += 1 하므로 (transit + non-transit
-            # 모든 segment 카운트, DB build 의 episode-내 skill_index 와 동일
-            # 단위), plan_batch 호출 시점에는 _skill_call_index - 1 이 *방금
-            # stamp 된* skill 의 ordinal.
-            # NOTE: 옛 self._transit_call_index 분기 제거 — DB 측은 모든
-            # segment 카운트인데 cand 측은 transit-only 라 N단계마다 off-by-N
-            # 매핑 mismatch 가 발생하는 게 root cause (skill_4 = 100% fallback).
-            # plan_batch 는 set_skill_info *전에* 호출되므로 RecordingContext.
-            # _skill_call_index 가 *현재* skill 의 ordinal (곧 stamp 될 값) —
-            # -1 을 빼면 직전 skill 의 ordinal 이 되어 off-by-1.
+            # episode-내 skill 호출 ordinal. plan_batch 는 set_skill_info *전*에
+            # 호출되므로 RecordingContext._skill_call_index 가 곧 stamp 될 *현재*
+            # skill 의 ordinal — 그 값을 직접 partition key 로 사용. DB build 의
+            # episode-내 skill_index 와 같은 namespace.
             _skill_ordinal = f"skill_{RecordingContext._skill_call_index}"
             self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={_skill_ordinal} [{skill_type_val}])")
             try:

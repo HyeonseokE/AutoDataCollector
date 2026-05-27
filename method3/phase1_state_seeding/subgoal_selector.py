@@ -39,6 +39,20 @@ from method3.phase1_state_seeding.subgoal_validity import (
 )
 from method3.phase1_state_seeding.terminal_descriptor import state_descriptor
 
+# module-level optional import — _on_skill_stamp 의 hot path 라 매 호출 import
+# 회피. record_dataset 가 install 안 된 환경 (테스트) 에서는 None.
+try:
+    from record_dataset.context import RecordingContext as _RecordingContext
+except Exception:
+    _RecordingContext = None
+
+
+def _record_ctx_kinematics():
+    """RecordingContext 의 글로벌 kinematics — _on_skill_stamp lazy lookup."""
+    if _RecordingContext is None:
+        return None
+    return _RecordingContext._kinematics
+
 
 @dataclass
 class Phase1SubgoalConfig:
@@ -123,6 +137,7 @@ class Phase1SubgoalSelector:
         buffer: SubgoalBuffer,
         config: Phase1SubgoalConfig | None = None,
         reachable_fn: Callable[[np.ndarray], bool] | None = None,
+        kinematics=None,
     ) -> None:
         """
         Args:
@@ -130,12 +145,19 @@ class Phase1SubgoalSelector:
             config: scoring 파라미터.
             reachable_fn: ``callable(xyz) -> bool`` — reachable/safe 후보 필터
                 (§4.2). ``select_subgoal`` 의 인자로 호출별 override 가능.
+            kinematics: forward-kinematics 엔진. ``_on_skill_stamp`` callback 이
+                start_state(joint) → start_ee 변환에 사용. None 이면 callback
+                내부 staging skip. 주입 안 하면 RecordingContext._kinematics 로
+                lazy lookup.
         """
         self.buffer = buffer
         self.cfg = config or Phase1SubgoalConfig()
         self._reachable_fn = reachable_fn
-        # 현재 에피소드에서 실행된 transit move 의 staging. episode TRUE
-        # 판정 시에만 buffer 에 commit 된다 (flush_episode).
+        self._kinematics = kinematics
+        # 현재 에피소드에서 실행된 skill move 의 staging. episode TRUE 판정 시
+        # 에만 buffer 에 commit 된다 (flush_episode). paradigm 일관화 — 모든
+        # set_skill_info 호출 단위로 staging (transit + interaction). VDB
+        # 의 NL run-length segment 와 동일 namespace.
         self._pending: list[_PendingMove] = []
 
     # ANSI color — module-local literal to avoid NameError 위험. GREEN 으로
@@ -443,6 +465,56 @@ class Phase1SubgoalSelector:
         """trace 의 *episode + skill_order* 필드 채우기 위해 호출자가 알려줌."""
         self._current_episode_id = str(episode_id)
         self._current_skill_order = int(skill_order)
+
+    def _on_skill_stamp(
+        self,
+        *,
+        skill_call_index: int,
+        label: str,
+        skill_type: str,
+        goal_joint,
+        goal_robot_xyzrpy,
+        goal_gripper,
+        start_state,
+    ) -> None:
+        """``RecordingContext.set_skill_info`` 가 발동시키는 callback.
+
+        method3 paradigm 일관화 — 모든 set_skill_info 호출 단위로 staging.
+        transit 과 interaction 모두에서 발동되어 subgoal_buffer 의 ordinal
+        이 VDB (build_skill_dct 의 episode-내 skill_index) 와 정합한다.
+
+        perturbation 적용은 별개 — ``select_subgoal`` 이 transit 단계에서만
+        호출되어 chosen_goal 을 override. 여기서는 staging entry 만 등록.
+        """
+        if goal_robot_xyzrpy is None or start_state is None:
+            return
+        kin = self._kinematics
+        if kin is None:
+            # lazy lookup — selector init 시점에 kinematics 가 None 이면 record
+            # context 의 글로벌 인스턴스를 사용.
+            kin = _record_ctx_kinematics()
+        if kin is None:
+            return  # FK 불가 — staging skip (callback 등록 시점 mis-config)
+        try:
+            _ss = np.asarray(start_state, dtype=np.float64).reshape(-1)
+            start_ee = np.asarray(
+                kin.get_ee_position(_ss[:5]), dtype=np.float64
+            ).reshape(3)
+        except Exception:
+            return
+        try:
+            goal = np.asarray(goal_robot_xyzrpy, dtype=np.float64).reshape(-1)[:3]
+        except Exception:
+            return
+        self.stage_executed(
+            start_ee=start_ee,
+            goal=goal,
+            episode_id=getattr(self, "_current_episode_id", "") or "",
+            start_t=-1,
+            end_t=-1,
+            natural_language=label or "",
+            skill_type=skill_type or "",
+        )
 
     def stage_executed(
         self,

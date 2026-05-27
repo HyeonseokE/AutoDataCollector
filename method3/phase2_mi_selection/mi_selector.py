@@ -129,10 +129,10 @@ class Phase2MIConfig:
         # 기존 yaml 들이 accept_threshold 만 지정하던 호환 경로를 보존.
         if self.accept_threshold is not None:
             self.tau_MI = float(self.accept_threshold)
-        # selection_mode validation (Table 6 Quadrant Validation).
-        if self.selection_mode not in ("Q1", "Q2", "Q3", "Q4"):
+        # selection_mode validation (Table 6 Quadrant Validation + random ablation).
+        if self.selection_mode not in ("Q1", "Q2", "Q3", "Q4", "random"):
             raise ValueError(
-                f"selection_mode must be one of Q1/Q2/Q3/Q4, "
+                f"selection_mode must be one of Q1/Q2/Q3/Q4/random, "
                 f"got {self.selection_mode!r}"
             )
 

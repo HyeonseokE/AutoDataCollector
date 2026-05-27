@@ -1696,20 +1696,16 @@ class LeRobotSkills:
 
         duration = duration or self.movement_duration
 
-        # Set skill recording info — uses the recorded home joints regardless of
-        # perturbation; recording shows the canonical intent, the perturbed end
-        # pose is reflected in the executed trajectory.
+        # canonical home joint (perturbation 전). select_subgoal 결정 후 end_normalized
+        # 가 perturbed joint 로 갱신되면 그것을 stamp 인자로 사용.
         goal_joint_rad = self._normalized_to_radians(self.initial_state)
         # skill.natural_language label — subgoal selector 가 recorder 와 동일한
         # nl 을 buffer key 로 쓰도록 한 곳에서 계산한다.
         _home_label = skill_description or "move to initial state"
-        self._set_skill_recording(
-            label=_home_label,
-            skill_type="move_initial",
-            goal_joint_5=goal_joint_rad,
-            goal_gripper=self.initial_state_gripper,
-            verification_question=verification_question,
-        )
+        # NOTE: paradigm 일관화 — `_set_skill_recording` 호출은 select_subgoal *후*
+        # 로 이동 (move_to_position 의 순서와 통일). 옛 흐름은 stamp 가 select_subgoal
+        # 전이라 RecordingContext._skill_call_index 가 *다음* skill 의 ordinal 을
+        # 가리켰고 buffer lookup 이 off-by-1 (move_initial → buffer[1] = PRE-GRASP).
 
         self._log(f"\nMoving to Initial State...")
         current_arm_norm, current_joints_rad, current_ee = self._get_current_state()
@@ -1795,6 +1791,19 @@ class LeRobotSkills:
                 # Never let perturbation break home-go. Fall back to nominal.
                 self._log(f"  [Subgoal-Phase1] move_initial selection skipped: {_e}")
                 self._pending_subgoal_commit = None
+
+        # paradigm 일관화 — select_subgoal 후 _set_skill_recording. 이 시점에
+        # RecordingContext._skill_call_index 가 다음 호출 시점에 *현재* skill 의
+        # ordinal 을 노출하도록 +1 (= move_to_position 의 순서와 통일).
+        # goal_joint_5 는 end_normalized (perturbed) 의 radians — dataset 의 stamp 가
+        # 실제 robot target 과 일치.
+        self._set_skill_recording(
+            label=_home_label,
+            skill_type="move_initial",
+            goal_joint_5=self._normalized_to_radians(end_normalized),
+            goal_gripper=self.initial_state_gripper,
+            verification_question=verification_question,
+        )
 
         try:
             arm_dist = np.max(np.abs(current_arm_norm - end_normalized))

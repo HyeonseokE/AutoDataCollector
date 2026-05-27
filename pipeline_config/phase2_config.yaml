@@ -35,7 +35,7 @@ enable_phase2_early_stop: true # false → 공정비교용 (t=B 까지 강제 �
 dct_coeffs: 3                  # K — z^a ∈ R^{K·action_dim}
 
 # --- run 로그 ---
-verbose: false                 # true → [method3:acq] run narration 로그
+verbose: true                 # true → [method3:acq] run narration 로그
 
 # --- Phase2-readiness (§15.1) ---
 readiness:
@@ -51,11 +51,16 @@ mi_selection:
   #   Q2: argmax U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Harmful OOD — VLA novel + MI not-useful)
   #   Q3: argmin U_VLA  s.t.  M̃_MI ≥ +τ_MI   (Useful ID  — VLA familiar + MI useful)
   #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
-  # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
+  #   random : perturbation 생성 cand 중 uniform random pick (selection rule 자체
+  #            의 효과 검증용 baseline — Method3 의 useful-OOD 가 random 대비 더
+  #            나은 sample 을 고르는가? 의 ablation).
+  # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI ;
+  #                       random → under_covered 포함 전체에서 random pick.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
   selection_mode: Q1   # Useful OOD (Method3 default) — argmax U_VLA s.t. M̃_MI ≥ +τ_MI
                        # = "MI-aligned + VLA-uncertain": Phase1 분포 정합 cand 중
                        # VLA 가 가장 헷갈리는 것 (paper main claim)
+                       # ablation: "random" 으로 토글 (selection rule 무력화).
   # Q1 chosen 전략 ablation:
   #   "argmax"     : paper default — eligible 중 가장 헷갈리는 cand
   #   "argmedian"  : eligible 의 U_VLA 중간값 cand (outlier-robust variant)
@@ -278,7 +283,7 @@ remote:
   tmux_session: "phase2_server_sort"     # task/sort 전용 — pnp (phase2_server_pnp) 와 분리
 
   # [선택] 동작 옵션
-  git_pull_before_start: true
+  git_pull_before_start: false
   ready_timeout_s: 360                   # smolvla 부팅 1~2분, pi05_base 2~5분 → 여유 360s
 
   # NVIDIA driver kernel/user-space mismatch workaround.

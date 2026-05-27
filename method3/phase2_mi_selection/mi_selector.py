@@ -109,7 +109,11 @@ class Phase2MIConfig:
     #   Q2:                     argmax U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Harmful OOD)
     #   Q3:                     argmin U_VLA  s.t.  M̃_MI ≥ +τ_MI   (Useful ID)
     #   Q4:                     argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID)
-    # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
+    #   random:                 perturbation 생성 cand 중 uniform random 선택 —
+    #                           Method3 의 selection rule 검증용 baseline ablation
+    #                           (= "selection rule 자체의 효과" 분리).
+    # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI ;
+    #                       random → random pick (under_covered 포함 전체).
     selection_mode: str = "Q1"
     # Q1 의 chosen 전략 ablation — paper default 는 argmax (extreme uncertainty),
     # "argmedian" 은 eligible 의 U_VLA 중간값 chosen (outlier-robust variant).
@@ -381,8 +385,11 @@ class Phase2MISelector:
         _t_mmi = _t_mod.perf_counter()
 
         # Stage 1 — §11 M_MI 계산 + §13.2 batch 정규화 M̃_MI.
+        # center = median (robust to outliers — 의 — mean 은 batch 내 한두 candidate 의
+        # extreme M_MI 가 전체 분포를 왜곡해 정상 cand 의 M̃_MI 가 ±0 근처로 몰리는
+        # 문제 발생). scale 은 std 유지 — z-score-like normalization.
         m_mi = np.array([r.q2 for r in reports], dtype=np.float64)
-        mu, sigma = float(m_mi.mean()), float(m_mi.std())
+        mu, sigma = float(np.median(m_mi)), float(m_mi.std())
         m_mi_norm = (m_mi - mu) / (sigma + cfg.eps)
 
         # U_VLA 채점 — vla_scorer 가 주어졌을 때만. eligible 후보에만 호출해
@@ -392,9 +399,14 @@ class Phase2MISelector:
         # Stage 2 — eligible: selection_mode 별 분기 (Table 6 Quadrant Validation).
         #   Q1/Q3 (positive side):  M̃_MI ≥ +τ_MI  (Useful OOD / Useful ID)
         #   Q2/Q4 (negative side):  M̃_MI ≤ -τ_MI  (Harmful OOD / Redundant ID)
+        #   random              :  not under_covered (signal 신뢰성만 보장)
         # under_covered 후보는 모든 mode 에서 제외 (Phase2 신뢰성 보장).
         _mode = cfg.selection_mode
-        if _mode in ("Q1", "Q3"):
+        if _mode == "random":
+            eligible = [
+                i for i, r in enumerate(reports) if not r.under_covered
+            ]
+        elif _mode in ("Q1", "Q3"):
             eligible = [
                 i for i, r in enumerate(reports)
                 if m_mi_norm[i] >= cfg.tau_MI and not r.under_covered
@@ -474,7 +486,15 @@ class Phase2MISelector:
             if _ood_gate_applied and _mode in ("Q3", "Q4")
             else ""
         )
-        if eligible:
+        if _mode == "random":
+            # uniform random — paradigm baseline ablation. eligible 비면 전체
+            # cand 에서 random (under_covered 포함, M_MI 분포 무관).
+            import random as _stdrand
+            _pool = eligible if eligible else list(range(len(candidates)))
+            chosen = _stdrand.choice(_pool)
+            rule = f"random pick from {len(_pool)} cand [{_mode}]"
+            accepted = bool(eligible)  # under_covered 만 있을 때만 False
+        elif eligible:
             if vla_scorer is not None:
                 if _mode == "Q1" and cfg.q1_chosen_strategy == "argmedian":
                     # Ablation variant — eligible 의 U_VLA 중간값 chosen.

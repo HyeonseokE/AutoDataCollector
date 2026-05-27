@@ -1732,6 +1732,9 @@ class LeRobotSkills:
                 home_pitch = float(self.kinematics.get_gripper_pitch(goal_joint_rad))
                 _feas = (lambda xyz: self._home_pitch_feasible(
                             xyz, current_joints_rad, home_pitch))
+                # NOTE: 옛 `self._transit_call_index += 1` 제거.
+                # set_skill_info 호출 시 RecordingContext._skill_call_index 가
+                # 자동 +1 → SoT 통일. ordinal 정합은 plan_batch 시점 read 로.
                 _sel = self._subgoal_selector.select_subgoal(
                     current_ee=current_ee,
                     nominal_goal=home_xyz,
@@ -1809,17 +1812,8 @@ class LeRobotSkills:
                     start_gripper=self.current_gripper_pos,
                     end_gripper=self.initial_state_gripper,
                 )
-            # Buffer-aware subgoal: stage the executed home move's terminal
-            # state. Commits to the per-skill buffer only if the episode is
-            # judged TRUE (selector.flush_episode), mirroring move_to_position.
-            if (moved and self._subgoal_selector is not None
-                    and self._pending_subgoal_commit is not None):
-                try:
-                    self._subgoal_selector.stage_executed(
-                        **self._pending_subgoal_commit
-                    )
-                except Exception as _e:
-                    self._log(f"  [Subgoal-Phase1] subgoal staging skipped: {_e}")
+            # NOTE: paradigm 일관화 — staging 은 RecordingContext.set_skill_info
+            # hook 이 모든 호출 단위로 처리. 옛 transit-only 분기 staging 제거.
             return True
         finally:
             self._clear_skill_recording()
@@ -2268,17 +2262,17 @@ class LeRobotSkills:
 
         if not trajectory.ik_converged:
             if ik_target_pitch is not None:
-                # IK failed with pitch constraint - retry with relaxed pitch range (±20°)
-                PITCH_TOLERANCE_DEG = 20.0
+                # IK failed with pitch constraint - retry with relaxed pitch range (±50°)
+                PITCH_TOLERANCE_DEG = 50.0
                 pitch_tolerance_rad = np.radians(PITCH_TOLERANCE_DEG)
                 original_pitch = ik_target_pitch
 
                 self._log(f"  WARNING: IK failed with pitch={np.degrees(original_pitch):.1f}°. "
                          f"Retrying within ±{PITCH_TOLERANCE_DEG}° range...")
 
-                # Try multiple pitch values within ±20° range
-                # Order: 0, ±1, ±2, ... ±20 degrees from original
-                pitch_offsets_deg = [i for j in range(21) for i in ((-j, j) if j > 0 else (0,))]
+                # Try multiple pitch values within ±50° range
+                # Order: 0, ±1, ±2, ... ±50 degrees from original
+                pitch_offsets_deg = [i for j in range(51) for i in ((-j, j) if j > 0 else (0,))]
                 best_trajectory = None
                 best_ik_info = None
                 best_pitch_offset = None
@@ -2385,15 +2379,19 @@ class LeRobotSkills:
                 and self._perturbation_rng is not None
                 and trajectory.ik_converged):
             seed = int(self._perturbation_rng.integers(0, 2**31 - 1))
-            # Phase2 candidate 의 vector DB partition 키 = episode-내 skill ordinal.
-            # plan_batch 시점엔 이 move 의 _set_skill_recording 이 아직 안 돌아
-            # skill_sequence 에 미반영 → len(skill_sequence) - _episode_skill_base
-            # 가 곧 이 skill 의 0-based ordinal index. Phase1 reembedding 의
-            # seg.skill_index (lerobot_skill_segment_adapter.py:147) 와 동일
-            # namespace 라야 server-side DB lookup 이 같은 partition 을 hit 한다.
-            # 단순 plan_batch 호출 카운터 (transit-only) 는 non-transit/gripper
-            # skill 을 건너뛰어 DB key 와 어긋난다 — 반드시 skill_sequence 기반.
-            _skill_ordinal = f"skill_{len(self.skill_sequence) - self._episode_skill_base}"
+            # Phase2 candidate 의 vector DB partition 키 = RecordingContext 의
+            # episode-내 skill 호출 ordinal. RecordingContext.set_skill_info 가
+            # 매 호출마다 _skill_call_index += 1 하므로 (transit + non-transit
+            # 모든 segment 카운트, DB build 의 episode-내 skill_index 와 동일
+            # 단위), plan_batch 호출 시점에는 _skill_call_index - 1 이 *방금
+            # stamp 된* skill 의 ordinal.
+            # NOTE: 옛 self._transit_call_index 분기 제거 — DB 측은 모든
+            # segment 카운트인데 cand 측은 transit-only 라 N단계마다 off-by-N
+            # 매핑 mismatch 가 발생하는 게 root cause (skill_4 = 100% fallback).
+            # plan_batch 는 set_skill_info *전에* 호출되므로 RecordingContext.
+            # _skill_call_index 가 *현재* skill 의 ordinal (곧 stamp 될 값) —
+            # -1 을 빼면 직전 skill 의 ordinal 이 되어 off-by-1.
+            _skill_ordinal = f"skill_{RecordingContext._skill_call_index}"
             self._log(f"  [Skill Perturbation] plan_batch START ({_diag}, seed={seed}, n={self._skill_planner_n_candidates}, skill={_skill_ordinal} [{skill_type_val}])")
             try:
                 cands = self._skill_planner_client.plan_batch(
@@ -2610,7 +2608,11 @@ class LeRobotSkills:
             getattr(self, "_saved_pitch", None) is None
             and _holding_clearance_z is not None
         )
-        _skip_clearance_lead_phase2 = _is_phase2_grpc and not _is_post_place
+        # post-place retreat 도 chosen traj 사용하도록 — clearance-lead Bezier
+        # override 비활성. 의도: Method3 selection 의 학습 가치 보존. 막 놓은
+        # 물체 collision 회피는 dynamic obstacle 회피로 처리되어야 함 (현재는
+        # scene_model 인자 제거로 disable 상태 — 후속 fix 필요).
+        _skip_clearance_lead_phase2 = _is_phase2_grpc
         # NOTE: _subgoal_perturbed 조건 제거 — Phase2 post-place 처럼 subgoal
         # selector 가 호출되지 않은 transit 에서도 _holding_clearance_z 만 set
         # 됐으면 clearance-lead 가 발동해야 한다. Phase1 경로는 어차피 selector
@@ -2705,17 +2707,8 @@ class LeRobotSkills:
                 gripper_start_fraction=gripper_start_fraction,
                 gripper_end_fraction=gripper_end_fraction,
             )
-            # Buffer-aware subgoal: stage the executed move's terminal state.
-            # It is committed to the per-skill buffer only if the episode is
-            # judged TRUE (selector.flush_episode), mirroring the vector DB.
-            if (_moved and self._subgoal_selector is not None
-                    and self._pending_subgoal_commit is not None):
-                try:
-                    self._subgoal_selector.stage_executed(
-                        **self._pending_subgoal_commit
-                    )
-                except Exception as _e:
-                    self._log(f"  [Subgoal-Phase1] subgoal staging skipped: {_e}")
+            # NOTE: paradigm 일관화 — staging 은 RecordingContext.set_skill_info
+            # hook 이 모든 호출 단위로 처리. 옛 transit-only 분기 staging 제거.
             return _moved
         finally:
             self._clear_skill_recording()

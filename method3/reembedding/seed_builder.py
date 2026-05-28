@@ -311,6 +311,18 @@ def build_phase1_vector_db(
                     np.asarray(entry.action_chunk, dtype=np.float64),
                     L0=cfg.action_horizon,
                 ).flatten()
+            # raw ee xyz path (= phase1 의 실제 recorded EE trajectory) 직접
+            # meta 에 저장 — phase2 server-side visualization 의 g.t. lookup
+            # 시 *raw dataset 접근 불필요*. size 영향 작음 (~T_skill × 3 ×
+            # float, T_skill 평균 ~30).
+            _ee_xyz_path = None
+            try:
+                _ee = np.asarray(getattr(entry, "ee_chunk", np.empty((0, 6))),
+                                 dtype=float)
+                if _ee.ndim == 2 and _ee.shape[1] >= 3:
+                    _ee_xyz_path = _ee[:, :3].tolist()
+            except Exception:
+                _ee_xyz_path = None
             db.append(VectorDBEntry(
                 skill_id=entry.skill_id,
                 state_key=e_i,
@@ -324,6 +336,7 @@ def build_phase1_vector_db(
                     "instruction": entry.instruction,
                     "time_index": int(entry.time_index),
                     "accepted_by": "phase1_seed",
+                    "ee_xyz_path": _ee_xyz_path,                             # raw EE for viz
                 },
             ))
 

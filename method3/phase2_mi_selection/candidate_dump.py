@@ -208,24 +208,37 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     if best < 0:
         return None, "", None
 
-    # best entry 의 raw ee xyz path = phase1 dataset 의
-    # observation.ee_pos.robot_xyzrpy[global_idx:frame_end, :3] 슬라이스.
-    # module-level cache 로 dataset 의 ee column 한 번만 load.
+    # best entry 의 raw ee xyz path:
+    #   1) meta.ee_xyz_path 우선 (= DB build 시 직접 저장, raw dataset 접근 불필요)
+    #   2) fallback: raw_dataset 의 ee_pos column slice (cache-backed)
     gt_ee = np.asarray(ee_all[best], dtype=float)
     episode_id, gt_subgoal = "", None
+    # 1) meta.ee_xyz_path
+    if metas is not None:
+        try:
+            _m = json.loads(str(metas[best]))
+            _path = _m.get("ee_xyz_path")
+            if _path is not None:
+                _arr = np.asarray(_path, dtype=float)
+                if _arr.ndim == 2 and _arr.shape[1] >= 3 and _arr.shape[0] > 0:
+                    gt_ee = _arr[:, :3]
+        except Exception:
+            pass
     if refs is not None:
         try:
             ref_dict = json.loads(str(refs[best]))
             episode_id = str(ref_dict.get("episode_id", ""))
-            _ds_path = ref_dict.get("dataset_path")
-            _f0 = ref_dict.get("global_idx")
-            _f1 = ref_dict.get("frame_end")
-            if _ds_path and _f0 is not None and _f1 is not None:
-                _ee_col = _load_raw_ee_column(_ds_path)
-                if _ee_col is not None:
-                    _slice = _ee_col[int(_f0):int(_f1), :3]
-                    if _slice.size > 0:
-                        gt_ee = np.asarray(_slice, dtype=float)
+            # 2) fallback — meta.ee_xyz_path 가 없을 때 raw_dataset lookup.
+            if gt_ee.shape[0] <= 1:
+                _ds_path = ref_dict.get("dataset_path")
+                _f0 = ref_dict.get("global_idx")
+                _f1 = ref_dict.get("frame_end")
+                if _ds_path and _f0 is not None and _f1 is not None:
+                    _ee_col = _load_raw_ee_column(_ds_path)
+                    if _ee_col is not None:
+                        _slice = _ee_col[int(_f0):int(_f1), :3]
+                        if _slice.size > 0:
+                            gt_ee = np.asarray(_slice, dtype=float)
         except Exception:
             episode_id = ""
     if metas is not None:

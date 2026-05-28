@@ -43,9 +43,18 @@ def _load_raw_ee_column(dataset_path: str) -> np.ndarray | None:
         import pyarrow as pa
         import pyarrow.parquet as pq
         ds = Path(dataset_path)
-        if not ds.exists():
+        if not (ds / "data").exists():
+            # client-side absolute path (e.g. /home/lerobot/.cache/...) 가
+            # server 의 HF_LEROBOT_HOME 와 다름 → repo_id portion 만 추출.
             from lerobot.utils.constants import HF_LEROBOT_HOME
-            ds = Path(HF_LEROBOT_HOME) / dataset_path
+            hf = Path(HF_LEROBOT_HOME)
+            parts = Path(dataset_path).parts
+            for n in (3, 2, 1):
+                if len(parts) >= n:
+                    candidate = hf.joinpath(*parts[-n:])
+                    if (candidate / "data").exists():
+                        ds = candidate
+                        break
         data_files = sorted((ds / "data").rglob("*.parquet"))
         if not data_files:
             _RAW_EE_COLUMN_CACHE[dataset_path] = None

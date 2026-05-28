@@ -198,7 +198,7 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
         if _enabled_mask is not None and not _enabled_mask[i]:
             continue
         ee = np.asarray(ee, dtype=float)
-        if ee.ndim != 2 or len(ee) < 2:
+        if ee.ndim != 2 or len(ee) < 1:
             continue
         score = float(np.linalg.norm(ee[-1] - g))
         if s is not None:

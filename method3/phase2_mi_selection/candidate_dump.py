@@ -105,6 +105,9 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     # (L0, 6) [Δxyz + Δrpy]). 옛 paradigm 의 joint DCT 가정 + curobo FK 는
     # 잘못된 visualization 산출 → 2026-05-28 RCA: descriptor 를 *EE delta DCT*
     # 그대로 역변환 + cumulative sum 으로 absolute EE xyz path 복원.
+    # dct_to_traj 의 cubic resample (T_original → L0) 로 인해 cumulative
+    # 단순 sum 은 magnitude over-integration → meta.subgoal 의 expected
+    # endpoint 로 element-wise normalize.
     L0 = 50
     start_xyz = (np.asarray(start_ee_xyz, dtype=float).reshape(-1)[:3]
                  if start_ee_xyz is not None else np.zeros(3))
@@ -121,12 +124,29 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
         except Exception:
             ee_all.append(None)
             continue
-        # cumulative Δxyz + start = absolute EE xyz path (L0, 3).
-        # pose[0] = start, pose[t] = start + sum(delta[:t]).
+        # cumulative Δxyz raw (resampled scale).
+        cum_xyz = np.cumsum(delta[:, :3], axis=0)
+        # entry 의 expected goal (= meta.subgoal) 로 endpoint normalize.
+        # DB build 시 subgoal 저장됨 (seed_builder.py:322).
+        sg = None
+        if metas is not None and i < len(metas):
+            try:
+                _sg = json.loads(str(metas[i])).get("subgoal")
+                if _sg is not None:
+                    sg = np.asarray(_sg, dtype=float).reshape(-1)[:3]
+            except Exception:
+                sg = None
+        if sg is not None and np.all(np.abs(cum_xyz[-1]) > 1e-9):
+            expected_total = sg - start_xyz
+            scale = expected_total / cum_xyz[-1]
+            cum_xyz_norm = cum_xyz * scale
+        else:
+            cum_xyz_norm = cum_xyz
+        # absolute EE xyz path: pose[0] = start, pose[t] = start + cum_norm[t-1].
         xyz_path = np.empty((L0, 3), dtype=float)
         xyz_path[0] = start_xyz
         if L0 > 1:
-            xyz_path[1:] = start_xyz + np.cumsum(delta[:L0 - 1, :3], axis=0)
+            xyz_path[1:] = start_xyz + cum_xyz_norm[:L0 - 1]
         ee_all.append(xyz_path)
 
     # target_episode_id 가 주어지면 그 episode 의 entries 만 후보로 제한.

@@ -25,6 +25,44 @@ import numpy as np
 # server 가 직접 P_phase1 build 할 때 쓰는 cache 경로 (method3_setup 와 동일).
 _DEFAULT_DB_NPZ = "grpc_server/buffer/server_skill_wise_vector_db.npz"
 
+# phase1 raw dataset 의 observation.ee_pos.robot_xyzrpy column cache.
+# _extract_gt 가 entry 별 raw ee xyz slice lookup 시 dataset 마다 한 번만
+# parquet read — visualization 의 정확한 g.t. trajectory 표시 용.
+_RAW_EE_COLUMN_CACHE: dict[str, np.ndarray | None] = {}
+
+
+def _load_raw_ee_column(dataset_path: str) -> np.ndarray | None:
+    """phase1 dataset 의 observation.ee_pos.robot_xyzrpy column 전체 load.
+
+    dataset_path 기준 module-level cache — 같은 dataset 의 후속 호출은
+    cache hit. parquet read 실패 시 None.
+    """
+    if dataset_path in _RAW_EE_COLUMN_CACHE:
+        return _RAW_EE_COLUMN_CACHE[dataset_path]
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        ds = Path(dataset_path)
+        if not ds.exists():
+            from lerobot.utils.constants import HF_LEROBOT_HOME
+            ds = Path(HF_LEROBOT_HOME) / dataset_path
+        data_files = sorted((ds / "data").rglob("*.parquet"))
+        if not data_files:
+            _RAW_EE_COLUMN_CACHE[dataset_path] = None
+            return None
+        tbl = pa.concat_tables([
+            pq.read_table(f, columns=["index", "observation.ee_pos.robot_xyzrpy"])
+            for f in data_files
+        ])
+        tbl = tbl.sort_by("index")
+        arr = np.asarray(
+            tbl["observation.ee_pos.robot_xyzrpy"].to_pylist(), dtype=float)
+        _RAW_EE_COLUMN_CACHE[dataset_path] = arr
+        return arr
+    except Exception:
+        _RAW_EE_COLUMN_CACHE[dataset_path] = None
+        return None
+
 
 def _ee_paths_via_fk(curobo_backend, joint_wps: list[np.ndarray]):
     """candidate 별 joint waypoints (N,arm_dof) → EE xyz 경로 (N,3) 리스트.
@@ -101,33 +139,16 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     if len(descriptors) == 0:
         return None, "", None
 
-    # DB descriptor 는 EE delta DCT (seed_builder.ee_delta_dct_from_poses 결과,
-    # (L0, 6) [Δxyz + Δrpy]). 옛 paradigm 의 joint DCT 가정 + curobo FK 는
-    # 잘못된 visualization 산출 → 2026-05-28 RCA: descriptor 를 *EE delta DCT*
-    # 그대로 역변환 + cumulative sum 으로 absolute EE xyz path 복원.
-    # dct_to_traj 의 cubic resample (T_original → L0) 로 인해 cumulative
-    # 단순 sum 은 magnitude over-integration → meta.subgoal 의 expected
-    # endpoint 로 element-wise normalize.
-    L0 = 50
-    start_xyz = (np.asarray(start_ee_xyz, dtype=float).reshape(-1)[:3]
-                 if start_ee_xyz is not None else np.zeros(3))
+    # g.t. trajectory = phase1 raw dataset 의 *observation.ee_pos.robot_xyzrpy*
+    # 의 segment slice. DB entry 의 ref 에 dataset_path + global_idx +
+    # frame_end 가 저장 (seed_builder 의 raw_dataset.pointer). entry 별 그
+    # slice 를 raw ee xyz path 로 사용 — VDB 의 실제 매핑된 raw action.
+    # nearest entry 선택은 meta.subgoal vs goal_ee 의 L2 만 사용 (raw ee
+    # path 전부 build 안 함 — 비용 감소). best entry 결정 후 그 한 entry 만
+    # raw ee slice lookup.
     ee_all: list[np.ndarray] = []
+    subgoals: list[np.ndarray | None] = []
     for i in range(len(descriptors)):
-        desc = np.asarray(descriptors[i], dtype=float)
-        # (L0, 6) Δxyz+Δrpy 로 reshape (size mismatch 시 skip).
-        if desc.size != L0 * 6:
-            ee_all.append(None)
-            continue
-        try:
-            delta = np.asarray(
-                dct_to_traj(desc.reshape(L0, 6), L0), dtype=float)
-        except Exception:
-            ee_all.append(None)
-            continue
-        # cumulative Δxyz raw (resampled scale).
-        cum_xyz = np.cumsum(delta[:, :3], axis=0)
-        # entry 의 expected goal (= meta.subgoal) 로 endpoint normalize.
-        # DB build 시 subgoal 저장됨 (seed_builder.py:322).
         sg = None
         if metas is not None and i < len(metas):
             try:
@@ -136,18 +157,9 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
                     sg = np.asarray(_sg, dtype=float).reshape(-1)[:3]
             except Exception:
                 sg = None
-        if sg is not None and np.all(np.abs(cum_xyz[-1]) > 1e-9):
-            expected_total = sg - start_xyz
-            scale = expected_total / cum_xyz[-1]
-            cum_xyz_norm = cum_xyz * scale
-        else:
-            cum_xyz_norm = cum_xyz
-        # absolute EE xyz path: pose[0] = start, pose[t] = start + cum_norm[t-1].
-        xyz_path = np.empty((L0, 3), dtype=float)
-        xyz_path[0] = start_xyz
-        if L0 > 1:
-            xyz_path[1:] = start_xyz + cum_xyz_norm[:L0 - 1]
-        ee_all.append(xyz_path)
+        subgoals.append(sg)
+        # placeholder — best entry 결정 후 raw ee path lookup.
+        ee_all.append(sg.reshape(1, 3) if sg is not None else None)
 
     # target_episode_id 가 주어지면 그 episode 의 entries 만 후보로 제한.
     # refs[i] 의 episode_id 가 매칭되는 index 만 enabled.
@@ -187,11 +199,24 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     if best < 0:
         return None, "", None
 
+    # best entry 의 raw ee xyz path = phase1 dataset 의
+    # observation.ee_pos.robot_xyzrpy[global_idx:frame_end, :3] 슬라이스.
+    # module-level cache 로 dataset 의 ee column 한 번만 load.
     gt_ee = np.asarray(ee_all[best], dtype=float)
     episode_id, gt_subgoal = "", None
     if refs is not None:
         try:
-            episode_id = str(json.loads(str(refs[best])).get("episode_id", ""))
+            ref_dict = json.loads(str(refs[best]))
+            episode_id = str(ref_dict.get("episode_id", ""))
+            _ds_path = ref_dict.get("dataset_path")
+            _f0 = ref_dict.get("global_idx")
+            _f1 = ref_dict.get("frame_end")
+            if _ds_path and _f0 is not None and _f1 is not None:
+                _ee_col = _load_raw_ee_column(_ds_path)
+                if _ee_col is not None:
+                    _slice = _ee_col[int(_f0):int(_f1), :3]
+                    if _slice.size > 0:
+                        gt_ee = np.asarray(_slice, dtype=float)
         except Exception:
             episode_id = ""
     if metas is not None:

@@ -75,6 +75,17 @@ ROBOT_USE_DEGREES="${ROBOT_USE_DEGREES:-false}"
 #   CAM_xxx_TYPE = opencv | intelrealsense
 #   CAM_xxx_ID   = opencv일 때 경로/인덱스 ("/dev/video18", 0)
 #                  realsense일 때 시리얼 번호 ("335622072328")
+# DistributeChocolatePie smolVLA 체크포인트는 카메라 키 이름이 (wrist, realsense_topview)로
+# 학습돼 있어, 기본값 (left_wrist, top)을 그대로 쓰면 rename_map 매칭이 어긋난다.
+# POLICY_PATH 로 분기해 그 케이스에만 다른 키 이름을 기본값으로 둔다.
+if [[ "$POLICY_PATH" == *"smolVLA-transfer-MA-DistributeChocolatePie-50ep"* ]]; then
+    CAM_LEFT_WRIST_NAME="${CAM_LEFT_WRIST_NAME:-wrist}"
+    CAM_TOP_NAME="${CAM_TOP_NAME:-realsense_topview}"
+else
+    CAM_LEFT_WRIST_NAME="${CAM_LEFT_WRIST_NAME:-left_wrist}"
+    CAM_TOP_NAME="${CAM_TOP_NAME:-top}"
+fi
+
 CAM_LEFT_WRIST_TYPE="${CAM_LEFT_WRIST_TYPE:-opencv}"
 CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video6}"
 CAM_LEFT_WRIST_WIDTH="${CAM_LEFT_WRIST_WIDTH:-640}"
@@ -105,7 +116,7 @@ _cam_entry() {
 if [ -z "${CAMERAS+x}" ]; then
     _lw=$(_cam_entry "$CAM_LEFT_WRIST_TYPE" "$CAM_LEFT_WRIST_ID" "$CAM_LEFT_WRIST_WIDTH" "$CAM_LEFT_WRIST_HEIGHT" "$CAM_LEFT_WRIST_FPS" "$CAM_LEFT_WRIST_FOURCC")
     _top=$(_cam_entry "$CAM_TOP_TYPE" "$CAM_TOP_ID" "$CAM_TOP_WIDTH" "$CAM_TOP_HEIGHT" "$CAM_TOP_FPS")
-    CAMERAS="{ left_wrist: $_lw, top: $_top }"
+    CAMERAS="{ $CAM_LEFT_WRIST_NAME: $_lw, $CAM_TOP_NAME: $_top }"
     unset _lw _top
 fi
 unset -f _cam_entry

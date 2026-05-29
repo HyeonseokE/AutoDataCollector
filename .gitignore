@@ -92,3 +92,6 @@ src/nvidia-curobo/
 
 # Server-side vector DB cache (per-machine binary, regen via rebuild_p_phase1)
 grpc_server/buffer/
+
+# docs trajectory/dataset npz cache (downloaded, regenerable)
+docs/.cache_*/

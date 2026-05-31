@@ -256,7 +256,7 @@ selector:
 # save_dir 이 relative path 면 server.py 실행 위치 기준.
 buffer:
   save_dir: "grpc_server/buffer"
-  filename: "server_skill_wise_vector_db_close_pot.npz"
+  filename: "server_skill_wise_vector_db.npz"
 
 # =============================================================================
 # 원격 H100 SSH 연결 — grpc_server/launch_remote_server.sh 가 이 섹션을 읽어

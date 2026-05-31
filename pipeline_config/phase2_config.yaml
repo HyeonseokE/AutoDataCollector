@@ -18,10 +18,10 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260527_152525/checkpoints/001450/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_close_pot_20260529_112531/checkpoints/000900/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
-phase1_dataset_path: "CoRL2026-CSI/table3/useful_id_table7"
+phase1_dataset_path: "CoRL2026-CSI/table1/close_pot"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
@@ -57,10 +57,10 @@ mi_selection:
   # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI ;
   #                       random → under_covered 포함 전체에서 random pick.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
-  selection_mode: Q3   # Useful OOD (Method3 default) — argmax U_VLA s.t. M̃_MI ≥ +τ_MI
-                       # = "MI-aligned + VLA-uncertain": Phase1 분포 정합 cand 중
-                       # VLA 가 가장 헷갈리는 것 (paper main claim)
-                       # ablation: "random" 으로 토글 (selection rule 무력화).
+  selection_mode: Q3   # Useful ID — argmin U_VLA s.t. M̃_MI ≥ +τ_MI
+                       # = "MI-aligned + VLA-familiar": Phase1 분포 정합 cand 중
+                       # VLA 가 가장 *익숙한* 것 (Table 6 ablation).
+                       # paper main claim 은 Q1; Q3 는 paradigm 4사분면 검증용.
   # Q1 chosen 전략 ablation:
   #   "argmax"     : paper default — eligible 중 가장 헷갈리는 cand
   #   "argmedian"  : eligible 의 U_VLA 중간값 cand (outlier-robust variant)
@@ -214,7 +214,7 @@ transport:
 # 가 자체 build (yaml.phase1_dataset_path 받음). 2026-05-21: client 의 RTX 3050
 # 이 server 의 H100 보다 *오히려 빠른* 측정 (video decode CPU bound 라 GPU 차이
 # 의미 없음) → client 가 build + scp 가 더 실용적.
-server_build_phase1: false
+server_build_phase1: false   # close_pot: P_phase1 은 rebuild_p_phase1 (skill-segment adapter → EE-delta, skill-wise) 로 offline 빌드 후 load. server-build(raw adapter)는 joint fallback + frame-level 이라 부적합.
 
 # --- server-side frozen VLA encoder runtime config ---
 # checkpoint 는 위의 ``phase1_trained_vla_path`` 가 SoT — 여기 다시 적지 않음.
@@ -248,7 +248,7 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  skill_dct_parquet: "results/skill_dct/stateseeding+random_pert.parquet"  # P_phase1 build 의 sidecar (repo-relative)
+  skill_dct_parquet: "results/skill_dct/close_pot.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
 
 # --- server-local SkillVectorDB 영속화 ---
@@ -256,7 +256,7 @@ selector:
 # save_dir 이 relative path 면 server.py 실행 위치 기준.
 buffer:
   save_dir: "grpc_server/buffer"
-  filename: "server_skill_wise_vector_db.npz"
+  filename: "server_skill_wise_vector_db_close_pot.npz"
 
 # =============================================================================
 # 원격 H100 SSH 연결 — grpc_server/launch_remote_server.sh 가 이 섹션을 읽어

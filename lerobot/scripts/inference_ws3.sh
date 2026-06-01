@@ -46,7 +46,7 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # -------- policy 설정 --------
-POLICY_PATH="${POLICY_PATH:-CoRL2026-CSI/smolVLA_Ours_Sim2RealO_Closelid_100epi_50ep}"   # HF model ID 또는 로컬 체크포인트 경로
+POLICY_PATH="${POLICY_PATH:-CoRL2026-CSI/smolVLA_DistributeChoco_Ours_100epi_table1_new_50ep}"   # HF model ID 또는 로컬 체크포인트 경로
 POLICY_DEVICE="${POLICY_DEVICE:-cuda}"                # cuda / cpu / mps
 
 # -------- robot 설정 --------
@@ -111,9 +111,9 @@ fi
 unset -f _cam_entry
 
 # -------- task / 실행 설정 --------
-TASK="${TASK:-Close the pot.}"                     # language instruction (run_forward_and_reset_ws3.sh INSTRUCTION 과 동일)
+TASK="${TASK:-distribute chocolate pies to each plate.}"                     # language instruction (run_forward_and_reset_ws3.sh INSTRUCTION 과 동일)
 DURATION="${DURATION:-9999}"                           # 실행 시간 (초)
-FPS="${FPS:-30}"                                      # action 실행 주파수 (Hz)
+FPS="${FPS:-10}"                                      # action 실행 주파수 (Hz)
 
 # -------- policy chunk 설정 (선택, 비우면 학습된 모델 config 그대로 사용) --------
 # chunk_size      : policy 가 한 번에 예측하는 action chunk 길이 (학습 값과 일치시켜야 안전 — smolvla default=50)
@@ -124,7 +124,7 @@ POLICY_N_ACTION_STEPS="${POLICY_N_ACTION_STEPS:-20}"
 
 # -------- RTC (Real-Time Chunking) 설정 --------
 RTC_ENABLED="${RTC_ENABLED:-false}"                    # true / false
-RTC_EXECUTION_HORIZON="${RTC_EXECUTION_HORIZON:-20}"  # chunk 당 실행 스텝 수 (RTC_ENABLED=true 일 때만 의미)
+RTC_EXECUTION_HORIZON="${RTC_EXECUTION_HORIZON:-24}"  # chunk 당 실행 스텝 수 (RTC_ENABLED=true 일 때만 의미)
 
 # -------- torch compile (선택) --------
 USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-false}"       # true / false

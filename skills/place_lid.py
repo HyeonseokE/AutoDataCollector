@@ -169,6 +169,29 @@ def place_lid(
     release_desc = f"release lid on {target_name}" if target_name else "release lid"
     skills.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
 
+    # 5. Retreat to approach height — release 위치(=pot 표면 근처)에서 같은 (x, y)
+    #    로 수직 상승. release 직후 그리퍼는 연 상태이고 gripper_action 을 주지
+    #    않으므로(None) 닫지 않고 open 그대로 이동한다. retreat 없이 바로 initial
+    #    로 가면 낮은 z 에서 수평 이동하며 lid/pot 를 스칠 수 있어 이를 방지.
+    #    is_transit=False — descend 와 동일하게 perturb 회피(정확히 18 cm).
+    #    pitch 는 유지하지 않음(target_pitch=None) — 상승만 하면 되므로 IK 가 자유롭게.
+    RETREAT_HEIGHT_M = 0.18
+    retreat_position = [release_position[0], release_position[1], RETREAT_HEIGHT_M]
+    retreat_desc = (
+        f"retreat to approach height above {target_name}"
+        if target_name else "retreat to approach height"
+    )
+    skills._log(
+        f"  Retreat to: [{retreat_position[0]:.3f}, {retreat_position[1]:.3f}, "
+        f"{retreat_position[2]:.3f}] (gripper open 유지)"
+    )
+    if not skills.move_to_position(
+        retreat_position,
+        skill_description=retreat_desc,
+        is_transit=False,
+    ):
+        skills._log("WARNING: retreat to approach height did not fully converge")
+
     # Clear saved state from execute_pick_object
     skills._pick_z = None
     skills._saved_pitch = None

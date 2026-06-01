@@ -170,7 +170,7 @@ def lerobot_code_gen_prompt(
        # PICK pattern (approach WHILE opening gripper, then descend to pick):
        pick_obj = positions["object_name"]
        pick_pos = pick_obj["position"]
-       approach_height = 0.12
+       approach_height = 0.16
 
        skills.move_to_position([pick_pos[0], pick_pos[1], approach_height], target_name="object_name", gripper_action="open", gripper_start_fraction=0.3, skill_description="Approach object_name and open gripper", verification_question="Is the gripper above object_name and open?")
        skills.execute_pick_object(pick_pos, object_name="object_name", skill_description="Pick up object_name", verification_question="Is object_name grasped by the gripper?")
@@ -286,7 +286,7 @@ def execute_task():
     skills.connect()
 
     try:
-        approach_height = 0.12  # 12cm above objects
+        approach_height = 0.16  # 12cm above objects
 
         skills.move_to_initial_state()
 
@@ -326,7 +326,7 @@ if __name__ == "__main__":
 2. **Guidelines for Implementation:**
    - Always start with `move_to_initial_state()`. DO NOT call `gripper_open()` or `gripper_close()` right after — gripper transitions happen inside `move_to_position(...)` via `gripper_action`.
    - Always end with `move_to_free_state()`
-   - Use `approach_height = 0.12` (12cm) for approach/lift movements
+   - Use `approach_height = 0.16` (12cm) for approach/lift movements
    - **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object (the functions handle grasp offset internally)
    - Use `is_table=True` when placing on table, `is_table=False` when placing on another object
    - **Stacking**: When placing on a stack, compute the accumulated stack height. For the place position, use the stack location's XY and set z = sum of all stacked objects' heights (from their original detected positions). Example: to place C on top of A→B stack, use `[A_pos[0], A_pos[1], A_pos[2] + B_pos[2]]`.
@@ -446,7 +446,7 @@ positions = {{
 # START — always first. NOTE: DO NOT call gripper_open()/gripper_close() right after
 # move_to_initial_state(). Gripper transitions are integrated into move_to_position
 # via gripper_action="open"/"close".
-approach_height = 0.12
+approach_height = 0.16
 skills.move_to_initial_state()
 
 # PICK — approach opens gripper during the motion (starts at 30% of motion)
@@ -522,7 +522,7 @@ if __name__ == "__main__":
 **Guidelines**:
 1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
    - **DO NOT** call `gripper_open()` / `gripper_close()` right after `move_to_initial_state()`. Gripper transitions are integrated into `move_to_position(..., gripper_action=...)`.
-2. `approach_height = 0.12` (12cm) for all approach/lift.
+2. `approach_height = 0.16` (12cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
    - **CRITICAL**: This is a SINGLE-ARM robot. Do NOT pass `arm=`, `left_arm=`, `right_arm=` to any skill function. All functions operate on the single connected arm automatically.
 4. `is_table=True` on table, `is_table=False` on another object.
@@ -664,7 +664,7 @@ Generate executable Python code to complete the following task using the robot.
 
 ```python
 # START — always first
-approach_height = 0.12
+approach_height = 0.16
 skills.move_to_initial_state(skill_description="Move to initial position", verification_question="Is the robot at initial position?")
 
 # PICK — approach opens gripper in-motion (start at 30% of approach)
@@ -823,7 +823,7 @@ if __name__ == "__main__":
 **Guidelines**:
 1. Always START with `move_to_initial_state()` and END with `move_to_initial_state()` then `move_to_free_state()`.
    - **DO NOT** call `gripper_open()` / `gripper_close()` right after `move_to_initial_state()`. Gripper transitions are integrated into `move_to_position(..., gripper_action=...)`.
-2. `approach_height = 0.12` (12cm) for all approach/lift.
+2. `approach_height = 0.16` (12cm) for all approach/lift.
 3. **ALWAYS** pass positions as-is to execute_pick_object and execute_place_object (grasp offset handled internally).
    - **CRITICAL**: This is a SINGLE-ARM robot. Do NOT pass `arm=`, `left_arm=`, `right_arm=` to any skill function. All functions operate on the single connected arm automatically.
 4. `is_table=True` on table, `is_table=False` on another object.
@@ -1001,7 +1001,7 @@ Specification: {{
 1. Use `execute_pick_object` and `execute_place_object` for pick/place operations
 2. Always start with `move_to_initial_state` (do NOT follow with `gripper_open`/`gripper_close`)
 3. Always end with `move_to_free_state`
-4. Use `approach_height: 0.10` for approach/retract movements (10cm above target)
+4. Use `approach_height: 0.16` for approach/retract movements (16cm above target)
 5. Use `is_table: true` when placing on table, `is_table: false` when stacking on another object
 6. Use ONLY the object names from the detected objects list
 7. **Integrated gripper**: pick approach uses `"gripper_action": "open", "gripper_start_fraction": 0.3`; place retreat uses `"gripper_action": "close", "gripper_start_fraction": 0.2`.

@@ -303,7 +303,7 @@ target_positions = {{
 
 ```python
 # === STEP 1: Move 1st object (object_A) to its target ===
-approach_height = 0.12
+approach_height = 0.16
 cur = current_positions["object_A"]["position"]
 tgt = target_positions["object_A"]["position"]
 skills.set_subtask("move object_A to target")
@@ -355,7 +355,7 @@ def execute_reset_task():
     skills.connect()
 
     try:
-        approach_height = 0.12
+        approach_height = 0.16
 
         skills.move_to_initial_state()
 
@@ -392,7 +392,7 @@ if __name__ == "__main__":
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-7. Use `approach_height = 0.12` for all approach/lift movements
+7. Use `approach_height = 0.16` for all approach/lift movements
 8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 9. Use `is_table=True` when placing on table
 10. Always include try/finally for proper cleanup
@@ -565,7 +565,7 @@ skills.execute_push(
 
 ```python
 # === STEP 1: Move 1st object (object_A) to its target ===
-approach_height = 0.12
+approach_height = 0.16
 cur = current_positions["object_A"]["position"]
 tgt = target_positions["object_A"]["position"]
 skills.set_subtask("move object_A to target")
@@ -619,7 +619,7 @@ def execute_reset_task():
     skills.connect()
 
     try:
-        approach_height = 0.12
+        approach_height = 0.16
 
         skills.move_to_initial_state()
 
@@ -705,7 +705,7 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-7. Use `approach_height = 0.12` (12cm) for all approach/lift movements
+7. Use `approach_height = 0.16` (16cm) for all approach/lift movements
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place
 9. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 10. Use `is_table=True` when placing on table

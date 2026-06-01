@@ -87,7 +87,7 @@ def _cartesian_ik_trajectory(
             skills.planner.calibration_limits.upper_limits_radians,
         )
 
-    PITCH_TOLERANCE_DEG = 20.0  # waypoint별 pitch 허용 편차 (move_to_position과 동일)
+    PITCH_TOLERANCE_DEG = 50.0  # waypoint별 pitch 허용 편차 (move_to_position과 동일)
     pitch_offsets_deg = [i for j in range(int(PITCH_TOLERANCE_DEG) + 1)
                          for i in ((-j, j) if j > 0 else (0,))]
 
@@ -105,7 +105,7 @@ def _cartesian_ik_trajectory(
             target_pitch=target_pitch,
         )
 
-        # Retry with pitch tolerance ±20° if maintain_pitch was set and IK failed
+        # Retry with pitch tolerance ±50° if maintain_pitch was set and IK failed
         if (not success or ik_info["num_valid"] == 0) and target_pitch is not None:
             for offset_deg in pitch_offsets_deg:
                 if offset_deg == 0:

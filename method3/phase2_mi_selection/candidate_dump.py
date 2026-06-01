@@ -25,6 +25,11 @@ import numpy as np
 # server 가 직접 P_phase1 build 할 때 쓰는 cache 경로 (method3_setup 와 동일).
 _DEFAULT_DB_NPZ = "grpc_server/buffer/server_skill_wise_vector_db.npz"
 
+# target_episode_id 로 제한한 best entry 의 subgoal 이 plan goal 과 이 거리(m)
+# 보다 멀면 매핑 불일치로 보고 goal 기준 전체 nearest 로 fallback. 정상 매핑은
+# ~0.01~0.02 m, 불일치는 0.15 m+ 로 명확히 갈린다 (관측 기반 6 cm threshold).
+_TARGET_EP_GOAL_DIST_MAX = 0.06
+
 # phase1 raw dataset 의 observation.ee_pos.robot_xyzrpy column cache.
 # _extract_gt 가 entry 별 raw ee xyz slice lookup 시 dataset 마다 한 번만
 # parquet read — visualization 의 정확한 g.t. trajectory 표시 용.
@@ -191,28 +196,52 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
     g = np.asarray(goal_ee_xyz, dtype=float).reshape(-1)[:3]
     s = (np.asarray(start_ee_xyz, dtype=float).reshape(-1)[:3]
          if start_ee_xyz is not None else None)
-    best, best_score = -1, float("inf")
-    for i, ee in enumerate(ee_all):
-        if ee is None:
-            continue
-        if _enabled_mask is not None and not _enabled_mask[i]:
-            continue
-        ee = np.asarray(ee, dtype=float)
-        if ee.ndim != 2 or len(ee) < 1:
-            continue
-        score = float(np.linalg.norm(ee[-1] - g))
-        if s is not None:
-            score += float(np.linalg.norm(ee[0] - s))
-        if score < best_score:
-            best_score, best = score, i
+
+    def _find_best(mask):
+        b, bs = -1, float("inf")
+        for i, ee in enumerate(ee_all):
+            if ee is None:
+                continue
+            if mask is not None and not mask[i]:
+                continue
+            ee = np.asarray(ee, dtype=float)
+            if ee.ndim != 2 or len(ee) < 1:
+                continue
+            sc = float(np.linalg.norm(ee[-1] - g))
+            if s is not None:
+                sc += float(np.linalg.norm(ee[0] - s))
+            if sc < bs:
+                bs, b = sc, i
+        return b, bs
+
+    best, best_score = _find_best(_enabled_mask)
+    # target_episode_id 제한이 *plan goal 과 동떨어진* entry 를 강제하는 경우
+    # (= Phase2SubgoalReplay 매핑된 phase1 episode 의 subgoal 이 이번 plan 의
+    # 실제 도달점과 불일치) goal 기준 전체 nearest 로 fallback. 이러면 G.T. 가
+    # 항상 candidates 의 실제 도달 subgoal 과 같은 영역에 그려진다. 매핑이
+    # 정상이면 target entry 의 goal dist 가 작아 fallback 안 함.
+    if _enabled_mask is not None and best >= 0:
+        _gd = float(np.linalg.norm(np.asarray(ee_all[best], dtype=float)[-1] - g))
+        if _gd > _TARGET_EP_GOAL_DIST_MAX:
+            _b2, _ = _find_best(None)
+            if _b2 >= 0:
+                best = _b2
     if best < 0:
         return None, "", None
 
     # best entry 의 raw ee xyz path:
     #   1) meta.ee_xyz_path 우선 (= DB build 시 직접 저장, raw dataset 접근 불필요)
     #   2) fallback: raw_dataset 의 ee_pos column slice (cache-backed)
+    #   3) fallback: descriptor(EE delta DCT) 역변환 (raw dataset 도 없을 때)
     gt_ee = np.asarray(ee_all[best], dtype=float)
     episode_id, gt_subgoal = "", None
+    # gt_subgoal 먼저 — descriptor 역변환 fallback 의 anchor 로 필요.
+    if metas is not None:
+        try:
+            _sg = json.loads(str(metas[best])).get("subgoal")
+            gt_subgoal = np.asarray(_sg, dtype=float) if _sg is not None else None
+        except Exception:
+            gt_subgoal = None
     # 1) meta.ee_xyz_path
     if metas is not None:
         try:
@@ -224,16 +253,19 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
                     gt_ee = _arr[:, :3]
         except Exception:
             pass
+    _frame_span = 30
     if refs is not None:
         try:
             ref_dict = json.loads(str(refs[best]))
             episode_id = str(ref_dict.get("episode_id", ""))
+            _f0 = ref_dict.get("global_idx")
+            _f1 = ref_dict.get("frame_end")
+            if _f0 is not None and _f1 is not None and int(_f1) > int(_f0):
+                _frame_span = int(_f1) - int(_f0)
             # 2) fallback — meta.ee_xyz_path 가 없을 때 raw_dataset lookup.
-            if gt_ee.shape[0] <= 1:
+            if gt_ee.shape[0] <= 1 and _f0 is not None and _f1 is not None:
                 _ds_path = ref_dict.get("dataset_path")
-                _f0 = ref_dict.get("global_idx")
-                _f1 = ref_dict.get("frame_end")
-                if _ds_path and _f0 is not None and _f1 is not None:
+                if _ds_path:
                     _ee_col = _load_raw_ee_column(_ds_path)
                     if _ee_col is not None:
                         _slice = _ee_col[int(_f0):int(_f1), :3]
@@ -241,12 +273,26 @@ def _extract_gt(curobo_backend, db_npz_path: str, skill_id: str,
                             gt_ee = np.asarray(_slice, dtype=float)
         except Exception:
             episode_id = ""
-    if metas is not None:
+    # 3) fallback — descriptor(EE delta DCT) 역변환 + cumsum + subgoal anchor.
+    # raw dataset 도 ee_xyz_path 도 없을 때 DB descriptor 만으로 raw EE
+    # topology 를 복원한다. descriptor = vec(C[:K]) of EE delta [Δxyz+Δrpy]
+    # → reshape(K, 6) → IDCT+cubic resample(frame_span) → Δxyz cumsum →
+    # 끝점을 subgoal 으로 anchor (translation-invariant 이라 위치는 subgoal
+    # 기준, motion topology 는 raw 와 ~1 cm 오차로 일치).
+    if gt_ee.shape[0] <= 1 and gt_subgoal is not None:
         try:
-            _sg = json.loads(str(metas[best])).get("subgoal")
-            gt_subgoal = np.asarray(_sg, dtype=float) if _sg is not None else None
+            from method3.dct.transform import dct_to_traj
+            _coeffs = np.asarray(descriptors[best], dtype=np.float64)
+            _dof = 6
+            _K = _coeffs.size // _dof
+            if _K >= 1 and _K * _dof == _coeffs.size:
+                _rec = dct_to_traj(_coeffs.reshape(_K, _dof), max(_frame_span, 8))
+                _xyz = np.cumsum(_rec[:, :3], axis=0)
+                _xyz = _xyz - _xyz[-1] + np.asarray(gt_subgoal, dtype=float)[:3]
+                if _xyz.shape[0] > 1:
+                    gt_ee = _xyz
         except Exception:
-            gt_subgoal = None
+            pass
     return gt_ee, episode_id, gt_subgoal
 
 

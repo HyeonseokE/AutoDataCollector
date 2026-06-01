@@ -14,7 +14,7 @@
 subgoal:
   # --- 활성화 ---
   enabled_forward: true        # forward execution 에서 Phase1 ON
-  enabled_reset: false         # reset execution 에서는 OFF (forward-only)
+  enabled_reset: true         # reset execution 에서는 OFF (forward-only)
 
   # --- 후보 생성 (§4.2) ---
   # mode 는 항상 buffer_aware (자동). robot_origin 은 (0,0,0) 고정,

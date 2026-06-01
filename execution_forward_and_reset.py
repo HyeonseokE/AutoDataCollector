@@ -706,7 +706,14 @@ class ForwardAndResetPipeline(BasePipeline):
             # 디렉터리 기준으로 _finalize_subgoal_buffer 에서 해석된다.
             # None → 메모리 전용 (이 run 동안만 grow).
             self._subgoal_buffer_file = pert_raw.get("buffer_file")
-            buffer = SubgoalBuffer()  # file 은 finalize 에서 바인딩
+            buffer = SubgoalBuffer()  # forward buffer — file 은 finalize 에서 바인딩
+            # enabled_reset=true 면 reset 동작의 subgoal 을 별도 buffer 에 분리
+            # 저장한다. forward staging 은 selector.buffer(=forward), reset flush
+            # 시점에만 selector.buffer 를 이 reset buffer 로 swap 한다 (reset judge
+            # 후). reset=false 면 None — reset 중 selector 가 detach 돼 staging 자체
+            # 가 없으므로 기존 단일-buffer 동작과 동일.
+            self._subgoal_buffer_forward = buffer
+            self._subgoal_buffer_reset = SubgoalBuffer() if reset else None
             # kinematics 주입 — paradigm 일관화 _on_skill_stamp callback 이
             # start_state(joint) → start_ee 변환에 사용. _skills.kinematics
             # 는 LeRobotSkills 가 connect() 후 노출.
@@ -762,6 +769,18 @@ class ForwardAndResetPipeline(BasePipeline):
                 path = base / path
             selector.buffer.set_file(path)
             selector.buffer.load()
+            # reset buffer 도 별도 파일로 바인딩 (forward 와 분리 영속화).
+            # forward 가 subgoal_buffer.npz 면 reset 은 subgoal_buffer_reset.npz.
+            _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+            if _reset_buf is not None:
+                _rpath = path.with_name(f"{path.stem}_reset{path.suffix}")
+                _reset_buf.set_file(_rpath)
+                _reset_buf.load()
+                print(
+                    f"\033[92m[Perturbation] reset subgoal buffer → "
+                    f"{_reset_buf.file_path()} (preloaded {_reset_buf.total_size()} "
+                    f"entries over {len(_reset_buf.skill_ids())} skills)\033[0m"
+                )
             # subgoal selection trace (jsonl) — 분석용. 사용자 요청.
             # session_dir/subgoal_phase1_trace.jsonl 에 각 select_subgoal 호출의
             # candidate scores + 선정 정보 append.
@@ -875,6 +894,69 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception as e:
             print(f"[Perturbation] subgoal buffer finalize skipped: {e}")
 
+    def _reconcile_one_subgoal_buffer(self, bf_path, keep_ids, label: str) -> None:
+        """단일 subgoal buffer ``.npz`` 의 stale entry 를 ``keep_ids`` 기준 제거 + save.
+
+        ``_reconcile_subgoal_buffer_on_resume`` 의 per-buffer 로직 (forward/reset
+        buffer 공용). ``bf_path`` 가 없으면 no-op. forward 와 reset 은 같은
+        episode_id 로 stamp 되므로 동일한 ``keep_ids`` 를 그대로 사용한다.
+        """
+        from method3.phase1_state_seeding import SubgoalBuffer
+        _GREEN = "\033[92m"
+        _YELLOW = "\033[93m"
+        _RESET = "\033[0m"
+        if not bf_path.exists():
+            print(
+                f"{_YELLOW}[Perturbation] resume reconcile — no {label} file at "
+                f"{bf_path} (nothing to reconcile){_RESET}"
+            )
+            return
+        buf = SubgoalBuffer()
+        buf.set_file(bf_path)
+        buf.load()
+        _before_total = buf.total_size()
+
+        # Pre-reconcile breakdown
+        _to_drop: dict[str, dict[str, int]] = {}
+        _untagged_kept = 0
+        for _sid, _entries in buf._skills.items():
+            for _e in _entries:
+                _eid = str(getattr(_e, "episode_id", ""))
+                if not _eid:
+                    _untagged_kept += 1
+                    continue
+                if _eid not in keep_ids:
+                    _to_drop.setdefault(_eid, {})
+                    _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
+
+        if _to_drop:
+            _n_eps = len(_to_drop)
+            _total = sum(sum(d.values()) for d in _to_drop.values())
+            print(
+                f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
+                f"to drop from {label} ({_total} entries total):{_RESET}"
+            )
+            for _eid in sorted(_to_drop):
+                _per_ep = sum(_to_drop[_eid].values())
+                _bd = ", ".join(
+                    f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
+                )
+                print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
+        else:
+            print(
+                f"{_GREEN}[Perturbation] resume reconcile — no stale {label} "
+                f"entries to drop ({_before_total} entries; kept {len(keep_ids)} "
+                f"TRUE episodes){_RESET}"
+            )
+
+        _removed = buf.retain_episodes(keep_ids)  # auto save()
+        print(
+            f"{_GREEN}[Perturbation] resume reconcile DONE ({label}) — kept "
+            f"{len(keep_ids)} TRUE episodes, dropped {_removed} stale buffer "
+            f"entries (buffer {_before_total} → {buf.total_size()}; "
+            f"{_untagged_kept} untagged preserved){_RESET}"
+        )
+
     def _reconcile_subgoal_buffer_on_resume(self, session_dir: str | None) -> None:
         """Resume 시 subgoal_buffer.npz 의 stale entry 를 정리한다 (selector-free).
 
@@ -922,68 +1004,20 @@ class ForwardAndResetPipeline(BasePipeline):
         if not buffer_file:
             return
         try:
-            from method3.phase1_state_seeding import SubgoalBuffer
             from method3.episode_lifecycle import episode_id
             bf_path = Path(buffer_file)
             if not bf_path.is_absolute():
                 base = Path(session_dir) if session_dir else Path(".")
                 bf_path = base / bf_path
-            _GREEN = "\033[92m"
-            _YELLOW = "\033[93m"
-            _RESET = "\033[0m"
-            if not bf_path.exists():
-                print(
-                    f"{_YELLOW}[Perturbation] resume reconcile — "
-                    f"no buffer file at {bf_path} (nothing to reconcile){_RESET}"
-                )
-                self._resume_kept_true_episodes = None
-                return
-
-            buf = SubgoalBuffer()
-            buf.set_file(bf_path)
-            buf.load()
-            _before_total = buf.total_size()
             _keep_ids = {episode_id(n) for n in _kept}
-
-            # Pre-reconcile breakdown
-            _to_drop: dict[str, dict[str, int]] = {}
-            _untagged_kept = 0
-            for _sid, _entries in buf._skills.items():
-                for _e in _entries:
-                    _eid = str(getattr(_e, "episode_id", ""))
-                    if not _eid:
-                        _untagged_kept += 1
-                        continue
-                    if _eid not in _keep_ids:
-                        _to_drop.setdefault(_eid, {})
-                        _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
-
-            if _to_drop:
-                _n_eps = len(_to_drop)
-                _total = sum(sum(d.values()) for d in _to_drop.values())
-                print(
-                    f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
-                    f"to drop from subgoal_buffer ({_total} entries total):{_RESET}"
-                )
-                for _eid in sorted(_to_drop):
-                    _per_ep = sum(_to_drop[_eid].values())
-                    _bd = ", ".join(
-                        f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
-                    )
-                    print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
-            else:
-                print(
-                    f"{_GREEN}[Perturbation] resume reconcile — no stale subgoal_buffer "
-                    f"entries to drop ({_before_total} entries; kept {len(_keep_ids)} "
-                    f"TRUE episodes){_RESET}"
-                )
-
-            _removed = buf.retain_episodes(_keep_ids)  # auto save()
-            print(
-                f"{_GREEN}[Perturbation] resume reconcile DONE — kept {len(_keep_ids)} "
-                f"TRUE episodes, dropped {_removed} stale buffer entries "
-                f"(buffer {_before_total} → {buf.total_size()}; "
-                f"{_untagged_kept} untagged preserved){_RESET}"
+            # forward buffer + reset buffer (subgoal_buffer_reset.npz) 를 동일한
+            # keep_ids 로 정리. forward 와 reset 은 같은 episode_id 로 stamp 되므로
+            # stale 판정 기준이 동일하다. reset buffer 파일이 없으면(enabled_reset
+            # 미사용/첫 run) 헬퍼가 no-op.
+            self._reconcile_one_subgoal_buffer(bf_path, _keep_ids, "subgoal_buffer")
+            _rpath = bf_path.with_name(f"{bf_path.stem}_reset{bf_path.suffix}")
+            self._reconcile_one_subgoal_buffer(
+                _rpath, _keep_ids, "subgoal_buffer_reset"
             )
 
             # 중복 호출 방지 — finalize 의 reconcile 블록이 None 보고 skip.
@@ -1584,6 +1618,21 @@ class ForwardAndResetPipeline(BasePipeline):
                 )
         except Exception as e:
             print(f"[Perturbation] subgoal buffer persist skipped: {e}")
+        # reset buffer 도 영속화 (forward 와 분리). reset flush 마다 save 되지만
+        # 마지막 미flush staging 대비 + 일관성 위해 teardown 에서도 한 번 더.
+        _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+        if _reset_buf is not None:
+            try:
+                _reset_buf.save()
+                _rfp = _reset_buf.file_path()
+                if _rfp is not None:
+                    print(
+                        f"[Perturbation] reset subgoal buffer saved → {_rfp} "
+                        f"({_reset_buf.total_size()} entries over "
+                        f"{len(_reset_buf.skill_ids())} skills)"
+                    )
+            except Exception as e:
+                print(f"[Perturbation] reset subgoal buffer persist skipped: {e}")
         self._subgoal_selector = None
         if hasattr(self, "_skills") and self._skills is not None:
             try:
@@ -3962,6 +4011,32 @@ class ForwardAndResetPipeline(BasePipeline):
                     rj_pred = reset_judge_result.get('prediction', 'UNCERTAIN')
                     pred_color = GREEN if rj_pred == "TRUE" else RED if rj_pred == "FALSE" else YELLOW
                     print(f"  Prediction: {pred_color}{rj_pred}{RESET}")
+
+                    # reset 동작의 staged subgoal 을 *reset 전용* buffer 에 commit.
+                    # forward flush(judge 직후)가 이미 _pending 을 비웠으므로 여기
+                    # _pending 에는 reset phase staging 만 남아 있다. flush 동안만
+                    # selector.buffer 를 reset buffer 로 swap → subgoal_buffer_reset.npz
+                    # 에 저장. reset judge TRUE 면 commit, 아니면 discard(둘 다 _pending
+                    # clear). enabled_reset=false 면 _subgoal_buffer_reset=None → skip
+                    # (reset 중 selector detach 라 staging 자체가 없음).
+                    _subgoal_sel = getattr(self, "_subgoal_selector", None)
+                    _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+                    if _subgoal_sel is not None and _reset_buf is not None:
+                        _orig_buf = _subgoal_sel.buffer
+                        _subgoal_sel.buffer = _reset_buf
+                        try:
+                            if rj_pred == "TRUE":
+                                from method3.episode_lifecycle import episode_id as _mk_ep_id
+                                _ep_n = getattr(self, "current_episode", None)
+                                _ep_id = _mk_ep_id(_ep_n) if _ep_n else ""
+                                _subgoal_sel.flush_episode(episode_id=_ep_id)
+                            else:
+                                _subgoal_sel.discard_episode()
+                        except Exception as _e:
+                            print(f"[Perturbation] reset subgoal buffer flush skipped: {_e}")
+                        finally:
+                            _subgoal_sel.buffer = _orig_buf
+
                     rj_reasoning = reset_judge_result.get('reasoning', '')
                     if rj_reasoning:
                         reasoning_preview = rj_reasoning[:200]

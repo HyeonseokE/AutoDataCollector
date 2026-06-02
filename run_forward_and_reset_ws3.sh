@@ -34,12 +34,12 @@ PHASE="phase2"
 
 ### ==================== [single arm task] ==================
 ## pick and place
-INSTRUCTION="pick up the blue block and place it on the red dish"
-RESET_INSTRUCTION=""
+# INSTRUCTION="pick up the blue block and place it on the red dish"
+# RESET_INSTRUCTION=""
 
 ## close the pot
-# INSTRUCTION="Close the pot."
-# RESET_INSTRUCTION="Open the pot."
+INSTRUCTION="Close the pot."
+RESET_INSTRUCTION="Open the pot."
 
 ## open the pot
 # INSTRUCTION="Open the pot."
@@ -81,7 +81,7 @@ RECORD_DATASET=true
 # Phase2 cycle (PHASE="phase2") 은 *반드시* Phase1 session 을 이어받아야 한다 —
 # Phase2 episode 가 session/phase2/ 하위에 phase1 에 이어 쌓이고 phase1 의
 # seed_*_setup 을 재사용한다 (chain 이 episode_* → phase1/ 로 reorg 한 상태).
-RESUME_SESSION="/home/lerobot/AutoDataCollector/results/completed_logs/table7/harmful_id_pnp_table7"
+RESUME_SESSION="AutoDataCollector/results/completed_logs/table1/close_pot_table1"
 # Table 6 Quadrant Validation — Q1 (Useful OOD) Phase2 수집.
 # Phase1 / seed_*_setup 은 session_20260523_013722 의 것을 symlink 공유 (fair).
 # 다른 quadrant 로 전환 시: results/table6_quadrant/Q{1,2,3,4} 중 선택.

@@ -18,7 +18,7 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_close_drawer_20260528_002316/checkpoints/001800/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_close_drawer_20260602_153049/checkpoints/000450/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
 phase1_dataset_path: "CoRL2026/table1/ours_close_drawer"
@@ -53,7 +53,7 @@ mi_selection:
   #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
   # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
-  selection_mode: Q1   # argmedian U_VLA s.t. M̃_MI ≥ +τ_MI (mid-novelty positive-MI)
+  selection_mode: Q1_med   # argmedian U_VLA s.t. M̃_MI ≥ +τ_MI (mid-novelty positive-MI)
                        # = "MI-aligned + VLA-uncertain": Phase1 분포 정합 cand 중
                        # VLA 가 가장 헷갈리는 것 (paper main claim)
   # ─────────────────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ selector:
 # save_dir 이 relative path 면 server.py 실행 위치 기준.
 buffer:
   save_dir: "grpc_server/buffer"
-  filename: "server_skill_wise_vector_db_close_drawer.npz"
+  filename: "server_skill_wise_vector_db.npz"
 
 # =============================================================================
 # 원격 H100 SSH 연결 — grpc_server/launch_remote_server.sh 가 이 섹션을 읽어
@@ -256,11 +256,11 @@ remote:
   # [필수] 원격 서버 운영
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector-open_drawer"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES — GPU 1 (spoon 전용 isolation; GPU 2 는 close_pot/chocolatepies 가 OOM 위험)
+  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES — GPU 0 (open_drawer 전용 isolation)
   tmux_session: "phase2_server_close_drawer"   # 재시작 시 reuse; prefix unique (phase2_server_* family) — close_pot 전용 isolation (open_drawer는 ws3 cell 다른 사용자 점유)
 
   # [선택] 동작 옵션
-  git_pull_before_start: false
+  git_pull_before_start: true
   ready_timeout_s: 360                   # smolvla 부팅 1~2분, pi05_base 2~5분 → 여유 360s
 
   # NVIDIA driver kernel/user-space mismatch workaround.

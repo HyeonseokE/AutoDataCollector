@@ -3,7 +3,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026-CSI/table1/close_pot_table1"  # forward(Close the pot)→close_pot, reset(Open the pot)→close_pot_reset. phase2 취득분을 phase1 80ep 에 append (2026-05-29). HF Hub repo_id 또는 로컬 경로
+dataset_repo_id: "CoRL2026-CSI/table3/stateseeding+random_pert"  # pnp phase2 (harmful_id_pnp_table7 base) 추가 cycle. forward=pnp(blue→red dish). 8b9458e 시점 dataset 으로 retarget. HF Hub repo_id 또는 로컬 경로
 recording_fps: 10
 robot_type: "so101"
 vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv

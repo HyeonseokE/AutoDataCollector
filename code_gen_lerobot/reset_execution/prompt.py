@@ -345,6 +345,25 @@ skills.clear_subtask()  # final close; no detect needed since no more subtasks
 
 **CRITICAL — identical/indistinguishable objects**: If two remaining objects are visually identical (e.g., two red blocks), DO NOT include both in `detect_objects([...])` — the VLM cannot tell them apart and will swap labels. Re-detect only objects with unique appearance; for identical ones, keep using their original `current_positions` value.
 
+### **LID-SPECIFIC PLACE — use `execute_place_lid` (NOT `execute_place_object`)**
+
+When the held object is a **lid** (object name contains "lid") being seated on top of a container — e.g. closing a pot by placing the lid back — you MUST use `skills.execute_place_lid` instead of `execute_place_object`:
+
+```python
+# Closing a pot during reset — lid back onto pot rim.
+skills.execute_place_lid(
+    current_positions["pot"]["position"],
+    gripper_open_ratio=0.7,
+    target_name="pot",
+    skill_description="Place lid on pot and seat it",
+    verification_question="Is the lid centered and seated on the pot?",
+)
+```
+
+- Pass the container's position as-is (e.g. `current_positions["pot"]["position"]`). The skill calculates release height from `surface_z + saved pick_z`.
+- After descent, the skill drags the lid by 2cm in -x direction (toward robot base) with gripper still closed, then opens — this seats the lid centered on the rim.
+- Do NOT call `execute_place_object` when the held object is a lid. `execute_place_object` treats the target as a flat table/surface and will not seat the lid correctly.
+
 ### **Code Template**
 
 ```python
@@ -513,6 +532,7 @@ target_positions = {{
 | `rotate_90degree(direction)` | Rotate gripper 90° | direction: 1 (CW) or -1 (CCW) |
 | `execute_pick_object(object_position, ...)` | Descend to pick, close gripper, save pitch | object_position, object_name |
 | `execute_place_object(place_position, ...)` | Descend to place with saved pitch, open gripper | place_position, is_table, gripper_open_ratio, target_name |
+| `execute_place_lid(place_position, ...)` | Lid-specific place: descend → drag -x 2cm → release. Use INSTEAD OF execute_place_object when seating a lid on a container | place_position, pull_distance, gripper_open_ratio, target_name |
 | `execute_pull(start, distance, ...)` | **OPENING** drawer/door — pulls -x by `distance` m. Grasp + drag + release + retreat | start_position, distance, object_name |
 | `execute_push(start, distance, ...)` | **CLOSING** drawer/door — pushes +x by `distance + 3cm` (margin). Linear push + retreat (does NOT change gripper state) | start_position, distance, object_name |
 
@@ -520,6 +540,12 @@ target_positions = {{
 **execute_place_object**: Pass the target position as-is. The function internally calculates the correct release height.
   - is_table=True: place on table, is_table=False: place on another object
   - **ALWAYS use `gripper_open_ratio=0.7`**
+
+**execute_place_lid**: Lid-specific variant of execute_place_object. Use whenever the held object is a lid (any object whose name contains "lid") being seated on top of a container (e.g. closing a pot).
+  - Same descent semantics as execute_place_object(is_table=False): place_position is the container's top-surface position, release height = surface_z + saved pick_z.
+  - After descent, drags the lid by `pull_distance` (default 2cm) in the -x direction (toward the robot base) with the gripper still closed, then opens the gripper. This compensates for systematic +x landing offset so the lid sits centered on the rim.
+  - Pass the container's position as-is (e.g. `current_positions["pot"]["position"]`). Leave `pull_distance` at default unless instructed otherwise. Use `gripper_open_ratio=0.7`.
+  - Do NOT use execute_place_object for lids — use execute_place_lid. This is the only way to seat a lid correctly on a pot/container during reset.
 
 **execute_pull** (OPENING drawer/door): pass `start_position` (handle grasp point) and `distance` (meters, extracted from instruction). Direction fixed -x. Skill: descend → grasp → drag → release → retreat.
   - **MANDATORY preceding call**: `skills.move_to_position([h[0], h[1], 0.20], gripper_action="open", ...)` — gripper MUST be open before pull (skill closes during grasp). Caller's responsibility.
@@ -606,6 +632,25 @@ skills.clear_subtask()  # final close; no detect needed since no more subtasks
 ```
 
 **CRITICAL — identical/indistinguishable objects**: If two remaining objects are visually identical (e.g., two red blocks), DO NOT include both in `detect_objects([...])` — the VLM cannot tell them apart and will swap labels. Re-detect only objects with unique appearance; for identical ones, keep using their original `current_positions` value.
+
+### **LID-SPECIFIC PLACE — use `execute_place_lid` (NOT `execute_place_object`)**
+
+When the held object is a **lid** (object name contains "lid") being seated on top of a container — e.g. closing a pot by placing the lid back — you MUST use `skills.execute_place_lid` instead of `execute_place_object`:
+
+```python
+# Closing a pot during reset — lid back onto pot rim.
+skills.execute_place_lid(
+    current_positions["pot"]["position"],
+    gripper_open_ratio=0.7,
+    target_name="pot",
+    skill_description="Place lid on pot and seat it",
+    verification_question="Is the lid centered and seated on the pot?",
+)
+```
+
+- Pass the container's position as-is (e.g. `current_positions["pot"]["position"]`). The skill calculates release height from `surface_z + saved pick_z`.
+- After descent, the skill drags the lid by 2cm in -x direction (toward robot base) with gripper still closed, then opens — this seats the lid centered on the rim.
+- Do NOT call `execute_place_object` when the held object is a lid. `execute_place_object` treats the target as a flat table/surface and will not seat the lid correctly.
 
 ### **Code Template**
 

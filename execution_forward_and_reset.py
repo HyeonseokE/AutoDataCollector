@@ -286,7 +286,11 @@ class ForwardAndResetPipeline(BasePipeline):
         # Episode tracking for logging
         self.current_episode: int = 1
         self.total_episodes: int = 1
-        self.current_phase: str = "Forward"  # "Forward" or "Reset"
+        # "Idle" until an episode's forward execution starts; run() flips it to
+        # "Forward"/"Reset". Default is NOT "Forward" so pre-episode work (setup,
+        # _restore_to_seed seed-restore motion) is NOT picked up by the EE-trace
+        # logger, which only records while current_phase == "Forward".
+        self.current_phase: str = "Idle"  # "Idle" | "Forward" | "Reset"
 
         # First episode positions for "original" reset mode
         # Stores the first episode's detection result to avoid cumulative drift
@@ -706,7 +710,14 @@ class ForwardAndResetPipeline(BasePipeline):
             # 디렉터리 기준으로 _finalize_subgoal_buffer 에서 해석된다.
             # None → 메모리 전용 (이 run 동안만 grow).
             self._subgoal_buffer_file = pert_raw.get("buffer_file")
-            buffer = SubgoalBuffer()  # file 은 finalize 에서 바인딩
+            buffer = SubgoalBuffer()  # forward buffer — file 은 finalize 에서 바인딩
+            # enabled_reset=true 면 reset 동작의 subgoal 을 별도 buffer 에 분리
+            # 저장한다. forward staging 은 selector.buffer(=forward), reset flush
+            # 시점에만 selector.buffer 를 이 reset buffer 로 swap 한다 (reset judge
+            # 후). reset=false 면 None — reset 중 selector 가 detach 돼 staging 자체
+            # 가 없으므로 기존 단일-buffer 동작과 동일.
+            self._subgoal_buffer_forward = buffer
+            self._subgoal_buffer_reset = SubgoalBuffer() if reset else None
             # kinematics 주입 — paradigm 일관화 _on_skill_stamp callback 이
             # start_state(joint) → start_ee 변환에 사용. _skills.kinematics
             # 는 LeRobotSkills 가 connect() 후 노출.
@@ -762,6 +773,18 @@ class ForwardAndResetPipeline(BasePipeline):
                 path = base / path
             selector.buffer.set_file(path)
             selector.buffer.load()
+            # reset buffer 도 별도 파일로 바인딩 (forward 와 분리 영속화).
+            # forward 가 subgoal_buffer.npz 면 reset 은 subgoal_buffer_reset.npz.
+            _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+            if _reset_buf is not None:
+                _rpath = path.with_name(f"{path.stem}_reset{path.suffix}")
+                _reset_buf.set_file(_rpath)
+                _reset_buf.load()
+                print(
+                    f"\033[92m[Perturbation] reset subgoal buffer → "
+                    f"{_reset_buf.file_path()} (preloaded {_reset_buf.total_size()} "
+                    f"entries over {len(_reset_buf.skill_ids())} skills)\033[0m"
+                )
             # subgoal selection trace (jsonl) — 분석용. 사용자 요청.
             # session_dir/subgoal_phase1_trace.jsonl 에 각 select_subgoal 호출의
             # candidate scores + 선정 정보 append.
@@ -875,6 +898,69 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception as e:
             print(f"[Perturbation] subgoal buffer finalize skipped: {e}")
 
+    def _reconcile_one_subgoal_buffer(self, bf_path, keep_ids, label: str) -> None:
+        """단일 subgoal buffer ``.npz`` 의 stale entry 를 ``keep_ids`` 기준 제거 + save.
+
+        ``_reconcile_subgoal_buffer_on_resume`` 의 per-buffer 로직 (forward/reset
+        buffer 공용). ``bf_path`` 가 없으면 no-op. forward 와 reset 은 같은
+        episode_id 로 stamp 되므로 동일한 ``keep_ids`` 를 그대로 사용한다.
+        """
+        from method3.phase1_state_seeding import SubgoalBuffer
+        _GREEN = "\033[92m"
+        _YELLOW = "\033[93m"
+        _RESET = "\033[0m"
+        if not bf_path.exists():
+            print(
+                f"{_YELLOW}[Perturbation] resume reconcile — no {label} file at "
+                f"{bf_path} (nothing to reconcile){_RESET}"
+            )
+            return
+        buf = SubgoalBuffer()
+        buf.set_file(bf_path)
+        buf.load()
+        _before_total = buf.total_size()
+
+        # Pre-reconcile breakdown
+        _to_drop: dict[str, dict[str, int]] = {}
+        _untagged_kept = 0
+        for _sid, _entries in buf._skills.items():
+            for _e in _entries:
+                _eid = str(getattr(_e, "episode_id", ""))
+                if not _eid:
+                    _untagged_kept += 1
+                    continue
+                if _eid not in keep_ids:
+                    _to_drop.setdefault(_eid, {})
+                    _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
+
+        if _to_drop:
+            _n_eps = len(_to_drop)
+            _total = sum(sum(d.values()) for d in _to_drop.values())
+            print(
+                f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
+                f"to drop from {label} ({_total} entries total):{_RESET}"
+            )
+            for _eid in sorted(_to_drop):
+                _per_ep = sum(_to_drop[_eid].values())
+                _bd = ", ".join(
+                    f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
+                )
+                print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
+        else:
+            print(
+                f"{_GREEN}[Perturbation] resume reconcile — no stale {label} "
+                f"entries to drop ({_before_total} entries; kept {len(keep_ids)} "
+                f"TRUE episodes){_RESET}"
+            )
+
+        _removed = buf.retain_episodes(keep_ids)  # auto save()
+        print(
+            f"{_GREEN}[Perturbation] resume reconcile DONE ({label}) — kept "
+            f"{len(keep_ids)} TRUE episodes, dropped {_removed} stale buffer "
+            f"entries (buffer {_before_total} → {buf.total_size()}; "
+            f"{_untagged_kept} untagged preserved){_RESET}"
+        )
+
     def _reconcile_subgoal_buffer_on_resume(self, session_dir: str | None) -> None:
         """Resume 시 subgoal_buffer.npz 의 stale entry 를 정리한다 (selector-free).
 
@@ -926,68 +1012,20 @@ class ForwardAndResetPipeline(BasePipeline):
         if not buffer_file:
             return
         try:
-            from method3.phase1_state_seeding import SubgoalBuffer
             from method3.episode_lifecycle import episode_id
             bf_path = Path(buffer_file)
             if not bf_path.is_absolute():
                 base = Path(session_dir) if session_dir else Path(".")
                 bf_path = base / bf_path
-            _GREEN = "\033[92m"
-            _YELLOW = "\033[93m"
-            _RESET = "\033[0m"
-            if not bf_path.exists():
-                print(
-                    f"{_YELLOW}[Perturbation] resume reconcile — "
-                    f"no buffer file at {bf_path} (nothing to reconcile){_RESET}"
-                )
-                self._resume_kept_true_episodes = None
-                return
-
-            buf = SubgoalBuffer()
-            buf.set_file(bf_path)
-            buf.load()
-            _before_total = buf.total_size()
             _keep_ids = {episode_id(n) for n in _kept}
-
-            # Pre-reconcile breakdown
-            _to_drop: dict[str, dict[str, int]] = {}
-            _untagged_kept = 0
-            for _sid, _entries in buf._skills.items():
-                for _e in _entries:
-                    _eid = str(getattr(_e, "episode_id", ""))
-                    if not _eid:
-                        _untagged_kept += 1
-                        continue
-                    if _eid not in _keep_ids:
-                        _to_drop.setdefault(_eid, {})
-                        _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
-
-            if _to_drop:
-                _n_eps = len(_to_drop)
-                _total = sum(sum(d.values()) for d in _to_drop.values())
-                print(
-                    f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
-                    f"to drop from subgoal_buffer ({_total} entries total):{_RESET}"
-                )
-                for _eid in sorted(_to_drop):
-                    _per_ep = sum(_to_drop[_eid].values())
-                    _bd = ", ".join(
-                        f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
-                    )
-                    print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
-            else:
-                print(
-                    f"{_GREEN}[Perturbation] resume reconcile — no stale subgoal_buffer "
-                    f"entries to drop ({_before_total} entries; kept {len(_keep_ids)} "
-                    f"TRUE episodes){_RESET}"
-                )
-
-            _removed = buf.retain_episodes(_keep_ids)  # auto save()
-            print(
-                f"{_GREEN}[Perturbation] resume reconcile DONE — kept {len(_keep_ids)} "
-                f"TRUE episodes, dropped {_removed} stale buffer entries "
-                f"(buffer {_before_total} → {buf.total_size()}; "
-                f"{_untagged_kept} untagged preserved){_RESET}"
+            # forward buffer + reset buffer (subgoal_buffer_reset.npz) 를 동일한
+            # keep_ids 로 정리. forward 와 reset 은 같은 episode_id 로 stamp 되므로
+            # stale 판정 기준이 동일하다. reset buffer 파일이 없으면(enabled_reset
+            # 미사용/첫 run) 헬퍼가 no-op.
+            self._reconcile_one_subgoal_buffer(bf_path, _keep_ids, "subgoal_buffer")
+            _rpath = bf_path.with_name(f"{bf_path.stem}_reset{bf_path.suffix}")
+            self._reconcile_one_subgoal_buffer(
+                _rpath, _keep_ids, "subgoal_buffer_reset"
             )
 
             # 중복 호출 방지 — finalize 의 reconcile 블록이 None 보고 skip.
@@ -1131,11 +1169,6 @@ class ForwardAndResetPipeline(BasePipeline):
         self._setup_phase2_subgoal_replay(session_dir)
 
     def _setup_phase2_subgoal_replay(self, session_dir: str | None) -> None:
-        # 진단 — setup 진입 자체를 보고 (resume 등에서 skip 의심 회피).
-        print(
-            f"[Method3 phase2] _setup_phase2_subgoal_replay ENTERED — "
-            f"session_dir={session_dir!r}"
-        )
         """Phase2 — Phase1 도달 subgoal 을 episode 별로 replay 하도록 설치.
 
         Phase1 은 buffer-aware 섭동으로 subgoal 을 *옮겨* 상태 다양성을 키웠고,
@@ -1165,68 +1198,14 @@ class ForwardAndResetPipeline(BasePipeline):
             return
         try:
             from method3.phase2_mi_selection.subgoal_replay import Phase2SubgoalReplay
-            # seed-aware replay 를 위해 schedule context 주입 — entry 에 seed_index
-            # stamp 가 없는 legacy buffer 도 (num_seeds, schedule_mode) 로 backfill.
-            # 우선순위:
-            #   1) session_config.json — 그 session 의 실제 schedule_mode (SoT)
-            #   2) _phase1_readiness_hook.cfg.schedule_mode — fresh run 의 경우
-            #   3) "round_robin" — 현재 실험 default (옛 코드의 seed_major default 는
-            #      pool 매핑을 *완전히* 어긋나게 만든 RCA 의 원흉. 절대 다시 쓰지 마라.)
-            _num_seeds = int(getattr(self, "num_random_seeds", 0) or 0) or None
-            _hook_cfg = getattr(
-                getattr(self, "_phase1_readiness_hook", None), "cfg", None
-            )
-            # 우선순위 (주석과 *코드* 가 일치하도록): session_config > hook > default.
-            # session_config 가 *옛 session 의 진실* (resume 시 그 session 의 episode
-            # 들이 어떤 schedule 로 commit 됐는지) 이므로 SoT. hook cfg 는 session_config
-            # 가 없을 때 (fresh run, session_config 빌드 전) fallback.
-            _sched: str | None = None
-            _sched_src = "default"
-            try:
-                _scfg_path = Path(session_dir) / "session_config.json"
-                if _scfg_path.exists():
-                    import json as _json
-                    with open(_scfg_path, "r", encoding="utf-8") as _f:
-                        _sc = _json.load(_f)
-                    _v = _sc.get("schedule_mode")
-                    if isinstance(_v, str) and _v:
-                        _sched, _sched_src = _v, "session_config.json"
-            except Exception as _e:
-                print(f"[Method3 phase2] session_config schedule_mode 읽기 실패: {_e}")
-            if _sched is None and _hook_cfg is not None:
-                _hk = getattr(_hook_cfg, "schedule_mode", None)
-                if isinstance(_hk, str) and _hk:
-                    _sched, _sched_src = _hk, "readiness_hook.cfg"
-            if _sched is None:
-                _sched = "round_robin"  # safer default — 옛 seed_major default 는 RCA 의 원흉
-            print(f"[Method3 phase2] schedule_mode resolved → {_sched!r} "
-                  f"(source={_sched_src}, num_seeds={_num_seeds})")
-            _eps_per = (
-                max(1, int(self.total_episodes) // int(self.num_random_seeds))
-                if getattr(self, "total_episodes", 0) and _num_seeds
-                else None
-            )
-            replay = Phase2SubgoalReplay(
-                buf_path,
-                num_seeds=_num_seeds,
-                schedule_mode=str(_sched),
-                episodes_per_seed=_eps_per,
-            )
+            replay = Phase2SubgoalReplay(buf_path)
         except Exception as e:
             print(f"[Method3 phase2] subgoal replay 생성 실패: {e}")
             import traceback; traceback.print_exc()
             return
         self._phase2_subgoal_replay = replay
-        # 매 set_episode 호출을 session-level jsonl 에 기록 — TeeLogger 범위 밖에서
-        # 일어나는 호출도 누락 없이 RCA. forward_log 캡처와 무관.
-        try:
-            _trace = Path(session_dir) / "phase2_subgoal_replay_trace.jsonl"
-            replay.set_trace_file(str(_trace))
-            print(f"[Method3 phase2] subgoal replay trace → {_trace}")
-        except Exception as _e:
-            print(f"[Method3 phase2] subgoal replay trace bind 실패: {_e}")
         print(f"[Method3 phase2] subgoal replay READY — "
-              f"{replay.n_episodes()} episodes 기록 (seed-aware rotation)")
+              f"{replay.n_episodes()} episodes 기록 (episode 별 cursor replay)")
         # _skills 가 이미 있으면 즉시 부착; 아직 lazy-init 전이면 _create_skills
         # 의 retro-attach 가 부착한다.
         self._attach_phase2_subgoal_replay()
@@ -1589,10 +1568,7 @@ class ForwardAndResetPipeline(BasePipeline):
                 print(f"[Method3 phase2] selector failed: {e} — RNG fallback")
                 return None
 
-            # Verbose log — client-side local selector 결과 (grpc 모드에선 거의
-            # 안 도는 dead path). grpc_planner_adapter 의 라벨과 일관성 유지:
-            #   accepted=True  → TRUE (bold green)
-            #   accepted=False → FALSE (bold yellow) + 다음 줄 reason
+            # Verbose log — client 측에서도 paradigm 의 실 작동 확인 가능.
             try:
                 eligible = list(getattr(result, "eligible_indices", []) or [])
                 u_vla = getattr(result, "u_vla_chosen", None)
@@ -1600,31 +1576,10 @@ class ForwardAndResetPipeline(BasePipeline):
                 _r = (f"ΔH_A={rep.delta_h_a:.3f}, ΔH_A|S={rep.delta_h_a_given_s:.3f}, "
                       f"M̃_MI={rep.q2_norm:+.2f}, U_VLA={rep.u_vla:.3f}"
                       if rep is not None else "no report")
-                _G = "\033[1;92m"; _Y = "\033[1;93m"; _DIM_Y = "\033[93m"; _R = "\033[0m"
-                if result.accepted:
-                    _label = f"{_G}TRUE{_R}"
-                    _reason_line = ""
-                else:
-                    _label = f"{_Y}FALSE{_R}"
-                    # reason — under 비율 + eligible 0 분기
-                    _n_under = sum(1 for r in result.reports
-                                   if getattr(r, "under_covered", False)) if result.reports else 0
-                    _K = len(p2_cands)
-                    if _n_under == _K:
-                        _why = (f"all {_K} candidates under-covered "
-                                f"(buffer never observed this region) "
-                                f"→ eligible=0, argmax M_MI fallback")
-                    elif len(eligible) == 0:
-                        _why = (f"eligible=0 (under={_n_under}/{_K}, no candidate "
-                                f"satisfies M̃_MI ≥ τ_MI) → argmax M_MI fallback")
-                    else:
-                        _why = (f"chosen #{result.chosen_index} outside eligible "
-                                f"(under_covered or reject)")
-                    _reason_line = f"\n  {_DIM_Y}└─ reason: {_why}{_R}"
                 print(
                     f"[Phase2-Selection] cands={len(p2_cands)} eligible={len(eligible)} "
-                    f"chosen=#{result.chosen_index} {_label} "
-                    f"u_vla_chosen={u_vla} | {_r}{_reason_line}"
+                    f"chosen=#{result.chosen_index} accepted={result.accepted} "
+                    f"u_vla_chosen={u_vla} | {_r}"
                 )
             except Exception as e:
                 print(f"[Phase2-Selection] verbose log failed: {e}")
@@ -1671,6 +1626,21 @@ class ForwardAndResetPipeline(BasePipeline):
                 )
         except Exception as e:
             print(f"[Perturbation] subgoal buffer persist skipped: {e}")
+        # reset buffer 도 영속화 (forward 와 분리). reset flush 마다 save 되지만
+        # 마지막 미flush staging 대비 + 일관성 위해 teardown 에서도 한 번 더.
+        _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+        if _reset_buf is not None:
+            try:
+                _reset_buf.save()
+                _rfp = _reset_buf.file_path()
+                if _rfp is not None:
+                    print(
+                        f"[Perturbation] reset subgoal buffer saved → {_rfp} "
+                        f"({_reset_buf.total_size()} entries over "
+                        f"{len(_reset_buf.skill_ids())} skills)"
+                    )
+            except Exception as e:
+                print(f"[Perturbation] reset subgoal buffer persist skipped: {e}")
         self._subgoal_selector = None
         if hasattr(self, "_skills") and self._skills is not None:
             try:
@@ -2282,25 +2252,12 @@ class ForwardAndResetPipeline(BasePipeline):
 
         # Phase2 — episode 별 Phase1 도달 subgoal replay 컨텍스트 전환.
         # current_episode 는 episode 루프가 이 호출 직전에 설정한다 → episode_NN
-        # 의 기록 subgoal 로 replay 커서를 리셋한다. seed_index 도 함께 전달해
-        # 같은 seed 의 Phase1 episode 만 replay (seed-aware) — approach 와 pick
-        # descent 의 seed-mismatch 방지.
+        # 의 기록 subgoal 로 replay 커서를 리셋한다.
         _replay = getattr(self, "_phase2_subgoal_replay", None)
-        # 진단 — replay 가 None 이면 set_episode 가 아예 호출 안 됨을 가시화.
-        print(
-            f"[Method3 phase2] _seed_episode_perturbation: "
-            f"current_episode={getattr(self, 'current_episode', 'MISSING')} "
-            f"_current_batch_index={getattr(self, '_current_batch_index', 'MISSING')} "
-            f"_phase2_subgoal_replay={'PRESENT' if _replay is not None else 'NONE (set_episode skip)'}"
-        )
         if _replay is not None:
             try:
                 from method3.episode_lifecycle import episode_id as _mk_ep_id
-                _seed_idx = int(getattr(self, "_current_batch_index", -1))
-                _replay.set_episode(
-                    _mk_ep_id(int(self.current_episode)),
-                    seed_index=_seed_idx,
-                )
+                _replay.set_episode(_mk_ep_id(int(self.current_episode)))
             except Exception as _e:
                 print(f"[Method3 phase2] subgoal replay set_episode 실패: {_e}")
 
@@ -3699,13 +3656,7 @@ class ForwardAndResetPipeline(BasePipeline):
                             from method3.episode_lifecycle import episode_id as _mk_ep_id
                             _ep_n = getattr(self, "current_episode", None)
                             _ep_id = _mk_ep_id(_ep_n) if _ep_n else ""
-                            # 0-based seed_index — Phase2SubgoalReplay 가 같은 seed 의
-                            # Phase1 episode 만 replay 하도록 anchor (cross-seed mismatch
-                            # 방지). episode loop 가 직전 line 에서 set 한 값.
-                            _seed_idx = int(getattr(self, "_current_batch_index", -1))
-                            _subgoal_sel.flush_episode(
-                                episode_id=_ep_id, seed_index=_seed_idx,
-                            )
+                            _subgoal_sel.flush_episode(episode_id=_ep_id)
                         else:
                             _subgoal_sel.discard_episode()
                     except Exception as _e:
@@ -4068,6 +4019,32 @@ class ForwardAndResetPipeline(BasePipeline):
                     rj_pred = reset_judge_result.get('prediction', 'UNCERTAIN')
                     pred_color = GREEN if rj_pred == "TRUE" else RED if rj_pred == "FALSE" else YELLOW
                     print(f"  Prediction: {pred_color}{rj_pred}{RESET}")
+
+                    # reset 동작의 staged subgoal 을 *reset 전용* buffer 에 commit.
+                    # forward flush(judge 직후)가 이미 _pending 을 비웠으므로 여기
+                    # _pending 에는 reset phase staging 만 남아 있다. flush 동안만
+                    # selector.buffer 를 reset buffer 로 swap → subgoal_buffer_reset.npz
+                    # 에 저장. reset judge TRUE 면 commit, 아니면 discard(둘 다 _pending
+                    # clear). enabled_reset=false 면 _subgoal_buffer_reset=None → skip
+                    # (reset 중 selector detach 라 staging 자체가 없음).
+                    _subgoal_sel = getattr(self, "_subgoal_selector", None)
+                    _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+                    if _subgoal_sel is not None and _reset_buf is not None:
+                        _orig_buf = _subgoal_sel.buffer
+                        _subgoal_sel.buffer = _reset_buf
+                        try:
+                            if rj_pred == "TRUE":
+                                from method3.episode_lifecycle import episode_id as _mk_ep_id
+                                _ep_n = getattr(self, "current_episode", None)
+                                _ep_id = _mk_ep_id(_ep_n) if _ep_n else ""
+                                _subgoal_sel.flush_episode(episode_id=_ep_id)
+                            else:
+                                _subgoal_sel.discard_episode()
+                        except Exception as _e:
+                            print(f"[Perturbation] reset subgoal buffer flush skipped: {_e}")
+                        finally:
+                            _subgoal_sel.buffer = _orig_buf
+
                     rj_reasoning = reset_judge_result.get('reasoning', '')
                     if rj_reasoning:
                         reasoning_preview = rj_reasoning[:200]
@@ -5028,6 +5005,11 @@ class ForwardAndResetPipeline(BasePipeline):
 
         현재 물체 위치를 검출하고, target_positions로 이동하는 Reset 코드를 생성/실행.
         """
+        # Seed-restore is reset-like (no dataset recording) — mark the phase so the
+        # EE-trace logger (records only while current_phase == "Forward") skips the
+        # restore motion. run() flips it back to "Forward" at the next episode.
+        self.current_phase = "Reset"
+
         CYAN = "\033[96m"
         GREEN = "\033[92m"
         RED = "\033[91m"
@@ -5537,6 +5519,7 @@ class ForwardAndResetPipeline(BasePipeline):
         visualize_detection: bool = False,
         save_dir: Optional[str] = None,
         skip_reset: bool = False,
+        skip_restore: bool = False,
     ) -> Dict:
         """Resume: 이전 세션의 미완료 배치만 골라서 재시도.
 
@@ -5701,7 +5684,10 @@ class ForwardAndResetPipeline(BasePipeline):
             if seed_positions[first_incomplete] is None and first_incomplete > 0:
                 print(f"\n{MAGENTA}{BOLD}  Generating seed_{first_incomplete+1}...{RESET}")
                 seed_positions[first_incomplete] = self._generate_seed_positions(session_dir, first_incomplete)
-            if seed_positions[first_incomplete] is not None:
+            if skip_restore:
+                print(f"\n{YELLOW}  [Resume] --skip-restore — physical restore skipped. "
+                      f"Workspace must already be in correct state.{RESET}")
+            elif seed_positions[first_incomplete] is not None:
                 print(f"\n{CYAN}{BOLD}  Restoring to seed_{first_incomplete+1}...{RESET}")
                 self._restore_to_seed(seed_positions[first_incomplete], instruction, detection_timeout)
             else:
@@ -5910,6 +5896,15 @@ def main():
     )
 
     parser.add_argument(
+        "--skip-restore",
+        action="store_true",
+        default=False,
+        help="Resume 시 물리적 seed restore (_restore_to_seed) 를 skip. "
+             "워크스페이스가 이미 정상이거나 수동으로 정리해 둔 경우 사용. "
+             "fresh session 에는 영향 없음."
+    )
+
+    parser.add_argument(
         "--save", "-s",
         type=str,
         default="results",
@@ -6090,9 +6085,33 @@ def main():
 
     args = parser.parse_args()
 
+    # Live side-by-side camera preview — env-driven, non-intrusive.
+    # RecordingContext._async_capture 가 cycle 시작 시 init 되면 그때부터 frame
+    # polling 시작. cycle 종료 시 atexit 로 자동 stop.
+    if os.environ.get("LIVE_PREVIEW_ENABLED", "").lower() == "true":
+        try:
+            from record_dataset.live_preview import LivePreviewWindow
+            _cams = [
+                c.strip()
+                for c in os.environ.get("LIVE_PREVIEW_CAMERAS", "top,left_wrist").split(",")
+                if c.strip()
+            ]
+            _live_preview = LivePreviewWindow(
+                camera_names=_cams,
+                fps=float(os.environ.get("LIVE_PREVIEW_FPS", "10")),
+                scale=float(os.environ.get("LIVE_PREVIEW_SCALE", "1.0")),
+            )
+            _live_preview.start()
+            import atexit as _atexit
+            _atexit.register(_live_preview.stop)
+        except Exception as _e:
+            print(f"  [LivePreview] init failed: {_e}", flush=True)
+
     # 서버 모드 설정 (환경변수로 전달)
     if args.use_server:
-        import os
+        # NOTE: `os` is imported at module top (line 24). A function-local
+        # `import os` here would make `os` local to main() for the WHOLE scope,
+        # breaking the earlier os.environ.get() calls (UnboundLocalError).
         os.environ["USE_LLM_SERVER"] = "1"
         os.environ["USE_VLM_SERVER"] = "1"  # Judge용 VLM 서버 모드 활성화
         # CodeGen LLM 서버 설정
@@ -6165,8 +6184,32 @@ def main():
             detect_model=args.detect_model,
             resetspace_per_robot=resetspace_per_robot,
             recording_config=args.recording_config,
-            method3_phase=args.phase,
         )
+
+    # Live 3D EE-trajectory trace — env-driven, non-intrusive (mirrors LivePreview).
+    # Wired AFTER pipeline construction because the poller reads pipeline state
+    # (_latest_robot_state / current_episode / current_phase). Single-arm only.
+    if os.environ.get("EE_TRACE_ENABLED", "").lower() == "true":
+        if len(robot_ids) == 1 and hasattr(pipeline, "_latest_robot_state"):
+            try:
+                from record_dataset.live_ee_trace import LiveEETraceWindow
+                _ee_trace = LiveEETraceWindow(
+                    pipeline=pipeline,
+                    robot_id=robot_ids[0],
+                    fps=float(os.environ.get("EE_TRACE_FPS", "15")),
+                    npz_path=os.environ.get("EE_TRACE_NPZ") or None,
+                    rrd_path=os.environ.get("EE_TRACE_RRD") or None,
+                    spawn=os.environ.get("EE_TRACE_SPAWN", "true").lower() == "true",
+                    max_speed_mps=float(os.environ.get("EE_TRACE_MAX_SPEED", "2.0")),
+                    max_jump_m=float(os.environ.get("EE_TRACE_MAX_JUMP", "0.08")),
+                )
+                _ee_trace.start()
+                import atexit as _atexit
+                _atexit.register(_ee_trace.stop)
+            except Exception as _e:
+                print(f"  [EETrace] init failed: {_e}", flush=True)
+        else:
+            print("  [EETrace] skipped — single-arm pipeline required", flush=True)
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기
     if args.resume:
@@ -6179,6 +6222,7 @@ def main():
             visualize_detection=args.visualize_detection,
             save_dir=args.save,
             skip_reset=args.skip_reset,
+            skip_restore=args.skip_restore,
         )
     else:
         all_results = pipeline.run_multiple_episodes(

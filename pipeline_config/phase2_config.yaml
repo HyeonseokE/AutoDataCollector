@@ -18,10 +18,10 @@ skill_planner_transport:
   mode: grpc                     # disabled | grpc | local
 
 # --- frozen VLA encoder + Phase1 raw dataset (Phase2 시작 시 P_phase1 로드/구축) ---
-phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_20260525_135137/checkpoints/006200/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
+phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_visualize_phase1_20260604_134803/checkpoints/000350/pretrained_model"  # DCT-tuned ckpt (repo-relative — local/remote portable)
 
 # phase1_dataset_path: Phase1 raw dataset. LeRobot v3.0 format.
-phase1_dataset_path: "CoRL2026-CSI/table2/sort_ours_100_table1"
+phase1_dataset_path: "CoRL2026-CSI/visualize_phase1_"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
 budget: 100                    # B — 전체 acquisition episode 수
@@ -53,7 +53,7 @@ mi_selection:
   #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
   # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
-  selection_mode: Qmed
+  selection_mode: Q3
   # ─────────────────────────────────────────────────────────────────────────
   k_nn_a: 5                    # §8 action-space kNN 의 k
   q_quantile: 0.5              # §8 ΔH_A top-quantile 비율
@@ -134,6 +134,9 @@ skill_perturbation:
 
 # --- re-embedding (§6) ---
 reembedding:
+  # P_phase1 build 의 sidecar parquet (repo-relative). method3.dct.build_skill_dct 산물.
+  # build_or_load_phase1_vector_db 가 이 path 를 읽는다 (새 paradigm — 옛 selector.skill_dct_parquet 위치에서 reembedding 으로 이동).
+  skill_dct_parquet: "results/skill_dct/visualize_phase1_.parquet"
   skip_invalid: false          # true → validity_flag=False entry 건너뜀
   show_progress: true          # tqdm progress bar (false → 무음)
   frame_stride: 1              # 매 N번째 entry 만 re-embed (1 = spec 정석/전체, 기본).
@@ -212,7 +215,7 @@ selector:
   action_horizon: 50              # H — spec §7.3, smolvla chunk_size 와 일치
   max_T_eval: null                # 옵션 — null=모든 시점 평가 (spec 직역).
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
-  skill_dct_parquet: "results/skill_dct/sort_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
+  skill_dct_parquet: "results/skill_dct/visualize_phase1_.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
 
 # --- server-local SkillVectorDB 영속화 ---
@@ -244,13 +247,13 @@ remote:
   # [필수] 원격 서버 운영
   # task/sort 전용 worktree — pnp 와 git 충돌 회피 (한 번 setup:
   #   ssh h100 'cd /home/csiwoo/CORL2026/AutoDataCollector && git worktree add ../AutoDataCollector-sort task/sort')
-  project_path: "/home/csiwoo/CORL2026/AutoDataCollector-sort"
+  project_path: "/home/csiwoo/CORL2026/AutoDataCollector"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 0                              # sort 전용 GPU 0 (pnp/open_drawer 가 GPU 2 점유 OOM 회피)
-  tmux_session: "phase2_server_sort"     # task/sort branch — pnp 머신과 분리
+  gpu_id: 3                              # visualize_phase1 전용 GPU 3 (sort=0, pnp/open_drawer=2, train_visualize=0 → GPU 3 격리)
+  tmux_session: "phase2_server_visualize_phase1"     # visualize_phase1 task — 다른 task server 와 분리
 
   # [선택] 동작 옵션
-  git_pull_before_start: true
+  git_pull_before_start: false   # H100 측 AutoDataCollector-sort 가 git repo 아님 (rsync directory) — git pull 시도 시 fatal. code sync 는 별도 rsync 로.
   ready_timeout_s: 360                   # smolvla 부팅 1~2분, pi05_base 2~5분 → 여유 360s
 
   # NVIDIA driver kernel/user-space mismatch workaround.

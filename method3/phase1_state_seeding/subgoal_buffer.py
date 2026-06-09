@@ -89,18 +89,6 @@ def _safe_skill_name(skill_id) -> str:
     return re.sub(r"[^0-9A-Za-z._-]", "_", str(skill_id))
 
 
-def skill_ordinal(skill_id) -> int:
-    """``skill_NN`` 의 숫자 부분 추출 — Phase1SubgoalSelector 가 commit 시
-    ``skill_0, skill_1, ..., skill_N`` 순서대로 stamp 하므로 이 값이 *episode
-    안 호출 순서*. ``skill_ids()`` 가 *string sort* (``skill_10 < skill_2``)
-    인 함정을 피하기 위해 *모든 caller* 가 이 helper 로 정렬할 것을 권장.
-
-    NN 매치 실패 시 매우 큰 값 (목록 말미로 정렬). 안전한 fallback.
-    """
-    m = re.search(r"(\d+)", str(skill_id))
-    return int(m.group(1)) if m else 10 ** 9
-
-
 def _as_npz_path(path: str | Path) -> Path:
     """버퍼 파일 경로가 ``.npz`` 확장자를 갖도록 정규화한다.
 
@@ -138,11 +126,6 @@ class SubgoalBufferEntry:
     phase: str = "phase1"
     natural_language: str = ""           # metadata — skill.natural_language
     skill_type: str = ""                 # metadata — skill.type
-    # round_robin/seed_major schedule 의 0-based seed index. -1 = unknown
-    # (legacy buffer 또는 호출부가 모를 때). Phase2SubgoalReplay 가 같은 seed
-    # 의 Phase1 episode 만 replay 하도록 anchor — 이 필드가 없으면 cross-seed
-    # mismatch 가 발생한다 (final_method3_spec/results/RCA 참고).
-    seed_index: int = -1
 
 
 @dataclass
@@ -325,8 +308,6 @@ class SubgoalBuffer:
                 [(e.start_t, e.end_t) for e in entries], dtype=np.int64)
             arrays[f"{s}::nl"] = np.array([e.natural_language for e in entries])
             arrays[f"{s}::skilltype"] = np.array([e.skill_type for e in entries])
-            arrays[f"{s}::seedidx"] = np.array(
-                [e.seed_index for e in entries], dtype=np.int64)
         if not arrays:
             return
         self._file.parent.mkdir(parents=True, exist_ok=True)
@@ -341,16 +322,7 @@ class SubgoalBuffer:
         if self._file is None or not self._file.exists():
             return
         with np.load(self._file, allow_pickle=False) as data:
-            # *호출 순서* (skill_0, skill_1, ..., skill_N) 로 정렬해 self._skills
-            # dict insert order 를 보존한다. 옛 코드의 ``sorted({...})`` (string
-            # sort) 는 ``skill_10 < skill_2`` 함정 — type-aware lookup 의 매핑
-            # 순서가 호출 순서와 어긋나 lift/move 가 다른 object 로 향하던
-            # RCA 의 *근본 원인* 이었다. ``skill_ordinal`` helper 로 numeric
-            # sort 하여 모든 caller 가 일관된 순서를 보게 한다.
-            skills = sorted(
-                {m.split("::", 1)[0] for m in data.files if "::" in m},
-                key=skill_ordinal,
-            )
+            skills = sorted({m.split("::", 1)[0] for m in data.files if "::" in m})
             for s in skills:
                 if f"{s}::key" not in data.files:
                     continue
@@ -360,10 +332,9 @@ class SubgoalBuffer:
                 endlen = data[f"{s}::endlen"]
                 episodes = data[f"{s}::episode"]
                 span = data[f"{s}::span"]
-                # nl/skilltype/seedidx 는 구버전 npz 에 없을 수 있음 → fallback.
+                # nl/skilltype 은 구버전 npz 에 없을 수 있음 → fallback "".
                 nls = data[f"{s}::nl"] if f"{s}::nl" in data.files else None
                 stypes = data[f"{s}::skilltype"] if f"{s}::skilltype" in data.files else None
-                seedidxs = data[f"{s}::seedidx"] if f"{s}::seedidx" in data.files else None
                 offsets = np.concatenate([[0], np.cumsum(endlen)])
                 entries: list[SubgoalBufferEntry] = []
                 for i in range(keys.shape[0]):
@@ -378,6 +349,5 @@ class SubgoalBuffer:
                         end_t=int(span[i, 1]),
                         natural_language=(str(nls[i]) if nls is not None else ""),
                         skill_type=(str(stypes[i]) if stypes is not None else ""),
-                        seed_index=(int(seedidxs[i]) if seedidxs is not None else -1),
                     ))
                 self._skills[s] = entries

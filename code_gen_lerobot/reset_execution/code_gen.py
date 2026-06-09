@@ -939,6 +939,14 @@ def lerobot_reset_code_gen_multi_turn(
         strat = strategy_by_label.get(label)
         if strat and strat.get("needs_manipulation") is False:
             info["is_obstacle"] = True
+        # Forward 의 is_obstacle 정보 강제 전파 (placement reference 보존).
+        # reset 의 VLM 가 *task instruction* 만 보고 placement reference 를
+        # manipulated 로 잘못 분류하는 경우가 잦음 — forward 의 *first_episode_positions*
+        # (= original_positions 인자) 에 보존된 is_obstacle 가 SoT.
+        if isinstance(original_positions, dict):
+            orig = original_positions.get(label)
+            if isinstance(orig, dict) and orig.get("is_obstacle"):
+                info["is_obstacle"] = True
         # 디버그 표시용 grippable 플래그 — classify_objects 와 동일 정책 (is_obstacle 부정).
         info["grippable"] = not info.get("is_obstacle", False)
 

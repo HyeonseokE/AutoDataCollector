@@ -118,9 +118,6 @@ class _PendingMove:
     end_t: int
     natural_language: str = ""
     skill_type: str = ""
-    # round_robin/seed_major 의 0-based seed index. -1 = unknown — flush_episode
-    # 의 seed_index 인자가 우선이라 보통 비워둬도 된다 (호출부 호환용).
-    seed_index: int = -1
 
 
 class Phase1SubgoalSelector:
@@ -525,7 +522,6 @@ class Phase1SubgoalSelector:
         end_t: int = -1,
         natural_language: str = "",
         skill_type: str = "",
-        seed_index: int = -1,
     ) -> None:
         """실행된 transit move 를 episode pending 에 staging 한다 (문서 §5.5).
 
@@ -550,7 +546,6 @@ class Phase1SubgoalSelector:
             end_t=int(end_t),
             natural_language=str(natural_language),
             skill_type=str(skill_type),
-            seed_index=int(seed_index),
         ))
         # staging 요약 — 항상 초록색으로 간단히 출력.
         _mv = self._pending[-1]
@@ -562,7 +557,7 @@ class Phase1SubgoalSelector:
             f"(episode pending={len(self._pending)}){self._BUF_END}"
         )
 
-    def flush_episode(self, episode_id: str = "", seed_index: int = -1) -> None:
+    def flush_episode(self, episode_id: str = "") -> None:
         """episode TRUE 판정 → staged subgoal 들을 buffer 에 commit + 영속화 (문서 §5.5).
 
         각 staged move 에 대해 canonical trajectory 의 T_end descriptor 평균
@@ -576,10 +571,6 @@ class Phase1SubgoalSelector:
                 entry 의 ``episode_id`` 를 이 값으로 stamp 한다 (episode lifecycle —
                 나중에 episode 단위로 buffer 를 정리/재취득할 수 있도록). 비워두면
                 staging 시점의 ``_PendingMove.episode_id`` 를 그대로 쓴다.
-            seed_index: round_robin/seed_major schedule 의 0-based seed index.
-                >= 0 이면 commit 되는 모든 entry 에 이 값을 stamp — Phase2SubgoalReplay
-                가 같은 seed 의 Phase1 episode 만 replay 하도록 anchor. -1 이면
-                staging 시점의 ``_PendingMove.seed_index`` 그대로.
         """
         if not self._pending:
             return
@@ -598,7 +589,6 @@ class Phase1SubgoalSelector:
                 phase="phase1",
                 natural_language=mv.natural_language,
                 skill_type=mv.skill_type,
-                seed_index=(int(seed_index) if seed_index >= 0 else mv.seed_index),
             ))
         n = len(self._pending)
         self._pending.clear()

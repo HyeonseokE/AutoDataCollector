@@ -30,26 +30,37 @@ ROBOT_IDS=(4)
 #   phase1 — Phase1 buffer-aware subgoal seeding (default).
 #   phase2 — Phase2 MI-based selection. P_phase1 vector DB 는 캐시 hit 면 그대로
 # ============================================================
-PHASE="phase2"
+PHASE="phase1"
 
 ### ==================== [single arm task] ==================
 ## pick and place
-INSTRUCTION="pick up the red block and place it on the blue dish"
-RESET_INSTRUCTION=""
+# INSTRUCTION="pick up the red block and place it on the blue dish"
+# RESET_INSTRUCTION=""
+
+## close the pot
+# INSTRUCTION="Close the pot."
+# RESET_INSTRUCTION="Open the pot."
+
+## open the pot
+INSTRUCTION="Lift the lid off the pot and place it at the middle of the top-left side of workspace."
+RESET_INSTRUCTION="Place the lid on the pot."
 
 ## stack
 # INSTRUCTION="Stack red, green, and blue blocks on the blue dish from bottom to top."
 # RESET_INSTRUCTION=""
 
+## sort
+# INSTRUCTION="Sort each colored block onto the plate of the matching color."
+# RESET_INSTRUCTION="remove every colored block from the plates."
 
 # [필수] 에피소드 반복 횟수
-NUM_EPISODES=100  # 30→100 확장 (2026-05-20 마이그레이션). 기존 30 episode 는 seed 당 10 slot 의 0..2 위치로 재배치됨 — scripts/migrate_session_episodes_per_seed.py 참고
-NUM_RANDOM_SEEDS=20  # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
+NUM_EPISODES=20  # phase1 10ep + phase2 10ep 합 (visualize_phase1_ cycle)
+NUM_RANDOM_SEEDS=1  # 배치 수 (1=초기 위치 유지, N>1=N종류 랜덤 배치, 에피소드를 N등분)
 
-# [선택] 로봇별 reset 공간 제약 (all, top-left, top-right, bottom-left, bottom-right)
+# [선택] 로봇별 reset 공간 제약 (all, all_wo_center, top-left, top-right, bottom-left, bottom-right)
 # 로봇 순서대로 지정. 예: 단일 (top-left), 듀얼 (top-left top-right)
 # all: 워크스페이스 전역, top-left 등: 테이블 4분면 중 해당 영역 ∩ 로봇 도달 범위
-RESETSPACE_PER_ROBOT=(top-left) 
+RESETSPACE_PER_ROBOT=(all) 
 
 # [필수] 결과 저장 경로
 SAVE_DIR="./results"
@@ -70,11 +81,51 @@ RECORD_DATASET=true
 # Phase2 cycle (PHASE="phase2") 은 *반드시* Phase1 session 을 이어받아야 한다 —
 # Phase2 episode 가 session/phase2/ 하위에 phase1 에 이어 쌓이고 phase1 의
 # seed_*_setup 을 재사용한다 (chain 이 episode_* → phase1/ 로 reorg 한 상태).
-RESUME_SESSION="./results/table6_quadrant/Q1"
+RESUME_SESSION=""
 # Table 6 Quadrant Validation — Q1 (Useful OOD) Phase2 수집.
 # Phase1 / seed_*_setup 은 session_20260523_013722 의 것을 symlink 공유 (fair).
 # 다른 quadrant 로 전환 시: results/table6_quadrant/Q{1,2,3,4} 중 선택.
 # 새 Phase1 cycle 시작 시: RESUME_SESSION="" 비움.
+
+# Skip restore 토글 — resume 모드에서만 의미. true 면 _restore_to_seed (물리적
+# robot 으로 seed 위치 복원) 단계를 skip 하고 바로 episode 루프 진입. 워크스페이스
+# 가 이미 정상이거나 사용자가 수동으로 정리해 둔 경우 사용.
+RESUME_SKIP_RESTORE=false
+
+# ============================================================
+# Live side-by-side camera preview (top + wrist concat in one cv2 window)
+# cycle 진행 중 RecordingContext._async_capture 의 latest frame 을 polling 해
+# 한 화면에 가로 concat 한다. Dataset 로깅 (episode 별 mp4) 와 무관.
+# LIVE_PREVIEW_ENABLED=true 로 활성, q 또는 Esc 키로 창 닫기.
+# ============================================================
+export LIVE_PREVIEW_ENABLED="${LIVE_PREVIEW_ENABLED:-true}"
+export LIVE_PREVIEW_CAMERAS="${LIVE_PREVIEW_CAMERAS:-top,left_wrist}"
+export LIVE_PREVIEW_FPS="${LIVE_PREVIEW_FPS:-10}"
+export LIVE_PREVIEW_SCALE="${LIVE_PREVIEW_SCALE:-1.0}"
+
+# ============================================================
+# Live 3D EE-trajectory trace (rerun) — forward 구간 EE (x,y,z) 를 3D 에
+# 실시간 누적, 에피소드마다 다른 색. 제어 경로 비침투 (read-only polling).
+# EE_TRACE_ENABLED=true 로 활성 → rerun 뷰어 창 자동 spawn.
+# 세션 종료 시 EE_TRACE_NPZ (미지정 시 <session_dir>/ee_trace.npz) 로 덤프 →
+# scripts/render_ee_trace_video.py 로 mp4/gif 렌더 가능.
+# URDF/calib 는 ROBOT_IDS[0] 로 자동 해석 (so101_robot<id>.urdf / robot<id>_calibration.json).
+# ============================================================
+# 따로 찍는 real-time 30fps front-view 와 싱크되도록 30Hz 로 로깅 → real-time 1x mp4.
+export EE_TRACE_ENABLED="${EE_TRACE_ENABLED:-true}"
+export EE_TRACE_FPS="${EE_TRACE_FPS:-30}"            # 로깅 폴링레이트 (front-view fps 와 일치 권장)
+export EE_TRACE_SPAWN="${EE_TRACE_SPAWN:-true}"
+export EE_TRACE_MAX_SPEED="${EE_TRACE_MAX_SPEED:-2.0}"  # 글리치 컷: EE 속도 임계(m/s) 초과 점 제거 (0=끔)
+export EE_TRACE_MAX_JUMP="${EE_TRACE_MAX_JUMP:-0.08}"   # 글리치 컷: last-good 대비 점프(m) 초과 + stuck/frozen read 제거 (0=끔)
+# export EE_TRACE_RRD="${EE_TRACE_RRD:-$SAVE_DIR/ee_trace.rrd}"   # 인터랙티브 replay 저장 시 주석 해제
+# export EE_TRACE_NPZ="${EE_TRACE_NPZ:-$SAVE_DIR/ee_trace.npz}"   # 명시 경로 지정 시 주석 해제
+# 파이프라인 종료(정상/Ctrl+C/에러) 시 ee_trace.npz → real-time mp4 자동 렌더 (EXIT trap).
+EE_TRACE_RENDER="${EE_TRACE_RENDER:-true}"          # false → 자동 렌더 끔 (npz 만 남김)
+EE_TRACE_RENDER_FPS="${EE_TRACE_RENDER_FPS:-30}"    # mp4 fps (front-view 와 동일하게)
+EE_TRACE_ROTATE_DEG="${EE_TRACE_ROTATE_DEG:-0}"     # 0=고정 시점(싱크/합성용 권장), >0=공전
+# 고정 시점: 카메라 eye(robot origin 기준 x y z) 에서 EE 초기 위치를 바라봄. 굵은 현재-EE 점.
+EE_TRACE_EYE="${EE_TRACE_EYE:-0 -0.05 0.15}"        # 카메라 위치 (3값, 공백 구분)
+EE_TRACE_HEAD_SIZE="${EE_TRACE_HEAD_SIZE:-110}"     # 현재 EE 강조 점 크기
 
 # ============================================================
 # Multi-turn LLM 코드 생성 설정
@@ -187,7 +238,79 @@ cleanup_tunnels() {
         fi
     done
 }
-trap cleanup_tunnels EXIT
+
+# 파이프라인 종료 시(정상 완료 / Ctrl+C / 에러 — 모두 EXIT trap 에서) 이번 run 의
+# ee_trace.npz 를 찾아 real-time(1x) mp4 로 자동 렌더한다. npz 는 파이썬이
+# atexit/증분으로 이미 저장하므로 여기서는 "그 파일 → 영상" 만 담당.
+# real-time 렌더는 세션이 길면 수 분~수십 분 걸리므로 백그라운드(detached)로 돌려
+# 터미널을 막지 않는다. mp4 는 렌더 완료 시 npz 옆에 나타난다.
+# 한 개 mp4 를 백그라운드 렌더 (true real-time). $1=output mp4,
+# $2=backdrop npz(회색 배경, "" 면 없음), 나머지($3...)=메인 입력 npz(컬러 누적).
+# EE_TRACE_EYE 는 3토큰이라 따옴표 없이 전개.
+_ee_render_one() {
+    local mp4="$1"; shift
+    local backdrop="$1"; shift
+    local log="${mp4%.mp4}.render.log"
+    local bd=()
+    [ -n "$backdrop" ] && [ -f "$backdrop" ] && bd=(--backdrop "$backdrop")
+    echo "[EETrace] 렌더 시작(백그라운드) → $mp4 (npz: $*, backdrop: ${backdrop:-none})"
+    nohup python scripts/render_ee_trace_video.py \
+        --npz "$@" --output "$mp4" "${bd[@]}" \
+        --realtime --fps "${EE_TRACE_RENDER_FPS:-30}" \
+        --rotate-deg "${EE_TRACE_ROTATE_DEG:-0}" \
+        --eye ${EE_TRACE_EYE:-0 -0.05 0.15} \
+        --head-size "${EE_TRACE_HEAD_SIZE:-110}" \
+        --max-speed "${EE_TRACE_MAX_SPEED:-2.0}" \
+        --max-jump "${EE_TRACE_MAX_JUMP:-0.08}" \
+        > "$log" 2>&1 &
+    disown 2>/dev/null || true
+}
+
+_render_ee_trace_on_exit() {
+    [ "${EE_TRACE_ENABLED:-}" = "true" ] || return 0
+    [ "${EE_TRACE_RENDER:-true}" = "true" ] || return 0
+
+    # ── Phase2 (resume) → 두 모드 mp4 생성 (둘 다 true real-time) ──
+    #   [1] phase2 단독:  <session>/phase2/ee_trace.mp4  (phase2 컬러 누적, front-view 싱크용)
+    #   [2] phase1 배경 + phase2: <session>/ee_trace_phase1plus2.mp4
+    #        phase1(1~10)을 회색 배경으로 깔고, 그 위에 phase2(11~20)를 컬러로 실시간 누적.
+    #        타임라인은 phase2 만 → 길이 ≈ phase2 실제 수집시간 (gap 압축 없음).
+    if [ "${PHASE:-}" = "phase2" ] && [ -n "${RESUME_SESSION:-}" ]; then
+        local p1="$RESUME_SESSION/ee_trace.npz"
+        local p2="$RESUME_SESSION/phase2/ee_trace.npz"
+        if [ ! -f "$p2" ]; then
+            echo "[EETrace] phase2 npz 없음 ($p2) — 렌더 건너뜀"
+            return 0
+        fi
+        _ee_render_one "$RESUME_SESSION/phase2/ee_trace.mp4" "" "$p2"                # 모드 [1]
+        if [ -f "$p1" ]; then
+            _ee_render_one "$RESUME_SESSION/ee_trace_phase1plus2.mp4" "$p1" "$p2"    # 모드 [2] (p1=배경)
+        else
+            echo "[EETrace] phase1 npz 없음 ($p1) — 누적(모드2) 건너뜀, 단독(모드1)만 생성"
+        fi
+        echo "[EETrace] (렌더는 종료 후에도 백그라운드로 계속됩니다)"
+        return 0
+    fi
+
+    # ── phase1 / 일반 단일 세션 ──
+    local npz="${EE_TRACE_NPZ:-}"
+    if [ -z "$npz" ]; then
+        npz="$(ls -t "$SAVE_DIR"/session_*/ee_trace.npz 2>/dev/null | head -1)"
+        if [ -z "$npz" ] && [ -n "${RESUME_SESSION:-}" ] && [ -f "$RESUME_SESSION/ee_trace.npz" ]; then
+            npz="$RESUME_SESSION/ee_trace.npz"
+        fi
+    fi
+    if [ -z "$npz" ] || [ ! -f "$npz" ]; then
+        echo "[EETrace] npz 없음 — mp4 렌더 건너뜀 (trace 가 비활성였거나 점이 없음)"
+        return 0
+    fi
+    _ee_render_one "${npz%.npz}.mp4" "" "$npz"
+    echo "[EETrace] (렌더는 종료 후에도 백그라운드로 계속됩니다)"
+}
+
+# 단일 EXIT 핸들러로 렌더 + 터널정리 (EXIT trap 은 하나만 유효 → 합쳐서 등록).
+_on_exit() { _render_ee_trace_on_exit; cleanup_tunnels; }
+trap _on_exit EXIT
 
 # ============================================================
 # Remote server VRAM 자동 해제 — default *keep* (server 재사용으로 90초 boot
@@ -351,6 +474,10 @@ fi
 
 if [ -n "$RESUME_SESSION" ]; then
     EXTRA_ARGS="$EXTRA_ARGS --resume $RESUME_SESSION"
+    if [ "$RESUME_SKIP_RESTORE" = "true" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --skip-restore"
+        echo "[Resume] skip-restore = true (physical seed restore 단계 SKIP)"
+    fi
 fi
 
 if [ ${#RESETSPACE_PER_ROBOT[@]} -gt 0 ]; then

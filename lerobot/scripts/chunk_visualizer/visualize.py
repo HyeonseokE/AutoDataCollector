@@ -183,6 +183,48 @@ def plot_ee_trajectory_3d(
     plt.close(fig)
 
 
+def plot_ee_trajectory_single_view(
+    ee_trajectories: list[np.ndarray],
+    output_path: str | None = None,
+    step_label_stride: int = 10,
+    elev: float = 31.4,
+    azim: float = -159.9,
+    title: str | None = None,
+):
+    """Plot EE trajectories from one fixed 3D viewpoint.
+
+    The default camera angles match the custom eye view used by
+    ``scripts/render_ee_trace_video.py --eye 0 -0.05 0.15`` for
+    ``results/session_20260604_131637/ee_trace.mp4``.
+    """
+    cmap = get_cmap("tab20", len(ee_trajectories))
+    initial_ee = ee_trajectories[0][0]
+    lo, hi, box_aspect = _compute_axis_limits(ee_trajectories)
+
+    fig = plt.figure(figsize=(8, 7), constrained_layout=True)
+    ax = fig.add_subplot(111, projection="3d")
+    _draw_trajectories_on_axis(
+        ax,
+        ee_trajectories,
+        cmap,
+        initial_ee,
+        lo,
+        hi,
+        box_aspect,
+        step_label_stride=step_label_stride,
+    )
+    ax.view_init(elev=elev, azim=azim)
+    ax.set_title(title or f"EE Trajectory — {len(ee_trajectories)} chunks")
+    ax.legend(loc="upper left", fontsize=8)
+
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved matching-view 3D trajectory figure to {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
 def _matplotlib_color_to_hex(rgba) -> str:
     """Convert an RGBA tuple (matplotlib cmap output) to a #rrggbb hex string."""
     r, g, b = (int(round(c * 255)) for c in rgba[:3])
@@ -407,6 +449,13 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None, help="Save figures to this directory instead of showing")
     parser.add_argument("--no-fk", action="store_true", help="Skip FK, only plot joint angles")
     parser.add_argument(
+        "--single-view",
+        action="store_true",
+        help="Also render a fixed-view EE trajectory image matching ee_trace.mp4 by default",
+    )
+    parser.add_argument("--view-elev", type=float, default=31.4, help="Single-view elevation angle")
+    parser.add_argument("--view-azim", type=float, default=-159.9, help="Single-view azimuth angle")
+    parser.add_argument(
         "--step-label-stride",
         type=int,
         default=1,
@@ -461,6 +510,16 @@ def main():
         plot_ee_trajectory_3d(
             ee_trajectories, output_path=ee_3d_out, step_label_stride=args.step_label_stride
         )
+        if args.single_view:
+            single_out = str(output_dir / "ee_trajectory_matching_view.png") if output_dir else None
+            plot_ee_trajectory_single_view(
+                ee_trajectories,
+                output_path=single_out,
+                step_label_stride=args.step_label_stride,
+                elev=args.view_elev,
+                azim=args.view_azim,
+                title=f"EE Trajectory — matching ee_trace.mp4 view ({args.view_elev:.1f}, {args.view_azim:.1f})",
+            )
         plot_ee_displacement(ee_trajectories, fps=data["fps"], output_path=ee_disp_out)
 
         if output_dir:

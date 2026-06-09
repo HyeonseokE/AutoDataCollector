@@ -298,11 +298,12 @@ root.mainloop()
 class PauseCameraWindow:
     """Small local preview window shown while the robot is parked."""
 
-    def __init__(self, robot: "RobotWrapper", camera: str, shutdown_event: Event, fps: float = 15.0):
+    def __init__(self, robot: "RobotWrapper", camera: str, shutdown_event: Event, fps: float = 15.0, scale: float = 1.0):
         self.robot = robot
         self.camera = camera
         self.shutdown_event = shutdown_event
         self.fps = fps
+        self.scale = float(scale)
         self.window_name = f"Pause stream: {camera}"
         self._stop_event = Event()
         self._thread: Thread | None = None
@@ -317,23 +318,34 @@ class PauseCameraWindow:
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread is not None:
-            self._thread.join(timeout=1.0)
-            self._thread = None
+            self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                logger.warning("[PAUSE_STREAM] Preview thread did not stop within timeout")
+            else:
+                self._thread = None
 
     def _select_frame(self, obs: dict) -> np.ndarray | None:
+        return self.select_camera_frame(obs, self.camera)
+
+    @staticmethod
+    def select_camera_frame(obs: dict, camera: str) -> np.ndarray | None:
+        """Shared helper — pick a camera frame from obs by name. Used by both
+        PauseCameraWindow (single-cam preview) and CameraVideoRecorder
+        (multi-cam mp4 logger).
+        """
         candidates = [
-            self.camera,
-            f"{OBS_IMAGES}.{self.camera}",
-            f"observation.images.{self.camera}",
+            camera,
+            f"{OBS_IMAGES}.{camera}",
+            f"observation.images.{camera}",
         ]
         for key in candidates:
             if key in obs:
-                return self._to_rgb(obs[key])
+                return PauseCameraWindow._to_rgb(obs[key])
 
-        suffix = f".{self.camera}"
+        suffix = f".{camera}"
         for key, value in obs.items():
-            if key.endswith(suffix) or key.endswith(f"images.{self.camera}"):
-                return self._to_rgb(value)
+            if key.endswith(suffix) or key.endswith(f"images.{camera}"):
+                return PauseCameraWindow._to_rgb(value)
         return None
 
     @staticmethod
@@ -357,14 +369,24 @@ class PauseCameraWindow:
         return frame.copy()
 
     def _run(self) -> None:
+        # Prefer the subprocess preview: OpenCV HighGUI/Qt windows are fragile
+        # when repeatedly created and destroyed from this background thread.
         try:
-            self._run_opencv()
+            self._run_tkinter()
         except Exception as exc:
-            logger.warning(f"[PAUSE_STREAM] OpenCV preview unavailable ({exc}); trying Tkinter subprocess")
+            logger.warning(f"[PAUSE_STREAM] Tkinter preview unavailable ({exc}); trying OpenCV preview")
             try:
-                self._run_tkinter()
-            except Exception as tk_exc:
-                logger.warning(f"[PAUSE_STREAM] Tkinter preview stopped ({tk_exc})")
+                self._run_opencv()
+            except Exception as cv_exc:
+                logger.warning(f"[PAUSE_STREAM] OpenCV preview stopped ({cv_exc})")
+
+    def _resize_for_display(self, frame: np.ndarray) -> np.ndarray:
+        if self.scale == 1.0:
+            return frame
+        import cv2
+
+        h, w = frame.shape[:2]
+        return cv2.resize(frame, (int(w * self.scale), int(h * self.scale)))
 
     def _run_opencv(self) -> None:
         import cv2
@@ -376,6 +398,7 @@ class PauseCameraWindow:
             obs = self.robot.get_observation()
             frame = self._select_frame(obs)
             if frame is not None:
+                frame = self._resize_for_display(frame)
                 if frame.ndim == 3:
                     frame = frame[..., ::-1]
                 cv2.imshow(self.window_name, frame)
@@ -407,6 +430,7 @@ class PauseCameraWindow:
                 obs = self.robot.get_observation()
                 frame = self._select_frame(obs)
                 if frame is not None:
+                    frame = self._resize_for_display(frame)
                     try:
                         payload = pickle.dumps(frame, protocol=pickle.HIGHEST_PROTOCOL)
                         assert process.stdin is not None
@@ -440,6 +464,245 @@ class PauseCameraWindow:
                     process.wait(timeout=1.0)
             if process.returncode not in (None, 0, -2):
                 logger.warning(f"[PAUSE_STREAM] Tkinter preview subprocess exited with code {process.returncode}")
+
+
+class CameraVideoRecorder:
+    """Background thread that records selected camera frames to per-cam **H.264 mp4**.
+
+    Independent from PauseCameraWindow — runs for the *entire* inference session
+    (not only Enter-park). Each camera gets its own ``<out_dir>/<cam>.mp4`` written
+    via an ``ffmpeg`` subprocess pipe (raw BGR → libx264 + +faststart) so the
+    resulting mp4 plays in VSCode / Chromium without post-processing.
+
+    Why ffmpeg pipe (not cv2.VideoWriter): OpenCV's conda build only exposes the
+    ``mp4v`` fourcc (= MPEG-4 part 2), which VSCode's Chromium player refuses.
+    H264/avc1 fourccs fall back to ``h264_v4l2m2m`` and fail without a V4L2
+    encoder. ffmpeg with libx264 sidesteps both issues.
+
+    Failure modes are non-fatal: a missing camera key just skips that frame,
+    a ffmpeg startup failure logs a warning and drops the camera.
+    """
+
+    def __init__(
+        self,
+        robot: "RobotWrapper",
+        cameras: list[str],
+        out_dir: Path,
+        fps: float,
+        shutdown_event: Event,
+    ):
+        self.robot = robot
+        self.cameras = list(cameras)
+        self.out_dir = Path(out_dir)
+        self.fps = max(float(fps), 1.0)
+        self.shutdown_event = shutdown_event
+        self._stop_event = Event()
+        self._thread: Thread | None = None
+        # cam → subprocess.Popen of ffmpeg (stdin = raw BGR pipe)
+        self.encoders: dict[str, object] = {}
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._stop_event.clear()
+        self._thread = Thread(target=self._run, daemon=True, name="CameraVideoRecorder")
+        self._thread.start()
+        logger.info(
+            f"[CameraLog] recording cameras={self.cameras} @ {self.fps}fps → {self.out_dir}  "
+            f"[H.264 via ffmpeg pipe]"
+        )
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+        # Close stdin → ffmpeg sees EOF and writes moov atom (+faststart=front).
+        for cam, proc in list(self.encoders.items()):
+            try:
+                if getattr(proc, "stdin", None) and not proc.stdin.closed:
+                    proc.stdin.close()
+            except Exception:
+                pass
+        # Wait for each ffmpeg to finalize the mp4.
+        finalized = 0
+        for cam, proc in list(self.encoders.items()):
+            try:
+                proc.wait(timeout=15)
+                finalized += 1
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        if self.encoders:
+            logger.info(f"[CameraLog] saved {finalized} video(s) in {self.out_dir}")
+        self.encoders = {}
+
+    def _run(self) -> None:
+        import shutil as _shutil
+        import subprocess
+        ffmpeg = _shutil.which("ffmpeg")
+        if ffmpeg is None:
+            logger.warning("[CameraLog] ffmpeg not found on PATH — recording disabled")
+            return
+        period = 1.0 / self.fps
+        while not self.shutdown_event.is_set() and not self._stop_event.is_set():
+            started = time.perf_counter()
+            try:
+                obs = self.robot.get_observation()
+                for cam in self.cameras:
+                    frame = PauseCameraWindow.select_camera_frame(obs, cam)
+                    if frame is None:
+                        continue
+                    # select_camera_frame returns RGB uint8 HxWx3 (or grayscale).
+                    # ffmpeg pipe expects BGR (or convert pix_fmt). Force 3-ch BGR.
+                    if frame.ndim != 3 or frame.shape[-1] != 3:
+                        continue
+                    bgr = np.ascontiguousarray(frame[..., ::-1])
+                    if cam not in self.encoders:
+                        h, w = bgr.shape[:2]
+                        path = self.out_dir / f"{cam}.mp4"
+                        cmd = [
+                            ffmpeg, "-y", "-v", "error",
+                            "-f", "rawvideo", "-pix_fmt", "bgr24",
+                            "-s", f"{w}x{h}", "-r", f"{self.fps}",
+                            "-i", "pipe:0",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                            "-pix_fmt", "yuv420p",
+                            "-movflags", "+faststart",
+                            "-an",
+                            str(path),
+                        ]
+                        try:
+                            proc = subprocess.Popen(
+                                cmd,
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[CameraLog] failed to start ffmpeg for {cam}: {e}")
+                            continue
+                        self.encoders[cam] = proc
+                        logger.info(f"[CameraLog] {cam} ({w}x{h}) → {path}")
+                    try:
+                        self.encoders[cam].stdin.write(bgr.tobytes())
+                    except (BrokenPipeError, ValueError, AttributeError):
+                        logger.warning(f"[CameraLog] {cam} ffmpeg pipe broken — dropping")
+                        try:
+                            self.encoders[cam].kill()
+                        except Exception:
+                            pass
+                        del self.encoders[cam]
+            except Exception as e:
+                logger.warning(f"[CameraLog] step error: {e}")
+            time.sleep(max(0.0, period - (time.perf_counter() - started)))
+
+
+# Module-level holders for FK-based pitch clamp resources (initialized once in main()).
+_pitch_kinematics = None
+_pitch_cal_lim = None
+
+
+def _setup_pitch_clamp(cfg: "RTCDemoConfig"):
+    """Init KinematicsEngine + CalibrationLimits for FK-based EE pitch clamp.
+    Returns (engine, cal_lim) or (None, None) on failure / disabled."""
+    if cfg.inference_pitch_max_deg is None:
+        return None, None
+    try:
+        from lerobot_cap.kinematics import KinematicsEngine, load_calibration_limits
+    except Exception as e:
+        logger.warning(f"[PitchClamp] lerobot_cap.kinematics import failed ({e}); disabled")
+        return None, None
+    try:
+        robot_id = getattr(cfg.robot, "id", "") or ""
+        m = re.search(r"robot\d+", robot_id)
+        robot_tag = m.group(0) if m else robot_id
+        repo_root = Path(__file__).resolve().parents[3]
+        urdf_candidates = [
+            repo_root / "assets" / "urdf" / f"{robot_id}.urdf",
+            repo_root / "assets" / "urdf" / f"so101_{robot_tag}.urdf",
+        ]
+        urdf_path = next((p for p in urdf_candidates if p.exists()), None)
+        if urdf_path is None:
+            logger.warning(f"[PitchClamp] URDF not found (tried {[str(p) for p in urdf_candidates]}); disabled")
+            return None, None
+        cal_dir = Path(cfg.robot.calibration_dir)
+        cal_candidates = [
+            cal_dir / f"{robot_id}.json",
+            cal_dir / f"{robot_tag}_calibration.json",
+        ]
+        cal_path = next((p for p in cal_candidates if p.exists()), None)
+        if cal_path is None:
+            logger.warning(f"[PitchClamp] calibration not found (tried {[str(p) for p in cal_candidates]}); disabled")
+            return None, None
+        ke = KinematicsEngine(str(urdf_path))
+        cal_lim = load_calibration_limits(str(cal_path))
+        logger.info(
+            f"[PitchClamp] enabled: max={cfg.inference_pitch_max_deg}° "
+            f"(URDF={urdf_path.name}, cal={cal_path.name})"
+        )
+        return ke, cal_lim
+    except Exception as e:
+        logger.warning(f"[PitchClamp] init failed ({e}); disabled")
+        return None, None
+
+
+def _clamp_action_pitch(action, cfg: "RTCDemoConfig"):
+    """Adjust action's wrist_flex.pos so that FK-computed EE pitch ≤ pitch_max_deg.
+    No-op if engine/cal_lim missing or pitch_max_deg None. Mutates and returns action.
+
+    Convention: pitch = arcsin(gripper_Z_world_z). 0 = horizontal, -π/2 = down.
+    ``inference_pitch_max_deg = -30`` forces gripper to tilt ≥30° below horizontal.
+    """
+    ke = _pitch_kinematics
+    cal_lim = _pitch_cal_lim
+    if ke is None or cal_lim is None or cfg.inference_pitch_max_deg is None:
+        return action
+    target = action
+    if isinstance(action, tuple) and len(action) > 0 and isinstance(action[0], dict):
+        target = action[0]
+    if not isinstance(target, dict):
+        return action
+    joint_names = cal_lim.joint_names
+    try:
+        normalized = np.array(
+            [float(target[f"{n}.pos"]) for n in joint_names if f"{n}.pos" in target],
+            dtype=float,
+        )
+    except Exception:
+        return action
+    if len(normalized) != len(joint_names):
+        return action  # missing a joint key
+    joints_rad = cal_lim.normalized_to_radians(normalized)
+    try:
+        pitch_rad = ke.get_gripper_pitch(joints_rad)
+    except Exception:
+        return action
+    pitch_deg = float(np.degrees(pitch_rad))
+    max_deg = float(cfg.inference_pitch_max_deg)
+    if pitch_deg <= max_deg:
+        return action
+    if "wrist_flex" not in joint_names:
+        return action
+    wf_idx = joint_names.index("wrist_flex")
+    # Sign relation (verified on so101_robot4): wrist_flex_rad ↑ → EE pitch ↓.
+    # Therefore to lower pitch by Δ deg, increase wrist_flex_rad by Δ rad (1:1).
+    joints_rad[wf_idx] += np.radians(pitch_deg - max_deg)
+    for _ in range(4):
+        try:
+            pitch_rad = ke.get_gripper_pitch(joints_rad)
+        except Exception:
+            break
+        pitch_deg = float(np.degrees(pitch_rad))
+        if pitch_deg <= max_deg + 0.3:  # 0.3° tolerance
+            break
+        joints_rad[wf_idx] += np.radians(pitch_deg - max_deg) * 0.7
+    new_normalized = cal_lim.radians_to_normalized(joints_rad)
+    target["wrist_flex.pos"] = float(new_normalized[wf_idx])
+    return action
 
 
 def resolve_free_state_path(cfg: "RTCDemoConfig") -> Path:
@@ -666,6 +929,43 @@ class RTCDemoConfig(HubMixin):
     pause_stream_fps: float = field(
         default=15.0,
         metadata={"help": "Preview window refresh rate"},
+    )
+    pause_stream_scale: float = field(
+        default=1.0,
+        metadata={"help": "Preview window upscale factor (e.g. 2.0 = 2x)"},
+    )
+
+    # Per-camera mp4 logger — independent from pause_stream. Runs for the whole
+    # inference session, writing one mp4 per camera (top.mp4, left_wrist.mp4, ...).
+    log_cameras_enabled: bool = field(
+        default=False,
+        metadata={"help": "Record per-camera mp4 videos during inference"},
+    )
+    log_cameras_dir: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Output directory for per-camera mp4s. Empty → auto "
+                "(./results/inference_cam_log_<timestamp>)"
+            )
+        },
+    )
+    log_cameras_fps: float = field(
+        default=30.0,
+        metadata={"help": "mp4 writer fps (separate from inference control fps)"},
+    )
+    log_cameras_names: str = field(
+        default="top,left_wrist",
+        metadata={"help": "Comma-separated camera names to record (e.g. top,left_wrist)"},
+    )
+
+    # ADC ``transit_pitch_max_deg`` 동등 — FK 로 EE pitch 계산 후 한계 초과 시
+    # wrist_flex 조정으로 강제 (1:1 + 4 iter refinement). 단위: degree.
+    # pitch convention: 0=horizontal, -90=down (gripper Z arcsin). 따라서
+    # ``-25`` = "gripper 가 horizontal 보다 최소 25° 아래" 강제.
+    inference_pitch_max_deg: float | None = field(
+        default=None,
+        metadata={"help": "Clamp gripper pitch to ≤ this deg via FK (ADC transit_pitch_max_deg equivalent)."},
     )
 
     def __post_init__(self):
@@ -1042,6 +1342,7 @@ def stop_and_infer_control(
                 smoothing_queue.last_action = action.clone()
                 action_dict = {key: action[i].item() for i, key in enumerate(action_keys)}
                 action_processed = robot_action_processor((action_dict, None))
+                action_processed = _clamp_action_pitch(action_processed, cfg)
                 robot.send_action(action_processed)
                 action_count += 1
                 dt_s = time.perf_counter() - started
@@ -1102,6 +1403,7 @@ def actor_control(
                 action = action.cpu()
                 action_dict = {key: action[i].item() for i, key in enumerate(robot.action_features())}
                 action_processed = robot_action_processor((action_dict, None))
+                action_processed = _clamp_action_pitch(action_processed, cfg)
                 robot.send_action(action_processed)
 
                 action_count += 1
@@ -1261,8 +1563,29 @@ def demo_cli(cfg: RTCDemoConfig):
             camera=cfg.pause_stream_camera,
             shutdown_event=shutdown_event,
             fps=cfg.pause_stream_fps,
+            scale=cfg.pause_stream_scale,
         )
         logger.info(f"[PAUSE_STREAM] Will show camera '{cfg.pause_stream_camera}' in a local window on Enter-park")
+
+    # FK-based EE pitch clamp (ADC transit_pitch_max_deg equivalent).
+    global _pitch_kinematics, _pitch_cal_lim
+    _pitch_kinematics, _pitch_cal_lim = _setup_pitch_clamp(cfg)
+
+    cam_recorder = None
+    if cfg.log_cameras_enabled:
+        _cam_list = [c.strip() for c in cfg.log_cameras_names.split(",") if c.strip()]
+        if not _cam_list:
+            logger.warning("[CameraLog] log_cameras_enabled=True but log_cameras_names empty — skipping")
+        else:
+            _out_dir = cfg.log_cameras_dir.strip() or f"./results/inference_cam_log_{int(time.time())}"
+            cam_recorder = CameraVideoRecorder(
+                robot=robot_wrapper,
+                cameras=_cam_list,
+                out_dir=Path(_out_dir),
+                fps=cfg.log_cameras_fps,
+                shutdown_event=shutdown_event,
+            )
+            cam_recorder.start()
 
     if cfg.stop_and_infer:
         logger.info("[MAIN] stop_and_infer=true: running sequential chunk mode")
@@ -1301,6 +1624,8 @@ def demo_cli(cfg: RTCDemoConfig):
             shutdown_event.set()
             if pause_stream is not None:
                 pause_stream.stop()
+            if cam_recorder is not None:
+                cam_recorder.stop()
             if keyboard_thread and keyboard_thread.is_alive():
                 keyboard_thread.join(timeout=2)
             robot.disconnect()
@@ -1383,6 +1708,11 @@ def demo_cli(cfg: RTCDemoConfig):
 
         # Signal shutdown
         shutdown_event.set()
+
+        if pause_stream is not None:
+            pause_stream.stop()
+        if cam_recorder is not None:
+            cam_recorder.stop()
 
         # Wait for threads to finish
         if get_actions_thread and get_actions_thread.is_alive():

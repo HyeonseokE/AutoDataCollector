@@ -1357,6 +1357,15 @@ class LeRobotSkills:
                 except Exception:
                     pass
 
+            # 런타임 table_depth 갱신 — legacy depth→z 환산(z=table_z+(table_depth
+            # -depth))이 캘리브 포인트 기준 테이블 depth 를 필요로 함. Charuco 는
+            # 자체 처리하므로 skip (hasattr 가드).
+            if (self.pix2robot is not None and depth_frame is not None
+                    and hasattr(self.pix2robot, "update_table_depth_from_frame")):
+                td = self.pix2robot.update_table_depth_from_frame(depth_frame)
+                if td is not None:
+                    self._log(f"  [detect_objects] table_depth(runtime) = {td:.3f}m (legacy depth→z)")
+
             if frame is None:
                 self._log("[detect_objects] Error: Cannot capture frame")
                 return {q: None for q in queries}

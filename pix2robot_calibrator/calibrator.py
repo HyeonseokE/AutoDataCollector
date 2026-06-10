@@ -71,6 +71,11 @@ class Pix2RobotCalibrator:
         # 캘리브레이션 결과
         self.homography: Optional[np.ndarray] = None  # 3x3
         self.table_z: Optional[float] = None
+        # 카메라→테이블 기준 depth (meters). 캘리브에 저장되지 않고 런타임에
+        # update_table_depth_from_frame() 으로 매 depth 프레임마다 갱신된다.
+        # 있으면 pixel_to_robot 이 z = table_z + (table_depth - depth_m) 로
+        # 물체 높이를 복원 (a6f29cc 에서 제거됐던 depth→z 환산 복원).
+        self.table_depth: Optional[float] = None
         self.error_stats: Optional[dict] = None
 
         # UI 상태
@@ -489,23 +494,67 @@ class Pix2RobotCalibrator:
         self, u: float, v: float, depth_m: Optional[float] = None,
     ) -> List[float]:
         """
-        호모그래피(u,v→x,y) + table_z → [x, y, z].
+        호모그래피(u,v→x,y) + z → [x, y, z].
 
-        z는 항상 table_z (수집한 로봇 z 평균) 사용. 물체 높이 추정은
-        지원하지 않음 — 테이블 평면 위 한 점만 변환한다.
+        x, y 는 테이블 평면 호모그래피로 변환. z 는:
+          • depth_m(픽셀 depth) 과 self.table_depth(런타임 테이블 기준 depth)
+            가 모두 있으면 물체 높이를 복원 →
+            z = table_z + (table_depth - depth_m)   (오버헤드 D435, 광축 ≈ 수직 가정)
+          • 둘 중 하나라도 없으면(또는 높이≤0) table_z 평면값으로 fallback.
+
+        table_depth 는 update_table_depth_from_frame() 으로 매 프레임 갱신해야
+        한다 (caller 가 depth_frame 을 줌). a6f29cc 에서 제거됐던 depth→z 환산을
+        런타임 table_depth 기반으로 복원한 것 — Charuco 의
+        z = table_z + (table_depth - depth) 공식과 일치.
 
         Args:
             u, v: 픽셀 좌표
-            depth_m: legacy 호환용 인자. 값은 무시됨. Pix2RobotCharuco에는
-                depth 기반 z 추정이 있으므로 polymorphic 호출 코드 호환을
-                위해 시그니처만 유지.
+            depth_m: 해당 픽셀 depth (meters, 카메라→물체). None 이면 평면 fallback.
         """
         if self.homography is None:
             raise RuntimeError("캘리브레이션이 완료되지 않음")
 
         pixel = np.array([[[u, v]]], dtype=np.float32)
         robot_xy = cv2.perspectiveTransform(pixel, self.homography)[0][0]
-        return [float(robot_xy[0]), float(robot_xy[1]), float(self.table_z)]
+
+        z = float(self.table_z)
+        if depth_m is not None and self.table_depth is not None and depth_m > 0.05:
+            object_height = float(self.table_depth) - float(depth_m)
+            if object_height > 0:
+                z = float(self.table_z) + object_height
+        return [float(robot_xy[0]), float(robot_xy[1]), z]
+
+    def update_table_depth_from_frame(self, depth_frame, half: int = 2) -> Optional[float]:
+        """런타임 테이블 기준 depth(meters)를 캘리브 포인트들에서 읽어 갱신.
+
+        캘리브에 쓰인 pixel_points 는 모두 테이블 평면 위 점이므로, 그 픽셀들의
+        depth 중앙값 = 카메라→테이블 거리(table_depth). pixel_to_robot 이
+        물체 높이 = table_depth - depth_m 로 z 를 복원하는 데 사용한다.
+        매 새 depth 프레임마다 (객체 변환 전에) 한 번 호출.
+
+        Args:
+            depth_frame: uint16 depth 이미지 (mm) — RealSense 원본.
+            half: 각 포인트에서 샘플링할 패치 반경 (px).
+
+        Returns:
+            갱신된 table_depth (meters) 또는 읽기 실패 시 None.
+        """
+        if depth_frame is None or self.pixel_points is None or len(self.pixel_points) == 0:
+            return None
+        H, W = depth_frame.shape[:2]
+        samples = []
+        for pt in self.pixel_points:
+            u = int(round(float(pt[0])))
+            v = int(round(float(pt[1])))
+            y1, y2 = max(0, v - half), min(H, v + half + 1)
+            x1, x2 = max(0, u - half), min(W, u + half + 1)
+            patch = depth_frame[y1:y2, x1:x2]
+            valid = patch[patch > 0]
+            if len(valid) > 0:
+                samples.append(float(np.median(valid)) / 1000.0)
+        if samples:
+            self.table_depth = float(np.median(samples))
+        return self.table_depth
 
     def robot_to_pixel(self, x: float, y: float, z: float = None) -> Tuple[int, int]:
         """

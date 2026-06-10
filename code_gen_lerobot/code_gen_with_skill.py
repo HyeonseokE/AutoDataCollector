@@ -351,6 +351,13 @@ def _points_to_positions(
         except Exception:
             pass
 
+    # 런타임 table_depth 갱신 — legacy depth→z 환산(z=table_z+(table_depth-depth))이
+    # 캘리브 포인트의 테이블 기준 depth 를 필요로 함. Charuco 는 자체 처리하므로 skip.
+    if pix2robot is not None and depth_frame is not None and hasattr(pix2robot, "update_table_depth_from_frame"):
+        td = pix2robot.update_table_depth_from_frame(depth_frame)
+        if td is not None:
+            print(f"  [CropPoint] table_depth(runtime) = {td:.3f}m (legacy depth→z enabled)")
+
     # pixel→robot 변환 헬퍼
     Z_DEFAULT = 0.02  # z 이상 시 대체값 (2cm)
 

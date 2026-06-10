@@ -34,6 +34,7 @@ Usage:
     skills.move_to_initial_state()
 """
 
+import os
 from typing import List, Optional, Union
 
 import numpy as np
@@ -113,12 +114,12 @@ def push_object(
 
     desc_prefix = f"push {object_name}" if object_name else "push object"
 
-    # Over-descent + sag bypass — pick / pull 과 동일한 패턴.
-    # 이유: 이 robot 의 모터는 commanded z 보다 ~1.5cm 위에서 saturate. 그래서
-    # push_height 그대로 명령하면 그리퍼가 push_height 위 1.5cm 에서 멈춰
-    # 물체 / 핸들에 닿지 않음. pick_offset 만큼 더 깊게 명령해 saturation 을
-    # 보상하면 실제 도달 z 가 push_height 부근에 정착.
-    DESCENT_OVERSHOOT = float(getattr(skills, "pick_offset", 0.025))
+    # Over-descent + sag bypass — pull 과 동일한 패턴.
+    # 이유: 이 robot 의 모터는 commanded z 보다 saturate 가 있어 push_height 그대로
+    # 명령하면 그리퍼가 위에서 멈춰 핸들에 닿지 않음. 약간 더 깊게 명령해 보상.
+    # pick_offset(block 용) 과 분리하고 PUSH_DESCENT_OVERSHOOT(m) 로 튜닝.
+    # depth-z 복원(legacy) 후 push_height 가 실제 핸들 높이라 0.5cm 면 충분.
+    DESCENT_OVERSHOOT = float(os.environ.get("PUSH_DESCENT_OVERSHOOT", "0.005"))
     MIN_PUSH_Z = -0.025   # 책상 아래 -2.5cm 까지 명령 허용 (모터 자체 floor 이 보호)
     descent_target_z = max(push_height - DESCENT_OVERSHOOT, MIN_PUSH_Z)
 
@@ -266,12 +267,31 @@ def push_object_handle_close(
     HANDLE_PUSH_TORQUE_LIMIT = 500   # 0-1000, Step 2 (linear push) 동안만 적용
                                      # 너무 낮으면 motor 가 못 푸시 / 못 holds; 500 이 적정선
 
-    # 핸들 z 보다 3cm 낮은 지점에서 밀기 — robot0 새 캘리브에서 핸들 z 그대로
-    # 밀면 너무 위쪽 (핸들 상단/위) 을 치는 문제 보정. 하드코딩 (per-robot
-    # 튜닝 필요해지면 compensation 파일로 옮길 것).
-    PUSH_HEIGHT_OFFSET = -0.03
+    # 핸들 z 대비 push 접촉 높이 보정 (m, signed). 음수=핸들보다 낮게 밀기.
+    # 과거 −3cm 는 핸들 z 가 table_z 로 잘못 잡히던 시절 값 — 정확한 핸들 z 를
+    # PULL_HANDLE_Z 로 주입하면 −3cm 는 과해서 핸들 아래 드로어 면을 칠 수 있음.
+    # 그래서 PUSH_HEIGHT_OFFSET env 로 튜닝 (정확한 z 면 0 부근부터 시작 권장).
+    PUSH_HEIGHT_OFFSET = float(os.environ.get("PUSH_HEIGHT_OFFSET", "-0.03"))
 
     start_pos = np.array(start_position, dtype=float)
+
+    # ── Handle z override (pull 과 동일) ────────────────────────────────────
+    # 얇은 검은 핸들은 D435 depth 가 신뢰성 있게 높이를 못 잡아 perception z 가
+    # table_z 로 떨어짐 → push 가 테이블로 박힘. 고정 rig 이면 측정한 핸들 z 를
+    # PUSH_HANDLE_Z(없으면 PULL_HANDLE_Z, 절대 base_link z, m) 로 주입. 미설정 시
+    # 기존 perception z 사용. pull 의 PULL_HANDLE_Z 와 같은 값을 공유하면 됨.
+    _hz = os.environ.get("PUSH_HANDLE_Z") or os.environ.get("PULL_HANDLE_Z")
+    if _hz:
+        try:
+            _hz_f = float(_hz)
+            skills._log(
+                f"[push_object] handle z override: perceived {start_pos[2]*100:.1f}cm "
+                f"→ {_hz_f*100:.1f}cm"
+            )
+            start_pos[2] = _hz_f
+        except ValueError:
+            skills._log(f"WARNING: handle z override {_hz!r} not a float; ignoring")
+
     actual_push_distance = float(distance) + CLOSE_OVERSHOOT
     end_pos = [float(start_pos[0]) + actual_push_distance, float(start_pos[1]), float(start_pos[2])]
     push_height = float(start_pos[2]) + PUSH_HEIGHT_OFFSET

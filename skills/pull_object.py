@@ -52,6 +52,7 @@ Usage:
     skills.disconnect()
 """
 
+import os
 from typing import List, Optional, Union
 
 import numpy as np
@@ -98,6 +99,28 @@ def pull_object(
     # short of it. No-op when offset = 0. End/pull_distance unchanged.
     _sx, _sy = skills._apply_pick_xy_offset(start_pos[0], start_pos[1])
     start_pos = np.array([_sx, _sy, start_pos[2]], dtype=float)
+
+    # ── Handle z override ──────────────────────────────────────────────────
+    # Legacy planar pix2robot calibrator maps every pixel onto the TABLE plane
+    # (z = table_z), so a perceived drawer-handle z is the table height, NOT the
+    # handle's true elevation. Descending to that z (minus overshoot) drives the
+    # gripper into/under the table — the EE can never reach the real handle.
+    # For a fixed drawer rig the handle sits at a known constant height: set
+    # PULL_HANDLE_Z (absolute base_link z, meters) to use it instead of the
+    # table-plane z. Unset → legacy behavior (only correct with a depth-aware
+    # calibrator that already returns the true handle z).
+    _hz = os.environ.get("PULL_HANDLE_Z")
+    if _hz:
+        try:
+            _hz_f = float(_hz)
+            skills._log(
+                f"[pull_object] handle z override: perceived {start_pos[2]*100:.1f}cm "
+                f"(table plane) → PULL_HANDLE_Z {_hz_f*100:.1f}cm"
+            )
+            start_pos[2] = _hz_f
+        except ValueError:
+            skills._log(f"WARNING: PULL_HANDLE_Z={_hz!r} not a float; ignoring")
+
     # end = start + (-distance, 0, 0)  — -x 방향 (corrected start 기준)
     end_pos = np.array([start_pos[0] - float(distance), start_pos[1], start_pos[2]], dtype=float)
     approach_height = APPROACH_HEIGHT
@@ -139,9 +162,14 @@ def pull_object(
     #   멈춤 → 그리퍼가 핸들에 정확히 닿음.
     # - duration 5s — 수렴 시간 충분히
     # - disable_sag=True — payload 없는 descent 에서 base_sag over-correction 회피
-    # over-descent = pick_offset (≈2.5cm) + 1cm 추가 (drawer/door 핸들은
-    # block grasp 보다 모터 saturation 더 가팔라 1cm 더 깊게 명령).
-    DESCENT_OVERSHOOT = float(getattr(skills, "pick_offset", 0.025)) + 0.01
+    # Over-descent 는 핸들 z 밴드에서의 모터 saturation(EE 가 commanded 보다
+    # ~1.5cm 위에서 멈춤)만 상쇄해 핸들 z 에 "딱" 착지시키는 게 목적이다.
+    # block용 pick_offset 을 그대로 쓰면(이전: pick_offset+1cm = robot6 3cm)
+    # 얇은 핸들 바를 지나쳐 핸들보다 한참 아래로 착지 → 드로어 면/공기를 집음.
+    # 그래서 pick_offset 과 분리하고 하드웨어별로 PULL_DESCENT_OVERSHOOT(m) 로
+    # 튜닝 가능하게 둔다. 공기를 잡으면(아래 +1.5cm abort) 값을 키우고,
+    # 너무 깊으면(아래 BELOW 경고) 값을 줄인다.
+    DESCENT_OVERSHOOT = float(os.environ.get("PULL_DESCENT_OVERSHOOT", "0.005"))
     descent_target_z = pull_z - DESCENT_OVERSHOOT
     DESCENT_DURATION = 5.0
     skills._log("\n[Step 1] Descend to grasp position (sag bypassed, over-descent)")
@@ -161,7 +189,11 @@ def pull_object(
 
     # 실제 도달 z 확인. 핸들 z 기준 ±1.5cm 안이면 OK (그리퍼 jaw range).
     # +1.5cm 초과: 핸들 위 공기를 잡을 위험 → abort.
+    # -1.5cm 초과(너무 깊음): 핸들 바를 지나쳐 드로어 면을 집을 위험 → 진단 경고
+    #   (PULL_DESCENT_OVERSHOOT 를 줄이라는 신호). 모션은 이미 끝났으므로 abort
+    #   대신 경고만 — close 는 jaw range 안이면 여전히 핸들에 걸릴 수 있다.
     GRASP_Z_TOLERANCE_ABOVE = 0.015  # 1.5cm 위
+    GRASP_Z_TOLERANCE_BELOW = 0.015  # 1.5cm 아래
     actual_grasp_z = pull_z   # fallback
     try:
         _, _, actual_ee = skills._get_current_state()
@@ -175,8 +207,16 @@ def pull_object(
                 f"Aborting before gripper close (would grasp air)."
             )
             return False
-        skills._log(f"  Descent z OK: handle={pull_z*100:.1f}cm, actual={actual_grasp_z*100:.1f}cm "
-                    f"(diff {z_err*1000:+.1f}mm)")
+        if z_err < -GRASP_Z_TOLERANCE_BELOW:
+            skills._log(
+                f"WARNING: Descent landed {(-z_err)*1000:.1f}mm BELOW handle "
+                f"(handle z={pull_z*100:.1f}cm, actual={actual_grasp_z*100:.1f}cm, "
+                f">{GRASP_Z_TOLERANCE_BELOW*1000:.0f}mm). Too deep — lower "
+                f"PULL_DESCENT_OVERSHOOT (currently {DESCENT_OVERSHOOT*1000:.0f}mm)."
+            )
+        else:
+            skills._log(f"  Descent z OK: handle={pull_z*100:.1f}cm, actual={actual_grasp_z*100:.1f}cm "
+                        f"(diff {z_err*1000:+.1f}mm)")
     except Exception as e:
         skills._log(f"WARNING: Could not verify descent z ({e}); proceeding anyway")
 

@@ -32,15 +32,7 @@ _C_ELIGIBLE = "#ff7f0e"    # eligible — orange
 _C_UNDER = "#bdbdbd"       # under_covered — 흐린 회색
 _C_REJECT = "#9aa7b3"      # covered 지만 M̃_MI<τ — 중간 회색
 _C_GT = "#9467bd"          # g.t. Phase1 — 자홍
-def _autodetect_default_calib() -> str:
-    """robot_configs/charuco_calibration/ 의 robotN_cam2robot.npz 중 첫 번째 매치.
-    여러 robot 머신 환경에서 default 가 머신마다 다르게 풀리도록 동적 resolve."""
-    import glob
-    cands = sorted(glob.glob("robot_configs/charuco_calibration/robot*_cam2robot.npz"))
-    return cands[0] if cands else "robot_configs/charuco_calibration/robot0_cam2robot.npz"
-
-
-_DEFAULT_CALIB = _autodetect_default_calib()
+_DEFAULT_CALIB = "robot_configs/charuco_calibration/robot4_cam2robot.npz"
 
 
 def _category(i: int, chosen: int, eligible: set[int], under) -> str:

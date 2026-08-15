@@ -65,6 +65,8 @@ class ActionQueue:
         self.last_action = None
         self.transition_steps = 0
         self.max_action_delta = None
+        self.chunk_smoothing_enabled = True
+        self.non_rtc_chunk_steps = 0
         self.cfg = cfg
 
     def get(self) -> Tensor | None:
@@ -197,6 +199,11 @@ class ActionQueue:
             original_actions: Unprocessed actions from policy.
             processed_actions: Post-processed actions for robot.
         """
+        if self.non_rtc_chunk_steps and self.non_rtc_chunk_steps > 0:
+            n = min(int(self.non_rtc_chunk_steps), len(processed_actions))
+            original_actions = original_actions[:n]
+            processed_actions = processed_actions[:n]
+
         if self.queue is None:
             self.original_queue = original_actions.clone()
             self.queue = self._smooth_action_boundary(processed_actions.clone())
@@ -216,6 +223,9 @@ class ActionQueue:
     ) -> Tensor:
         """Make newly appended absolute targets continuous with the current queue."""
         if processed_actions.numel() == 0:
+            return processed_actions
+
+        if not self.chunk_smoothing_enabled:
             return processed_actions
 
         anchor = None

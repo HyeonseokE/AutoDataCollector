@@ -74,18 +74,6 @@ class GrpcPlannerClient:
         # (episode 종료) 가 0 으로 reset 한다. caller 가 plan_batch(skill_id=)
         # 로 명시 override 하지 않는 한 server 로 보내는 ordinal 키.
         self._skill_call_index = 0
-        # Held-object state (lid / grasped payload). skills_lerobot calls
-        # mark_held() right after a successful pick, mark_released() right
-        # after gripper release. Each subsequent plan_and_select RPC carries
-        # this state so the server attaches/detaches the payload to the
-        # gripper's collision body before planning. None → no payload.
-        self._held_object: dict | None = None
-        # Dynamic scene obstacles (pot, plate, etc.). skills_lerobot's
-        # detect_objects hook calls update_scene() with the freshly detected
-        # positions; we cache them here and pipe them into each plan_and_select
-        # so the server's curobo registers them as cuboid obstacles. None /
-        # empty → server reverts to the static-only baseline (_table cuboid).
-        self._scene_obstacles: list | None = None
 
     def pop_dump_refs(self) -> list[tuple[str, str]]:
         """누적된 (selection_id, skill_id) 목록을 반환하고 비운다.
@@ -166,6 +154,25 @@ class GrpcPlannerClient:
             _rs if _rs is not None else start_qpos, dtype=np.float32,
         )
 
+        # Dynamic obstacles — server-side curobo update_world() 가 매 plan_batch
+        # 직전 호출되어 trajopt 가 이 cuboid 들을 회피한다. provider 가
+        # _latest_obstacles() 를 노출하면 사용, 아니면 비어있음 (default scene).
+        _obstacles = {}
+        try:
+            _obstacles = self._provider._latest_obstacles() or {}
+        except Exception:
+            _obstacles = {}
+
+        # Phase2 replay 의 의도된 phase1 episode_id — server 가 g.t. visualization
+        # 시 그 episode 의 entries 만 nearest-neighbor 후보로 사용.
+        # Phase2SubgoalReplay.set_episode 가 매 cycle 시작 시 stamp.
+        _target_phase1_ep = ""
+        try:
+            from record_dataset.context import RecordingContext as _RC
+            _target_phase1_ep = str(getattr(_RC, "_phase2_target_episode_id", "") or "")
+        except Exception:
+            _target_phase1_ep = ""
+
         try:
             resp = self._client.plan_and_select(
                 skill_id=effective_skill_id,
@@ -177,8 +184,8 @@ class GrpcPlannerClient:
                 n_candidates=int(n),
                 seed=int(seed) if seed is not None else 0,
                 is_transit=True,
-                held_object=self._held_object,
-                scene_obstacles=self._scene_obstacles,
+                current_positions=_obstacles,
+                target_phase1_episode_id=_target_phase1_ep,
             )
         except Exception as e:
             print(f"  [Skill Perturbation] grpc plan_and_select failed: {e}")
@@ -258,61 +265,12 @@ def _summarize_score_report(json_str: str, chosen_index: int = -1) -> str:
     )
 
     # ------------------------------------------------------------------
-    # update_scene — cache detected obstacles so the next plan_and_select
-    # RPC ships them in scene_obstacles. Each call REPLACES the cache (not
-    # accumulates) — matches detect_objects' semantics (one detect = one
-    # complete world snapshot).
+    # update_scene — server-side curobo can also accept obstacle updates,
+    # but the prototype skips this (TODO: extend proto with UpdateScene RPC).
     # ------------------------------------------------------------------
-    def update_scene(self, obstacles) -> dict:
-        if not obstacles:
-            self._scene_obstacles = None
-            return {"added": 0, "removed": 0, "kept": 0}
-        if isinstance(obstacles, dict):
-            items = list(obstacles.items())
-        elif isinstance(obstacles, (list, tuple)):
-            items = [(o.get("name", f"obs_{i}"), o) for i, o in enumerate(obstacles)]
-        else:
-            return {"added": 0, "removed": 0, "kept": 0, "error": "unsupported type"}
-        out = []
-        for name, info in items:
-            if not isinstance(info, dict):
-                continue
-            pos = info.get("position")
-            if pos is None or len(pos) < 3:
-                continue
-            entry = {"name": str(name), "position": [float(pos[0]), float(pos[1]), float(pos[2])]}
-            if info.get("dims") and len(info["dims"]) == 3:
-                entry["dims"] = [float(v) for v in info["dims"]]
-            out.append(entry)
-        self._scene_obstacles = out if out else None
-        return {"added": len(out), "removed": 0, "kept": 0}
-
-    # ------------------------------------------------------------------
-    # Held-object lifecycle — skills_lerobot signals grasp/release here so
-    # subsequent plan_and_select RPCs carry the payload state. Server uses
-    # the field to attach/detach via curobo's AttachmentManager.
-    # ------------------------------------------------------------------
-    def mark_held(
-        self,
-        name: str = "held_lid",
-        dims=(0.16, 0.16, 0.04),
-        pose_offset=(0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0),
-        link_name: str = "gripper_frame_link",
-    ) -> None:
-        """Declare that an object is now grasped. Default dims describe a
-        typical pot lid (16cm × 16cm × 4cm). pose_offset is in the link
-        frame — default is 3cm below the TCP."""
-        self._held_object = {
-            "name": str(name),
-            "link_name": str(link_name),
-            "dims": tuple(float(x) for x in dims),
-            "pose_offset": tuple(float(x) for x in pose_offset),
-        }
-
-    def mark_released(self) -> None:
-        """Declare that any previously-held payload is no longer grasped.
-        Next plan_and_select will omit held_object, server detaches."""
-        self._held_object = None
+    def update_scene(self, obstacles) -> None:  # noqa: ARG002
+        # Silent no-op for now — server's curobo uses its yaml's static workspace.
+        return None
 
     # ------------------------------------------------------------------
     # Lifecycle helpers used by orchestrator

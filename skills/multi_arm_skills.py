@@ -215,7 +215,6 @@ class MultiArmSkills:
         right_skill_description: Optional[str] = None,
         left_verification_question: Optional[str] = None,
         right_verification_question: Optional[str] = None,
-        is_transit: bool = True,
     ) -> Dict[str, bool]:
         """
         Move arms simultaneously. Pass "wait" to skip one arm.
@@ -223,12 +222,6 @@ class MultiArmSkills:
         Args:
             left_arm: [x,y,z] target for left arm, or "wait" to hold.
             right_arm: [x,y,z] target for right arm, or "wait" to hold.
-            is_transit: If True, each arm's Phase1SubgoalSelector (if attached)
-                is invoked → buffer-aware perturbation + stage_executed for
-                buffer accumulation. Default True (most LLM-gen move_to_position
-                calls are transits between manipulation primitives). Internal
-                bimanual_* skills (pick/place/fold) override to False since
-                those positions are precise (object grasp/release points).
 
         Returns:
             {"left": bool, "right": bool} success status.
@@ -257,14 +250,12 @@ class MultiArmSkills:
                 "duration": left_duration,
                 "skill_description": left_skill_description,
                 "verification_question": left_verification_question,
-                "is_transit": is_transit,
             } if left_fn else {},
             right_kwargs={
                 "position": right_arm,
                 "duration": right_duration,
                 "skill_description": right_skill_description,
                 "verification_question": right_verification_question,
-                "is_transit": is_transit,
             } if right_fn else {},
             description="move_to_position",
         )

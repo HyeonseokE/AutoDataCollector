@@ -44,8 +44,31 @@ def _gui_available() -> bool:
     return True
 
 
+_LIVE_PREVIEW_WARNED: bool = False
+
+
 def _safe_show_and_wait(window_name: str, image: np.ndarray, wait_key: bool, timeout_ms: int, label: str) -> None:
-    """Show a cv2 window with timeout, silently no-op on headless/failed-GUI systems."""
+    """Show a cv2 window with timeout, silently no-op on headless/failed-GUI systems.
+
+    When ``LIVE_PREVIEW_ENABLED=true`` we skip cv2 entirely: LivePreviewWindow
+    runs ``cv2.namedWindow``/``cv2.imshow``/``cv2.waitKey`` in a background
+    thread, and OpenCV's HighGUI event loop is bound to whichever thread
+    initialised it. A main-thread ``cv2.waitKey(timeout_ms)`` here would then
+    block past its timeout (observed: 10s budget → 10+ minute hang) because
+    events are drained by the background loop. Judge results are already
+    printed; LivePreview gives the user a continuous camera view, so the
+    per-judge popup is redundant in that mode.
+    """
+    global _LIVE_PREVIEW_WARNED
+    if os.environ.get("LIVE_PREVIEW_ENABLED", "").lower() == "true":
+        if not _LIVE_PREVIEW_WARNED:
+            print(
+                f"[{label}] LIVE_PREVIEW_ENABLED=true → cv2 popup 생략 "
+                f"(LivePreview 스레드가 cv2 event loop 점유; "
+                f"main-thread waitKey 의 timeout 무시 회피)."
+            )
+            _LIVE_PREVIEW_WARNED = True
+        return
     if not _gui_available():
         return
     try:

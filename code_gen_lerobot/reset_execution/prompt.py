@@ -194,7 +194,19 @@ Return a JSON array:
 ```
 
 **Important**:
-- Only include the main task-relevant objects (not sub-parts).
+- Include **every object the forward task referenced** — even ones that should stay
+  put on reset (containers/destinations). They are still required for collision
+  avoidance and for matching against the original detection labels downstream.
+- **Placement targets / containers** (plates, bowls, **dishes**, trays, racks —
+  anything other objects were placed ON or IN during the forward task): set
+  `needs_manipulation: false` and keep `expected_points: ["<container> center"]`
+  (e.g., `"dish center"`) so the center is still available as a reference. A
+  container is grippable only if Turn 0 explicitly observed it was displaced and
+  needs to be relocated back to its initial pose. Default is `false`.
+- **Pure obstacles** (objects not referenced by the forward task): set
+  `needs_manipulation: false` and `expected_points: []`.
+- Only set `needs_manipulation: true` for objects that were *moved by the forward
+  task* and now need to be returned (e.g., the block that was placed on the dish).
 - Focus on providing accurate bounding box coordinates.
 - **Carefully match each bounding box to the correct label** by comparing the visual appearance of each detected object with your analysis from above. Do NOT swap labels between objects.
 - **Reset strategy must consider the forward task**: if the object was folded, it needs to be unfolded; if it was simply moved, a pick-and-place is sufficient."""
@@ -209,7 +221,7 @@ def lerobot_reset_code_gen_prompt(
     robot_id: int = 3,
     is_random_reset: bool = False,
 ) -> str:
-    """Single-turn 리셋 코드 생성 프롬프트 (MULTI_TURN=false 시 사용)."""
+    """Single-turn 리셋 코드 생성 프롬프트 (--no-multi-turn 시 사용)."""
 
     robot_config = f"robot_configs/robot/so101_robot{robot_id}.yaml"
     frame = _get_frame_for_robot(robot_id)
@@ -303,7 +315,7 @@ target_positions = {{
 
 ```python
 # === STEP 1: Move 1st object (object_A) to its target ===
-approach_height = 0.20
+approach_height = 0.16
 cur = current_positions["object_A"]["position"]
 tgt = target_positions["object_A"]["position"]
 skills.set_subtask("move object_A to target")
@@ -355,7 +367,7 @@ def execute_reset_task():
     skills.connect()
 
     try:
-        approach_height = 0.20
+        approach_height = 0.16
 
         skills.move_to_initial_state()
 
@@ -392,7 +404,7 @@ if __name__ == "__main__":
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-7. Use `approach_height = 0.20` for all approach/lift movements
+7. Use `approach_height = 0.16` for all approach/lift movements
 8. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 9. Use `is_table=True` when placing on table
 10. Always include try/finally for proper cleanup
@@ -565,7 +577,7 @@ skills.execute_push(
 
 ```python
 # === STEP 1: Move 1st object (object_A) to its target ===
-approach_height = 0.20
+approach_height = 0.16
 cur = current_positions["object_A"]["position"]
 tgt = target_positions["object_A"]["position"]
 skills.set_subtask("move object_A to target")
@@ -619,7 +631,7 @@ def execute_reset_task():
     skills.connect()
 
     try:
-        approach_height = 0.20
+        approach_height = 0.16
 
         skills.move_to_initial_state()
 
@@ -705,7 +717,7 @@ skills.move_to_position([a_tx, a_ty, approach_height], target_name="original pos
 4. **ALWAYS reference `current_positions` and `target_positions` dicts** — e.g. `current_positions["name"]["position"]` and `target_positions["name"]["position"]`
 5. Do NOT redefine or hardcode coordinate values — the dicts are injected as global variables at runtime and may change between episodes
 6. **ALWAYS pass object/target positions as-is** to execute_pick_object and execute_place_object
-7. Use `approach_height = 0.20` (20cm) for all approach/lift movements
+7. Use `approach_height = 0.16` (16cm) for all approach/lift movements
 8. **Pitch Handling**: Pitch is automatically saved at pick and restored at place
 9. **ALWAYS use `gripper_open_ratio=0.7`** in execute_place_object
 10. Use `is_table=True` when placing on table

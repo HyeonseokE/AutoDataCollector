@@ -11,7 +11,7 @@
 #    ./record_dataset.sh
 #    REPO_ID=my_user/my_dataset TASK="pick up block" NUM_EPISODES=20 ./record_dataset.sh
 #    VCODEC=h264_nvenc ./record_dataset.sh                     # NVIDIA GPU 가속
-#    FOLLOWER_PORT=/dev/ttyACM1 LEADER_PORT=/dev/ttyACM4 ./record_dataset.sh
+#    FOLLOWER_PORT=/dev/ttyACM2 LEADER_PORT=/dev/ttyACM4 ./record_dataset.sh
 #    ./record_dataset.sh --dataset.fps=60                       # 추가 인자 직접 전달
 #    RESUME=true ./record_dataset.sh                            # 기존 데이터셋에 이어서 녹화
 #
@@ -54,7 +54,7 @@ REPO_ID="${REPO_ID:-CoRL2026-CSI/teleop_close_lid}"
 RESET_REPO_ID="${RESET_REPO_ID:-CoRL2026-CSI/teleop_open_lid}"
 TASK="${TASK:-Close the pot lid.}"
 RESET_TASK="${RESET_TASK:-Open the pot lid and place it on the floor.}"
-FPS="${FPS:-30}"
+FPS="${FPS:-10}"
 EPISODE_TIME_S="${EPISODE_TIME_S:-100}"
 RESET_TIME_S="${RESET_TIME_S:-100}"
 RECORD_RESET="${RECORD_RESET:-true}"
@@ -70,7 +70,7 @@ RESUME="${RESUME:-false}"
 
 # -------- follower (robot) --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"
-FOLLOWER_PORT="${FOLLOWER_PORT:-/dev/ttyACM1}"
+FOLLOWER_PORT="${FOLLOWER_PORT:-/dev/ttyACM2}"
 FOLLOWER_ID="${FOLLOWER_ID:-so101_robot0}"
 
 # -------- leader (teleop) --------

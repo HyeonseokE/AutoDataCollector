@@ -218,6 +218,7 @@ def read_exact(stream, size):
 
 window_name = sys.argv[1]
 fps = float(sys.argv[2])
+scale = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 latest = {"frame": None, "closed": False, "photo": None, "shown_first_frame": False}
 lock = threading.Lock()
 
@@ -274,6 +275,10 @@ def update():
 
     if frame is not None:
         image = Image.fromarray(frame if frame.ndim == 2 else frame[..., :3])
+        if scale != 1.0:
+            image = image.resize(
+                (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+            )
         latest["photo"] = ImageTk.PhotoImage(image=image)
         label.configure(image=latest["photo"])
         if not latest["shown_first_frame"]:
@@ -296,13 +301,31 @@ root.mainloop()
 
 
 class PauseCameraWindow:
-    """Small local preview window shown while the robot is parked."""
+    """Local camera preview shown while the robot is parked.
 
-    def __init__(self, robot: "RobotWrapper", camera: str, shutdown_event: Event, fps: float = 15.0):
+    Runs a single persistent worker thread for the whole inference session
+    (start() once at startup, stop() once at shutdown). The thread watches
+    ``interrupt.parked`` and only opens/streams the window while parked,
+    closing it on resume. Toggling visibility from within one long-lived
+    thread avoids the cv2/Tk window-recreation failure that happens when a
+    GUI thread is destroyed and respawned on every park.
+    """
+
+    def __init__(
+        self,
+        robot: "RobotWrapper",
+        camera: str,
+        shutdown_event: Event,
+        interrupt: "InterruptController",
+        fps: float = 15.0,
+        scale: float = 2.0,
+    ):
         self.robot = robot
         self.camera = camera
         self.shutdown_event = shutdown_event
+        self.interrupt = interrupt
         self.fps = fps
+        self.scale = max(1.0, float(scale))
         self.window_name = f"Pause stream: {camera}"
         self._stop_event = Event()
         self._thread: Thread | None = None
@@ -317,7 +340,7 @@ class PauseCameraWindow:
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread is not None:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=2.0)
             self._thread = None
 
     def _select_frame(self, obs: dict) -> np.ndarray | None:
@@ -369,77 +392,99 @@ class PauseCameraWindow:
     def _run_opencv(self) -> None:
         import cv2
 
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         period = 1.0 / max(self.fps, 1.0)
-        while not self.shutdown_event.is_set() and not self._stop_event.is_set():
-            started = time.perf_counter()
-            obs = self.robot.get_observation()
-            frame = self._select_frame(obs)
-            if frame is not None:
-                if frame.ndim == 3:
-                    frame = frame[..., ::-1]
-                cv2.imshow(self.window_name, frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
-                self._stop_event.set()
-                break
-            time.sleep(max(0.0, period - (time.perf_counter() - started)))
-        cv2.destroyWindow(self.window_name)
-
-    def _run_tkinter(self) -> None:
-        process = subprocess.Popen(
-            [sys.executable, "-u", "-c", _TK_PREVIEW_SCRIPT, self.window_name, str(self.fps)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        logger.info(f"[PAUSE_STREAM] Tkinter preview subprocess started pid={process.pid}")
-        period = 1.0 / max(self.fps, 1.0)
-        sent_first_frame = False
-
+        window_open = False
+        sized = False
         try:
-            while (
-                not self.shutdown_event.is_set()
-                and not self._stop_event.is_set()
-                and process.poll() is None
-            ):
+            while not self.shutdown_event.is_set() and not self._stop_event.is_set():
                 started = time.perf_counter()
-                obs = self.robot.get_observation()
-                frame = self._select_frame(obs)
-                if frame is not None:
-                    try:
-                        payload = pickle.dumps(frame, protocol=pickle.HIGHEST_PROTOCOL)
-                        assert process.stdin is not None
-                        process.stdin.write(struct.pack("!I", len(payload)))
-                        process.stdin.write(payload)
-                        process.stdin.flush()
-                        if not sent_first_frame:
-                            logger.info(
-                                f"[PAUSE_STREAM] Sent first frame to preview window "
-                                f"(shape={getattr(frame, 'shape', None)})"
+                if self.interrupt.parked.is_set():
+                    if not window_open:
+                        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+                        window_open = True
+                        sized = False
+                    obs = self.robot.get_observation()
+                    frame = self._select_frame(obs)
+                    if frame is not None:
+                        if not sized:
+                            h, w = frame.shape[:2]
+                            cv2.resizeWindow(
+                                self.window_name, int(w * self.scale), int(h * self.scale)
                             )
-                            sent_first_frame = True
-                    except (BrokenPipeError, OSError):
-                        break
+                            sized = True
+                        if frame.ndim == 3:
+                            frame = frame[..., ::-1]
+                        cv2.imshow(self.window_name, frame)
+                    cv2.waitKey(1)
+                elif window_open:
+                    cv2.destroyWindow(self.window_name)
+                    cv2.waitKey(1)
+                    window_open = False
                 time.sleep(max(0.0, period - (time.perf_counter() - started)))
         finally:
-            try:
-                if process.stdin is not None:
-                    process.stdin.write(struct.pack("!I", 0))
-                    process.stdin.close()
-            except Exception:
-                pass
-            try:
-                process.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                process.terminate()
+            if window_open:
                 try:
-                    process.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=1.0)
-            if process.returncode not in (None, 0, -2):
-                logger.warning(f"[PAUSE_STREAM] Tkinter preview subprocess exited with code {process.returncode}")
+                    cv2.destroyWindow(self.window_name)
+                    cv2.waitKey(1)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _close_preview_process(proc):
+        """Gracefully tear down a running Tk preview subprocess."""
+        if proc is None:
+            return None
+        try:
+            if proc.stdin is not None:
+                proc.stdin.write(struct.pack("!I", 0))
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1.0)
+        return None
+
+    def _run_tkinter(self) -> None:
+        period = 1.0 / max(self.fps, 1.0)
+        process = None
+        try:
+            while not self.shutdown_event.is_set() and not self._stop_event.is_set():
+                started = time.perf_counter()
+                if self.interrupt.parked.is_set():
+                    if process is None or process.poll() is not None:
+                        process = subprocess.Popen(
+                            [
+                                sys.executable, "-u", "-c", _TK_PREVIEW_SCRIPT,
+                                self.window_name, str(self.fps), str(self.scale),
+                            ],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        logger.info(f"[PAUSE_STREAM] Tkinter preview subprocess started pid={process.pid}")
+                    obs = self.robot.get_observation()
+                    frame = self._select_frame(obs)
+                    if frame is not None:
+                        try:
+                            payload = pickle.dumps(frame, protocol=pickle.HIGHEST_PROTOCOL)
+                            assert process.stdin is not None
+                            process.stdin.write(struct.pack("!I", len(payload)))
+                            process.stdin.write(payload)
+                            process.stdin.flush()
+                        except (BrokenPipeError, OSError):
+                            process = self._close_preview_process(process)
+                elif process is not None:
+                    process = self._close_preview_process(process)
+                time.sleep(max(0.0, period - (time.perf_counter() - started)))
+        finally:
+            self._close_preview_process(process)
 
 
 def resolve_free_state_path(cfg: "RTCDemoConfig") -> Path:
@@ -516,9 +561,12 @@ def keyboard_listener(
     fps: float,
     move_duration: float,
     shutdown_event: Event,
-    pause_stream: PauseCameraWindow | None = None,
 ):
-    """Block on stdin; each Enter toggles park (flush + free_state) / resume."""
+    """Block on stdin; each Enter toggles park (free_state) / resume (buffer empty).
+
+    The local camera preview is driven separately by ``PauseCameraWindow``,
+    which watches ``interrupt.parked`` and shows/hides itself automatically.
+    """
     logger.info("[INTERRUPT] Press Enter to park at free_state; Enter again to resume")
     while not shutdown_event.is_set():
         try:
@@ -544,16 +592,15 @@ def keyboard_listener(
                     logger.error(f"[INTERRUPT] free_state move failed ({e}); robot held in place.")
             else:
                 logger.warning("[INTERRUPT] No free_state file resolved; robot held in place.")
-            if pause_stream is not None:
-                pause_stream.start()
-            logger.info("[INTERRUPT] Parked. Press Enter to resume (first chunk will be discarded).")
+            logger.info("[INTERRUPT] Parked (top-view preview opened). Press Enter to resume.")
         else:
-            # 2nd Enter: resume — discard the first new chunk, then run normally.
-            if pause_stream is not None:
-                pause_stream.stop()
+            # 2nd Enter: empty the action buffer, then resume (discard the first
+            # freshly produced chunk for a clean restart). The preview window
+            # closes itself once parked clears.
+            action_queue.clear()
             interrupt.arm_discard(1)
             interrupt.set_running()
-            logger.info("[INTERRUPT] Resumed.")
+            logger.info("[INTERRUPT] Preview closed, action buffer emptied, resumed.")
 
 
 @dataclass
@@ -587,6 +634,13 @@ class RTCDemoConfig(HubMixin):
     action_queue_size_to_get_new_actions: int = 50
 
     # Smooth non-RTC chunk boundaries for absolute action targets.
+    chunk_smoothing_enabled: bool = field(
+        default=True,
+        metadata={
+            "help": "Master toggle for chunk-boundary smoothing "
+            "(transition blending + per-step delta clamp). Disable to fall through raw."
+        },
+    )
     chunk_transition_steps: int = field(
         default=4,
         metadata={"help": "Blend this many steps at the start of each appended chunk"},
@@ -594,6 +648,13 @@ class RTCDemoConfig(HubMixin):
     action_max_delta: float | None = field(
         default=None,
         metadata={"help": "Optional per-step action delta clamp after chunk-boundary blending"},
+    )
+    non_rtc_chunk_steps: int = field(
+        default=0,
+        metadata={
+            "help": "When RTC is disabled, queue only the first N steps of each chunk "
+            "(0 = full chunk). Forces faster re-inference."
+        },
     )
     stop_and_infer: bool = field(
         default=False,
@@ -666,6 +727,10 @@ class RTCDemoConfig(HubMixin):
     pause_stream_fps: float = field(
         default=15.0,
         metadata={"help": "Preview window refresh rate"},
+    )
+    pause_stream_scale: float = field(
+        default=2.0,
+        metadata={"help": "Preview window upscale factor relative to the camera resolution"},
     )
 
     def __post_init__(self):
@@ -979,6 +1044,8 @@ def stop_and_infer_control(
         smoothing_queue = ActionQueue(cfg.rtc)
         smoothing_queue.transition_steps = cfg.chunk_transition_steps
         smoothing_queue.max_action_delta = cfg.action_max_delta
+        smoothing_queue.chunk_smoothing_enabled = cfg.chunk_smoothing_enabled
+        smoothing_queue.non_rtc_chunk_steps = cfg.non_rtc_chunk_steps
 
         start_time = time.time()
         while not shutdown_event.is_set() and (
@@ -1005,6 +1072,14 @@ def stop_and_infer_control(
 
             postprocessed_actions = postprocessor(actions).squeeze(0)
             postprocessed_actions = smoothing_queue._smooth_action_boundary(postprocessed_actions.clone())
+
+            if (
+                not cfg.rtc.enabled
+                and cfg.non_rtc_chunk_steps
+                and cfg.non_rtc_chunk_steps > 0
+            ):
+                n = min(int(cfg.non_rtc_chunk_steps), len(postprocessed_actions))
+                postprocessed_actions = postprocessed_actions[:n]
 
             inference_latency = time.perf_counter() - current_time
             inference_delay = math.ceil(inference_latency / action_interval)
@@ -1242,6 +1317,8 @@ def demo_cli(cfg: RTCDemoConfig):
     action_queue = ActionQueue(cfg.rtc)
     action_queue.transition_steps = cfg.chunk_transition_steps
     action_queue.max_action_delta = cfg.action_max_delta
+    action_queue.chunk_smoothing_enabled = cfg.chunk_smoothing_enabled
+    action_queue.non_rtc_chunk_steps = cfg.non_rtc_chunk_steps
 
     # Enter-key park/resume controller, shared across all worker threads
     interrupt = InterruptController()
@@ -1260,8 +1337,11 @@ def demo_cli(cfg: RTCDemoConfig):
             robot=robot_wrapper,
             camera=cfg.pause_stream_camera,
             shutdown_event=shutdown_event,
+            interrupt=interrupt,
             fps=cfg.pause_stream_fps,
+            scale=cfg.pause_stream_scale,
         )
+        pause_stream.start()  # persistent worker: shows/hides itself based on parked state
         logger.info(f"[PAUSE_STREAM] Will show camera '{cfg.pause_stream_camera}' in a local window on Enter-park")
 
     if cfg.stop_and_infer:
@@ -1276,7 +1356,6 @@ def demo_cli(cfg: RTCDemoConfig):
                 cfg.fps,
                 cfg.free_state_move_duration,
                 shutdown_event,
-                pause_stream,
             ),
             daemon=True,
             name="KeyboardListener",
@@ -1347,7 +1426,6 @@ def demo_cli(cfg: RTCDemoConfig):
             cfg.fps,
             cfg.free_state_move_duration,
             shutdown_event,
-            pause_stream,
         ),
         daemon=True,
         name="KeyboardListener",
@@ -1383,6 +1461,9 @@ def demo_cli(cfg: RTCDemoConfig):
 
         # Signal shutdown
         shutdown_event.set()
+
+        if pause_stream is not None:
+            pause_stream.stop()
 
         # Wait for threads to finish
         if get_actions_thread and get_actions_thread.is_alive():

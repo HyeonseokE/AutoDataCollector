@@ -50,6 +50,22 @@ message IngestResponse {
   map<string, int32> buffer_totals = 2;   // skill_id → entry count after ingest
 }
 
+// Dynamic obstacle geometry (cuboid) for runtime curobo scene update.
+// caller (client) 가 pix2robot 변환 + object_height 추정 마친 후 전달한다.
+// 단위: base_link frame 의 meter. quaternion 은 (qx,qy,qz,qw).
+message ObstacleGeometry {
+  float x = 1;        // cuboid center x (base_link, m)
+  float y = 2;        // cuboid center y (base_link, m)
+  float z = 3;        // cuboid center z (base_link, m)
+  float qx = 4;       // quaternion x  (default 0)
+  float qy = 5;       // quaternion y  (default 0)
+  float qz = 6;       // quaternion z  (default 0)
+  float qw = 7;       // quaternion w  (default 1 = identity rotation)
+  float dim_x = 8;    // cuboid dimension x (m)
+  float dim_y = 9;    // cuboid dimension y (m)
+  float dim_z = 10;   // cuboid dimension z (m)
+}
+
 message PlanRequest {
   string skill_id = 1;            // partition key for buffer (e.g. "move_to")
   bytes start_qpos = 2;           // np.save: shape (DOF,) float32
@@ -63,41 +79,18 @@ message PlanRequest {
   int32 n_candidates = 7;         // K — passed straight to curobo.plan_batch
   int32 seed = 8;                 // RNG seed for plan_batch + tie-break
   bool is_transit = 9;            // false → server returns no_op (skip selection)
-  // Currently-held grasped object (e.g. lid after pick). When set the server
-  // attaches it as collision spheres on the named gripper link BEFORE planning
-  // so the chosen trajectory routes around obstacles WITH the payload's volume.
-  // Absent / empty `name` → server detaches any previously attached object
-  // (transitions between plans where the gripper is empty).
-  HeldObject held_object = 10;
+  // Dynamic obstacles — server-side curobo.update_world() 가 매 plan_batch
+  // 직전 호출되어 trajopt 가 이 cuboid 들을 회피한다. 비어있으면 default
+  // scene (table only) 그대로. label 은 dict key 로 사용 (e.g. "red_block").
+  map<string, ObstacleGeometry> current_positions = 10;
 
-  // Detected scene obstacles (pot, plate, etc.) to register in the server's
-  // collision world for THIS plan call. Empty list → server clears any
-  // previously-registered dynamic obstacles back to the static baseline
-  // (which still includes the persistent _table cuboid loaded at init).
-  // The server diffs the list against its last-applied signature, so passing
-  // the same obstacles every request is cheap (no redundant CUDA graph reset).
-  repeated SceneObstacle scene_obstacles = 11;
-}
-
-// Geometric description of an object currently grasped by the robot.
-// Pose offset is in the attach LINK's frame, so the obstacle moves with the
-// link automatically via curobo's attachment manager.
-message HeldObject {
-  string name = 1;                // free-form label (e.g. "held_lid")
-  string link_name = 2;           // attach link, e.g. "gripper_frame_link"
-  repeated float dims = 3;        // [x_m, y_m, z_m] cuboid extents
-  repeated float pose_offset = 4; // [x, y, z, qw, qx, qy, qz] in link frame
-}
-
-// Detected scene object that the planner should treat as a static cuboid
-// obstacle for the current plan. Position is the object's TOP point in
-// world frame (matches pix2robot / charuco convention); the server
-// constructs the cuboid centered at z/2. dims is optional — when empty,
-// the server uses an 8×8cm footprint × max(z, 2cm) height.
-message SceneObstacle {
-  string name = 1;
-  repeated float position = 2;    // [x, y, z] in world frame
-  repeated float dims = 3;        // [w_m, d_m, h_m] optional override
+  // Phase2 replay 의 의도된 phase1 episode_id (= cycle 매핑 결과,
+  // e.g. "episode_30" when phase2 ep_90 replays phase1 ep_30). 비어있으면
+  // server 가 nearest-neighbor 로 g.t. episode 추정 (= legacy 동작, 부정확).
+  // 값이 있으면 server-side candidate_dump 의 _extract_gt 가 *그 episode_id 의
+  // entries 중*에서만 g.t. 후보 lookup → visualization 의 g.t. label/trajectory
+  // 가 phase2 의 의도된 phase1 episode 와 정확 일치.
+  string target_phase1_episode_id = 11;
 }
 
 message PlanResponse {

@@ -67,8 +67,8 @@ class PreselectiveClient:
         n_candidates: int,
         seed: int = 0,
         is_transit: bool = True,
-        held_object: dict | None = None,
-        scene_obstacles: list | None = None,
+        current_positions: dict[str, dict] | None = None,
+        target_phase1_episode_id: str = "",
     ) -> dict[str, Any]:
         """Send context + goal to server, receive chosen trajectory.
 
@@ -80,6 +80,19 @@ class PreselectiveClient:
           - used_fallback : bool (true → server didn't run selection;
                                   client should fall back to its own plan)
         """
+        # current_positions: {name: {pose: [x,y,z,qx,qy,qz,qw], dims: [dx,dy,dz]}}
+        # → preselective_pb2.ObstacleGeometry map field.
+        _proto_obstacles = {}
+        if current_positions:
+            for name, geom in current_positions.items():
+                pose = geom.get("pose") or [0.0]*7
+                dims = geom.get("dims") or [0.0]*3
+                _proto_obstacles[name] = preselective_pb2.ObstacleGeometry(
+                    x=float(pose[0]), y=float(pose[1]), z=float(pose[2]),
+                    qx=float(pose[3]), qy=float(pose[4]),
+                    qz=float(pose[5]), qw=float(pose[6]),
+                    dim_x=float(dims[0]), dim_y=float(dims[1]), dim_z=float(dims[2]),
+                )
         req = preselective_pb2.PlanRequest(
             skill_id=str(skill_id),
             start_qpos=encode_ndarray(np.asarray(start_qpos, dtype=np.float32)),
@@ -90,40 +103,9 @@ class PreselectiveClient:
             n_candidates=int(n_candidates),
             seed=int(seed),
             is_transit=bool(is_transit),
+            current_positions=_proto_obstacles,
+            target_phase1_episode_id=str(target_phase1_episode_id or ""),
         )
-        # Optional held-object attachment (lid/grasped payload). Caller signals
-        # this state via mark_held()/mark_released() on the adapter; absent →
-        # server detaches anything previously attached.
-        if held_object and held_object.get("name"):
-            req.held_object.name = str(held_object.get("name") or "")
-            req.held_object.link_name = str(
-                held_object.get("link_name") or "gripper_frame_link"
-            )
-            for v in (held_object.get("dims") or (0.16, 0.16, 0.04)):
-                req.held_object.dims.append(float(v))
-            pose = held_object.get("pose_offset") or (0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0)
-            for v in pose:
-                req.held_object.pose_offset.append(float(v))
-
-        # Optional dynamic scene obstacles (pot, plate, etc.) — server diffs
-        # against its last-applied signature so passing the same list every
-        # request is cheap. Empty / None → server clears dynamic obstacles
-        # back to its static baseline (table only).
-        if scene_obstacles:
-            for o in scene_obstacles:
-                if not o or not o.get("name"):
-                    continue
-                pos = o.get("position")
-                if pos is None or len(pos) < 3:
-                    continue
-                obs = req.scene_obstacles.add()
-                obs.name = str(o["name"])
-                for v in pos[:3]:
-                    obs.position.append(float(v))
-                dims = o.get("dims")
-                if dims and len(dims) == 3:
-                    for v in dims:
-                        obs.dims.append(float(v))
         resp = self.stub.PlanAndSelect(req, timeout=self.timeout_s)
 
         if resp.used_fallback:

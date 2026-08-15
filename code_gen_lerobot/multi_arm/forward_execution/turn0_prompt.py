@@ -6,10 +6,7 @@ which objects are in which arm's reach.
 """
 
 
-def multi_arm_turn0_scene_understanding_prompt(
-    instruction: str,
-    has_cad: bool = False,
-) -> str:
+def multi_arm_turn0_scene_understanding_prompt(instruction: str) -> str:
     """Turn 0: Multi-arm scene understanding prompt.
 
     Unlike single-arm Turn 0, this version asks the VLM to identify
@@ -17,19 +14,9 @@ def multi_arm_turn0_scene_understanding_prompt(
 
     Args:
         instruction: Natural language task description.
-        has_cad: Whether CAD reference images are attached.
     """
-    if has_cad:
-        image_desc = """\
-The attached images include:
-1. An **overhead camera image** of the workspace (first image).
-2. **CAD reference images** of the task-relevant parts from multiple angles."""
-    else:
-        image_desc = """\
-The attached image is an **overhead camera image** of the workspace."""
-
     return f"""\
-{image_desc}
+The attached image is an **overhead camera image** of the workspace.
 
 This is a **bi-arm** robot setup:
 - **Left arm** is visible at the middle-left edge of the image.

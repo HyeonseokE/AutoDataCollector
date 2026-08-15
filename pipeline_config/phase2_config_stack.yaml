@@ -24,7 +24,7 @@ phase1_trained_vla_path: "lerobot/outputs/train/smolvla_dct_stack_20260526_17520
 phase1_dataset_path: "CoRL2026/table1/stack_ours_100_table1"
 
 # --- 전체 budget & phase 전환 (§15.3) ---
-budget: 100                    # B — 전체 acquisition episode 수
+budget: 110                    # B — 전체 acquisition episode 수
 phase1_min: 30                 # B_{1,min} — Phase1 최소 guard
 phase1_max: 60                 # B_{1,max} — Phase1 최대 guard
 tau_ready: 0.7                 # §15.1 — Phase2-readiness 전환 임계값
@@ -53,7 +53,7 @@ mi_selection:
   #   Q4: argmin U_VLA  s.t.  M̃_MI ≤ -τ_MI   (Redundant ID — VLA familiar + MI not-useful)
   # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI.
   # Q1 이 아닌 mode 는 Table 6 실험용 — paper 의 default 는 Q1.
-  selection_mode: Q1_med   # argmedian U_VLA s.t. M̃_MI ≥ +τ_MI (mid-novelty positive-MI)
+  selection_mode: Q3       # argmin U_VLA s.t. M̃_MI ≥ +τ_MI  (Useful ID)
                        # = "MI-aligned + VLA-uncertain": Phase1 분포 정합 cand 중
                        # VLA 가 가장 헷갈리는 것 (paper main claim)
   # ─────────────────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ skill_perturbation:
   enabled_reset: false
   # GPU-accelerated curobo motion planner with via-point diversity.
   n_candidates: 64
-  curobo_robot_cfg_path: robot_configs/curobo/so101_robot0.yml
+  curobo_robot_cfg_path: robot_configs/curobo/so101_robot2.yml
   curobo_num_trajopt_seeds: 4
   curobo_num_ik_seeds: 16
   curobo_use_cuda_graph: true     # graph capture 1회 → plan latency 50ms→5ms
@@ -226,6 +226,7 @@ selector:
                                   # int 로 두면 trajectory 가 길 때 sub-sample.
   skill_dct_parquet: "results/skill_dct/stack_ours_100_table1.parquet"  # P_phase1 build 의 sidecar (repo-relative)
                                   # parquet 경로. method3.dct.build_skill_dct 의 산물.
+  servo_calibration_file: "robot_configs/motor_calibration/so101/robot2_calibration.json"
 
 # --- server-local SkillVectorDB 영속화 ---
 # server 가 boot/restart 사이에도 buffer 를 유지하기 위한 sidecar npz.
@@ -256,11 +257,11 @@ remote:
   # [필수] 원격 서버 운영
   project_path: "/home/csiwoo/CORL2026/AutoDataCollector-open_drawer"
   conda_env: "gpu_server"                # setup_h100_server.sh 가 setup 한 dedicated env
-  gpu_id: 2                              # 원격 CUDA_VISIBLE_DEVICES — GPU 0 (open_drawer 전용 isolation)
+  gpu_id: 1                              # 원격 CUDA_VISIBLE_DEVICES — stack phase2
   tmux_session: "phase2_server_stack"   # 재시작 시 reuse; prefix unique (phase2_server_* family) — stack 전용 isolation
 
   # [선택] 동작 옵션
-  git_pull_before_start: true
+  git_pull_before_start: false   # remote repo auth 실패 회피
   ready_timeout_s: 360                   # smolvla 부팅 1~2분, pi05_base 2~5분 → 여유 360s
 
   # NVIDIA driver kernel/user-space mismatch workaround.

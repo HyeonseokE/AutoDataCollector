@@ -120,6 +120,14 @@ class RecordingContext:
     # reset_episode 에서 0 으로 reset.
     _skill_call_index: int = 0
 
+    # Phase2 replay 시 현재 cycle 이 *매핑된 phase1 episode_id*. Phase2SubgoalReplay
+    # 가 set_episode 호출 시 매핑 결과를 stamp. plan_and_select 의 grpc adapter
+    # 가 이 값을 server 에 전달 → server-side _extract_gt 가 그 episode_id 의
+    # entries 만 g.t. 후보로 사용 (= visualization 의 g.t. label/trajectory 가
+    # 의도된 phase1 episode 와 정확 일치). 빈 string ("") 이면 server 가
+    # legacy nearest-neighbor 방식 fallback.
+    _phase2_target_episode_id: str = ""
+
     # set_skill_info 호출 시 발동되는 callback 들. method3 paradigm 일관화 —
     # subgoal_buffer staging 이 transit-only 분기에 묶이지 않게, 모든
     # set_skill_info 호출 단위로 자동 발동. subgoal_selector 가 init 시점에

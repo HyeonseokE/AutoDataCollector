@@ -141,14 +141,6 @@ class PreselectiveAcquirerServicer(
         self.db = stack.db
         self.db_path = stack.db_path
         self.curobo = curobo_backend
-        # Track current attached payload so we only call attach/detach when
-        # the held state actually changes (avoids redundant graph invalidation).
-        self._currently_held: dict | None = None
-        # Fingerprint of last-applied dynamic scene obstacles (sorted tuple
-        # of (name, x, y, z, w, d, h)). Used to skip redundant update_scene
-        # calls when consecutive plan_and_select requests carry the same
-        # detection results.
-        self._currently_scene_sig: tuple | None = None
         self.recording_fps = int(recording_fps)
         self._chunk_size = int(chunk_size)
         self.debug_verbose = debug_verbose
@@ -218,94 +210,6 @@ class PreselectiveAcquirerServicer(
         return dict(sorted(out.items(), key=lambda kv: kv[0]))
 
     # ----------------------------------------------------------------
-    def _sync_scene_obstacles(self, request) -> None:
-        """Reconcile self._currently_scene_sig with request.scene_obstacles.
-
-        On change, call self.curobo.update_scene(obstacles_dict) where the
-        dict matches the local backend's expected format (name -> {position,
-        dims?}). Backends without update_scene silently skip.
-        """
-        incoming = list(getattr(request, "scene_obstacles", None) or [])
-        # Build a sortable signature for change detection.
-        sig_items = []
-        obs_dict: dict = {}
-        for o in incoming:
-            name = str(getattr(o, "name", ""))
-            if not name:
-                continue
-            pos = list(o.position) if len(o.position) >= 3 else None
-            if pos is None:
-                continue
-            dims = list(o.dims) if len(o.dims) == 3 else None
-            sig_items.append((name, round(pos[0], 4), round(pos[1], 4), round(pos[2], 4),
-                              tuple(round(d, 4) for d in dims) if dims else None))
-            entry = {"position": pos}
-            if dims:
-                entry["dims"] = dims
-            obs_dict[name] = entry
-        new_sig = tuple(sorted(sig_items))
-        if new_sig == self._currently_scene_sig:
-            return  # no change since last request
-        if not hasattr(self.curobo, "update_scene"):
-            return  # backend doesn't support
-        # Pass the dict to backend; backend rebuilds the world (always
-        # includes the persistent _table cuboid).
-        self.curobo.update_scene(obs_dict)
-        self._currently_scene_sig = new_sig
-
-    # ----------------------------------------------------------------
-    def _sync_held_object(self, request, start_qpos) -> None:
-        """Reconcile self._currently_held with request.held_object.
-
-        Calls curobo backend attach/detach only when the requested held state
-        actually changes (presence, name, link, dims, or pose). The backend
-        methods are no-ops if unsupported (e.g. legacy backends without
-        attach_held_object) — sync silently skips in that case.
-
-        ``start_qpos`` is the current joint configuration; passed to attach
-        so the fitted spheres reflect where the gripper actually is.
-        """
-        held = getattr(request, "held_object", None)
-        # Treat empty-name HeldObject as "no payload".
-        if held is None or not getattr(held, "name", ""):
-            # Detach any existing payload.
-            if self._currently_held is not None:
-                if hasattr(self.curobo, "detach_held_object"):
-                    self.curobo.detach_held_object(
-                        link_name=self._currently_held.get("link", "gripper_frame_link"),
-                    )
-                self._currently_held = None
-            return
-
-        # Requested attachment — compute fingerprint for change detection.
-        new_state = {
-            "name": str(held.name),
-            "link": str(held.link_name) if held.link_name else "gripper_frame_link",
-            "dims": tuple(float(x) for x in (held.dims or (0.16, 0.16, 0.04))),
-            "pose": tuple(float(x) for x in (held.pose_offset or (0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0))),
-        }
-        if self._currently_held == new_state:
-            return  # already attached with the same parameters
-
-        if not hasattr(self.curobo, "attach_held_object"):
-            return  # backend doesn't support — keep self-collision only
-
-        # Detach previous (if any) before attaching new, so dims/link changes
-        # take effect cleanly.
-        if self._currently_held is not None:
-            self.curobo.detach_held_object(
-                link_name=self._currently_held.get("link", "gripper_frame_link"),
-            )
-        self.curobo.attach_held_object(
-            name=new_state["name"],
-            dims=new_state["dims"],
-            pose_offset=new_state["pose"],
-            link_name=new_state["link"],
-            joint_state=start_qpos,
-        )
-        self._currently_held = new_state
-
-    # ----------------------------------------------------------------
     def PlanAndSelect(self, request, context):
         t0 = time.perf_counter()
         try:
@@ -324,23 +228,26 @@ class PreselectiveAcquirerServicer(
             # to its own cartesian path.
             return preselective_pb2.PlanResponse(used_fallback=True)
 
-        # Reconcile dynamic scene obstacles BEFORE held-object reconciliation
-        # so attach (which may shrink the scene via the AttachmentManager's
-        # obstacle-disable feature in future) sees the up-to-date world.
+        # 0. Dynamic scene update — client 가 current_positions 를 넘기면
+        # curobo trajopt 의 collision world 에 cuboid obstacle 로 register.
+        # 비어있으면 default (table only) 로 reset.
         try:
-            self._sync_scene_obstacles(request)
+            dynamic_obstacles = {}
+            for name, geom in (request.current_positions or {}).items():
+                dynamic_obstacles[name] = {
+                    "pose": [geom.x, geom.y, geom.z, geom.qx, geom.qy, geom.qz, geom.qw],
+                    "dims": [geom.dim_x, geom.dim_y, geom.dim_z],
+                }
+            # Empty obstacle 이면 update_world 호출 자체 skip — calling it on every
+            # plan_batch invalidates curobo motion_gen's trajopt cache
+            # (NoneType.replay AttributeError on next plan). 기본 scene (table) 은
+            # planner init 에서 한 번만 등록되고 그대로 유지.
+            if dynamic_obstacles:
+                self.curobo.update_world(dynamic_obstacles)
+                print(f"[server] scene update — {len(dynamic_obstacles)} dynamic cuboid: "
+                      f"{list(dynamic_obstacles.keys())}", flush=True)
         except Exception as e:
-            print(f"[server] sync_scene_obstacles FAILED (continuing with static scene): {e}",
-                  flush=True)
-
-        # Reconcile held-object attachment state with the request BEFORE
-        # plan_batch so the chosen trajectory routes around obstacles WITH
-        # the payload volume. Skill backends without attach support no-op.
-        try:
-            self._sync_held_object(request, start_qpos)
-        except Exception as e:
-            print(f"[server] sync_held_object FAILED (continuing without attach): {e}",
-                  flush=True)
+            print(f"[server] update_world failed (continuing with default scene): {e}", flush=True)
 
         # 1. curobo plan_batch
         try:
@@ -490,6 +397,10 @@ class PreselectiveAcquirerServicer(
                         top_image=raw_imgs.get("observation.images.camera2"),
                         # g.t. descriptor(servo DCT) → radians 변환용 calib.
                         servo_calib_path=self._candidate_cfg.servo_calibration_file,
+                        # client 가 매핑한 phase1 episode_id — _extract_gt 가
+                        # 그 episode 의 entries 만 g.t. 후보로 사용.
+                        target_phase1_episode_id=getattr(
+                            request, "target_phase1_episode_id", "") or "",
                     )
                     print(f"[server] candidate dump → {_dump}", flush=True)
                 except Exception as _de:

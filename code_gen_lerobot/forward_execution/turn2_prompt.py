@@ -8,14 +8,12 @@ Crops are generated from bboxes detected in Turn 1, and this prompt is called on
 """
 
 
-def turn2_crop_pointing_prompt(object_label: str, has_side_view: bool = False, canonical_point_labels: dict = None, manipulation_strategy: dict = None) -> str:
+def turn2_crop_pointing_prompt(object_label: str, canonical_point_labels: dict = None, manipulation_strategy: dict = None) -> str:
     """
     Turn 2: exact location for each critical manipulation point on the cropped image of the target object.
 
     Args:
         object_label: label of the object detected in Turn 1 (e.g., "red block")
-        has_side_view: If True, two crop images are provided (overhead + side-view)
-                       and the output includes points for both views.
         canonical_point_labels: {object_label: ["grasp center", "plate center", ...]}
                                이전 에피소드에서 사용된 point 라벨. 제공되면 동일 라벨 강제.
         manipulation_strategy: Turn 1에서 수립된 조작 전략 dict
@@ -44,48 +42,7 @@ Every coordinate you output describes a location **inside the attached cropped i
   (e.g. "≈52% from top, ≈50% from left of this crop"), THEN make `point_2d` match it.
 """
 
-    if has_side_view:
-        prompt = f"""
-Now I am showing you **two cropped close-up images** of the object "{object_label}":
-1. **Crop 1 (Overhead view)** — cropped from the overhead camera image.
-2. **Crop 2 (Side view)** — cropped from the side camera image.
-Based on your analysis and manipulation strategy above, identify the precise points on this object.
-
-Based on your analysis above, identify critical points on this object in **both** views.
-{frame_warning}
-**Point types**:
-1. **grasp** — optimal gripper grasp location for successful task execution.
-2. **interaction** — non-grasping functional sub-part location critical for task execution (e.g., pin, hole, slot, rim, edge).
-
-For each point, provide:
-1. **point_2d**: The point location as `[y, x]` — 2 integers, each normalized to **0–1000** (where 0,0 is the top-left corner and 1000,1000 is the bottom-right corner of that cropped image).
-2. **label**: A short, descriptive name (e.g., "grasp center", "pin tip", "hole opening"). **Use the same label for the same physical point across both views.**
-3. **role**: `"grasp"` or `"interaction"`.
-4. **reasoning**: Why this point matters, referencing your previous analysis.
-
-### Output Format
-Return a JSON block:
-```json
-{{
-  "overhead_critical_points": [
-    {{"point_2d": [y, x], "label": "grasp center", "role": "grasp", "reasoning": "..."}},
-    {{"point_2d": [y, x], "label": "pin tip", "role": "interaction", "reasoning": "..."}}
-  ],
-  "sideview_critical_points": [
-    {{"point_2d": [y, x], "label": "grasp center", "role": "grasp", "reasoning": "..."}},
-    {{"point_2d": [y, x], "label": "pin tip", "role": "interaction", "reasoning": "..."}}
-  ]
-}}
-```
-
-**Important**:
-- Look carefully at each cropped image and provide accurate coordinates.
-- Coordinates are normalized 0–1000 relative to each respective cropped image.
-- **Labels must be consistent** between overhead and sideview — the same physical point must have the same label in both views.
-- Both `overhead_critical_points` and `sideview_critical_points` must contain the **same set of points** (same labels, same roles), just with different coordinates for each view.
-""".strip()
-    else:
-        prompt = f"""
+    prompt = f"""
 Now I am showing you a **cropped close-up image** of the object "{object_label}" from the overhead camera.
 Based on your analysis and manipulation strategy above, identify the precise points on this object.
 

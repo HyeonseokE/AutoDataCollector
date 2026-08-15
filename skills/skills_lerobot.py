@@ -152,14 +152,6 @@ class LeRobotSkills:
         self.use_deceleration = use_deceleration
         self.verbose = verbose
         self.pick_offset = pick_offset  # Fixed offset from object top for pick/place
-        # Holding-phase transit pitch lock toggle.
-        # Default True: transit moves never lock to saved grasp pitch — IK picks
-        # any reachable orientation. Place skills (execute_place_object /
-        # execute_place_lid) explicitly restore the saved pick pitch at descend
-        # via target_pitch=saved_pitch, so transit locking is redundant AND
-        # causes IK failures at high-z transit waypoints. Set False only for
-        # legacy rigid-carry-orientation behavior.
-        self.disable_holding_pitch_lock: bool = True
         self.RECORDING_FPS = int(recording_fps)  # instance attr shadows class default
         self.skill_sequence = []  # 실행된 스킬 시퀀스 기록 (후처리 라벨링용)
         # episode 시작 시 connect() 가 snapshot — 현재 skill 의 episode-내
@@ -314,6 +306,57 @@ class LeRobotSkills:
         this call is out-of-scope).
         """
         self._skill_candidate_selector = selector_fn
+
+    def _latest_obstacles(self) -> Dict[str, Dict]:
+        """current_positions → {name: {"pose": [x,y,z,qx,qy,qz,qw], "dims": [dx,dy,dz]}}.
+
+        Server-side curobo update_world() 에 넘길 dynamic obstacle 들. 매
+        plan_batch 직전 GrpcPlannerClient adapter 가 자동 호출.
+
+        self._exec_positions (= caller's positions dict, contains VLM-detected
+        object positions w/ bbox_px) 를 base 로 변환:
+          - position[0..2]  → cuboid center (base_link, m)
+          - object name 의 — 의 — substring match 로 — preset dims 적용:
+              "block" → 0.04 × 0.04 × 0.025 m
+              "plate" → 0.10 × 0.10 × 0.005 m
+              "dish"  → 0.12 × 0.12 × 0.020 m
+              default → 0.05 × 0.05 × 0.05 m
+
+        bbox_px → meter 정밀 변환은 후속 — preset 으로 70-80% 충분.
+        positions 없거나 _exec_positions=None 이면 {} 반환 (= scene 미변경).
+        """
+        if self._exec_positions is None:
+            return {}
+        # preset table — name lowercase substring match.
+        _PRESETS = [
+            ("block", (0.04, 0.04, 0.025)),
+            ("plate", (0.10, 0.10, 0.005)),
+            ("dish",  (0.12, 0.12, 0.020)),
+        ]
+        _DEFAULT_DIMS = (0.05, 0.05, 0.05)
+        out: Dict[str, Dict] = {}
+        for name, info in self._exec_positions.items():
+            if not isinstance(info, dict):
+                continue
+            pos = info.get("position")
+            if pos is None or len(pos) < 3:
+                continue
+            lname = name.lower()
+            dims = _DEFAULT_DIMS
+            for key, preset in _PRESETS:
+                if key in lname:
+                    dims = preset
+                    break
+            # cuboid center z = position[2] + dim_z/2 (= half-height above
+            # detected top surface; detection 의 position[2] 가 top z 가정).
+            # 단, detection 이 center z 면 그대로. 보수적으로 detected z 가
+            # cuboid 의 *center* 라 가정해 추가 보정 안 함 — 안전.
+            out[name] = {
+                "pose": [float(pos[0]), float(pos[1]), float(pos[2]),
+                         0.0, 0.0, 0.0, 1.0],
+                "dims": [float(dims[0]), float(dims[1]), float(dims[2])],
+            }
+        return out
 
     def set_skill_planner_client(self, client, n_candidates: int = 4) -> None:
         """Attach a skill planner client. Pass None to detach.
@@ -1863,10 +1906,10 @@ class LeRobotSkills:
                 self.planner.calibration_limits.upper_limits_radians,
             )
 
-        # Coarse 5°-spaced sweep over the same ±50° band move_to_position's
+        # Coarse 5°-spaced sweep over the same ±20° band move_to_position's
         # retry accepts. Offset 0 first so feasible candidates short-circuit
         # on the first solve; infeasible ones pay the full sweep.
-        PITCH_TOLERANCE_DEG = 50.0
+        PITCH_TOLERANCE_DEG = 20.0
         offsets_deg = [0.0]
         step = 5.0
         d = step
@@ -2076,6 +2119,20 @@ class LeRobotSkills:
                 f"(subgoal selector 호출 여부 무관)"
             )
 
+        # Stack-aware retreat z auto-clamp — LLM 의 retreat 호출이 고정
+        # approach_height(0.15m) 으로 들어와도, 누적 stack 이 깊어 clearance_z
+        # 가 더 크면 final z 가 via z 보다 낮아지는 모순을 막기 위해 끌어올린다.
+        # (clearance Bezier 가 via 까지 띄웠다가 다시 내리는 비효율 + 끝지점에서
+        # 막 놓은 stack top 을 스칠 위험 차단.)
+        if _holding_clearance_z is not None and target_position[2] < _holding_clearance_z:
+            _orig_target_z = float(target_position[2])
+            target_position = np.asarray(target_position, dtype=float).copy()
+            target_position[2] = float(_holding_clearance_z) + 0.005  # +5mm 여유
+            self._log(
+                f"  [stack-aware retreat] target z {_orig_target_z:.3f}m → "
+                f"{target_position[2]:.3f}m (clearance_z={_holding_clearance_z:.3f}m)"
+            )
+
         if (is_transit
                 and self._subgoal_selector is not None
                 and self._perturbation_rng is not None):
@@ -2213,16 +2270,13 @@ class LeRobotSkills:
             current_pitch = active_planner.kinematics.get_gripper_pitch(current_joints)
             ik_target_pitch = current_pitch
             self._log(f"  Maintaining pitch at {np.degrees(current_pitch):.1f}°")
-        elif (is_transit and getattr(self, "_saved_pitch", None) is not None
-                and not getattr(self, "disable_holding_pitch_lock", False)):
+        elif is_transit and getattr(self, "_saved_pitch", None) is not None:
             # Holding-phase transit: an object is grasped (pick saved its
             # grasp pitch, place clears it). Keep that pitch through lift /
             # move-over so the held object stays oriented and the place
             # descent does not need a large wrist re-orientation at the
             # hover. The ±20° IK retry below relaxes it when the saved
             # (steep) pitch is unreachable at the higher transit z.
-            # Disabled in reset transports (disable_holding_pitch_lock=True) —
-            # arbitrary seed-to-seed moves often hit pitch-unreachable poses.
             ik_target_pitch = self._saved_pitch
             self._log(f"  Holding-phase pitch: {np.degrees(self._saved_pitch):.1f}° (saved grasp)")
 
@@ -2511,13 +2565,15 @@ class LeRobotSkills:
                     (_cl.lower_limits_radians, _cl.upper_limits_radians)
                     if _cl is not None else None
                 )
-                # via: target xy, held at ~80% of original height (=descend only
-                # VIA_DESCENT_FRAC of the way down). With VIA_DESCENT_FRAC=0.20
-                # the Bezier curve front-loads xy correction in the first ~20%
-                # of the descent, then the remaining ~80% is mostly pure z
-                # descent. This matches the user-requested "xy 먼저 빠르게
-                # 20% 구간 내에 복원하고 이후 z 구간 다 내려가는" pattern.
-                VIA_DESCENT_FRAC = 0.20
+                # via: target xy, held at ~70% of original height (=descend only
+                # VIA_DESCENT_FRAC of the way down). With VIA_DESCENT_FRAC=0.30
+                # the Bezier curve passes near (target_xy, 70%-high z) at its
+                # midpoint — xy is essentially aligned by then, and the latter
+                # half of the trajectory is mostly pure z descent. More
+                # pronounced staging than the previous 0.15 (which kept via
+                # near 85% high; xy convergence was earlier but z stayed nearly
+                # untouched for too long, producing a sharper kink at via).
+                VIA_DESCENT_FRAC = 0.30
                 via_z = current_ee[2] + VIA_DESCENT_FRAC * (
                     ik_target_position[2] - current_ee[2]
                 )
@@ -2858,19 +2914,6 @@ class LeRobotSkills:
         finally:
             self._clear_skill_recording()
 
-        # Release any payload attached to the planner's collision body. Pair
-        # with mark_held() in execute_pick_object — once the gripper opens,
-        # the held object physically leaves the gripper, so subsequent transit
-        # plans must NOT include its volume on the robot. Backends without
-        # the hook silently skip.
-        if self._skill_planner_client is not None:
-            try:
-                self._skill_planner_client.mark_released()
-            except AttributeError:
-                pass
-            except Exception as e:
-                self._log(f"  [Skill Perturbation] mark_released failed: {e}")
-
     def gripper_close(self, duration: float = 1.5, skill_description: Optional[str] = None, verification_question: Optional[str] = None):
         """
         Close gripper with recording support.
@@ -3138,22 +3181,6 @@ class LeRobotSkills:
         self._log(f"  Actual pick z: {actual_z*100:.1f}cm (nominal: {pick_z*100:.1f}cm, diff: {(actual_z - pick_z)*1000:.1f}mm)")
         self._log(f"  Saved pitch: {np.degrees(self._saved_pitch):.1f}°")
 
-        # Tell the skill planner a payload is now attached to the gripper so
-        # subsequent transit plans route around obstacles WITH the payload's
-        # volume. Default dims describe a pot lid (16×16×4cm) — appropriate
-        # for "lid"-class objects; harmless overestimate for smaller items.
-        # Backends without the hook (local CuroboBackend with no mark_held,
-        # legacy adapters) silently skip via AttributeError.
-        if self._skill_planner_client is not None:
-            try:
-                _payload_name = f"held_{object_name}" if object_name else "held_object"
-                self._skill_planner_client.mark_held(name=_payload_name)
-                self._log(f"  [Skill Perturbation] mark_held: {_payload_name}")
-            except AttributeError:
-                pass
-            except Exception as e:
-                self._log(f"  [Skill Perturbation] mark_held failed: {e}")
-
         self._log("[Execute Pick Object] Complete")
         return True
 
@@ -3205,8 +3232,11 @@ class LeRobotSkills:
         else:
             # Placing on another object: use saved pick_z offset from surface,
             # plus per-robot z_offset (same residual-bias absorber as pick).
+            # STACK_PLACE_LIFT: stack place 전용 z 조절 (signed, meter).
+            # +면 release 더 위, -면 더 깊게. default 0.0 = 어제 baseline 동일.
+            STACK_PLACE_LIFT = 0.005
             pick_z = getattr(self, '_pick_z', self.pick_offset)
-            place_z = target_surface_height + pick_z + self.z_offset
+            place_z = target_surface_height + pick_z + self.z_offset + STACK_PLACE_LIFT
             if place_z < MIN_PLACE_Z:
                 self._log(f"  [Place Z-Fix] {place_z*100:.1f}cm < min {MIN_PLACE_Z*100:.0f}cm, clamping to {MIN_PLACE_Z*100:.0f}cm")
                 place_z = MIN_PLACE_Z
@@ -3241,25 +3271,23 @@ class LeRobotSkills:
             print("Error: Failed to reach place position")
             return False
 
-        # Standard stationary release at place point (pre-33135af behavior).
-        # Open the gripper in place — the next transit (retreat) is responsible
-        # for lifting via _post_place_clearance_z, which is set below.
         release_desc = f"release object on {target_name}" if target_name else None
-        self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
-        # --- Disabled (lift-while-open variant, 33135af) -----------------
-        # # Lift while opening gripper — same pattern as bimanual_place_object.
-        # # Releasing at contact + lifting separately can drag/disturb
-        # # deformable objects; combining the two prevents that.
-        # RELEASE_LIFT = 0.03  # 3cm lift while gripper opens
-        # lift_position = [final_position[0], final_position[1], final_position[2] + RELEASE_LIFT]
-        # self.move_to_position(
-        #     lift_position,
-        #     target_pitch=saved_pitch,
-        #     target_name=place_label,
-        #     skill_description=release_desc,
-        #     gripper_action="open",
-        #     gripper_open_ratio=gripper_open_ratio,
-        # )
+        # Lift-while-open variant (33135af) — gripper open + 3cm 위로 lift 를
+        # 한 motion 으로 결합. payload 해방으로 인한 sag drop 이 일어날 시간이
+        # 없도록 이미 위로 가는 중에 release. deformable disturb 도 같이 방지.
+        RELEASE_LIFT = 0.03  # 3cm lift while gripper opens
+        lift_position = [final_position[0], final_position[1], final_position[2] + RELEASE_LIFT]
+        self.move_to_position(
+            lift_position,
+            target_pitch=saved_pitch,
+            target_name=place_label,
+            skill_description=release_desc,
+            gripper_action="open",
+            gripper_open_ratio=gripper_open_ratio,
+            is_transit=False,
+        )
+        # --- Disabled (stationary release at place point) -----------------
+        # self.gripper_open(ratio=gripper_open_ratio, skill_description=release_desc)
         # ------------------------------------------------------------------
 
         # Post-place retreat clearance — 방금 놓은 물체를 빈 그리퍼가 치고

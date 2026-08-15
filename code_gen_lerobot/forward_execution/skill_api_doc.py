@@ -68,22 +68,22 @@ ROBOT_API_DOC = '''class LeRobotSkills:
         retreat movements (lifting after pick/place), and transit movements between objects.
 
         APPROACH HEIGHT: for approach / transit / retreat moves above an object,
-        use z = 0.15 (15cm hover height) unless the task geometry requires otherwise.
+        use z = 0.16 (16cm hover height) unless the task geometry requires otherwise.
 
         STACK-AWARE APPROACH HEIGHT (mandatory for stacking):
             When picking from or placing onto a non-table surface (another block,
-            a stack, a dish edge), the fixed 0.15 hover is unsafe — perturbation
+            a stack, a dish edge), the fixed 0.16 hover is unsafe — perturbation
             can drop the EE into the target. Compute hover relative to the
             target's top z:
-                approach_h = max(0.15, target_position[2] + 0.10)
+                approach_h = max(0.16, target_position[2] + 0.10)
             Use this for BOTH the pre-hover move_to_position AND the post-place
             retreat move_to_position. Example for stacking blue on green:
                 green_pos = positions["green block"]["position"]
-                approach_h = max(0.15, green_pos[2] + 0.10)
+                approach_h = max(0.16, green_pos[2] + 0.10)
                 skills.move_to_position([green_pos[0], green_pos[1], approach_h], ...)
                 skills.execute_place_object(green_pos, is_table=False, ...)
                 skills.move_to_position([green_pos[0], green_pos[1], approach_h], ...)
-            Plain z=0.15 stays correct only when target_position[2] ≤ 0.05.
+            Plain z=0.16 stays correct only when target_position[2] ≤ 0.05.
 
         The world coordinate frame origin is at the rear-center of the workspace table
         on the table surface:
@@ -102,12 +102,13 @@ ROBOT_API_DOC = '''class LeRobotSkills:
                 For pick approach, use: gripper_action="open", gripper_start_fraction=0.3
                 (gripper opens during the last 70% of the approach).
             - gripper_action="close": gripper closes during the motion.
-                For place retreat, use: gripper_action="close", gripper_start_fraction=0.7
-                (gripper closes during the last 30% of the retreat).
+                NOTE: Do NOT use gripper_action="close" on the place retreat.
+                The retreat after execute_place_object MUST be a PURE z-lift
+                (no gripper_action). Runtime applies stack-aware clearance
+                (place_z + object_height + 2cm) via clearance-lead Bezier.
 
             When gripper_action is used, write skill_description as a compound sentence:
                 "Approach <obj> and open gripper"
-                "Retreat from <target> and close gripper"
 
         Args:
             position: Target position [x, y, z] in meters in world frame.
@@ -368,7 +369,7 @@ ROBOT_API_DOC = '''class LeRobotSkills:
             purple_pos = positions["purple block"]["position"]
             target_pos = positions["yellow block"]["position"]
             # 5. Approach with integrated gripper open, then pick
-            skills.move_to_position([purple_pos[0], purple_pos[1], 0.15],
+            skills.move_to_position([purple_pos[0], purple_pos[1], 0.16],
                                     target_name="purple block",
                                     gripper_action="open", gripper_start_fraction=0.3)
             skills.execute_pick_object(purple_pos, object_name="purple block")

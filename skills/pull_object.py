@@ -92,6 +92,11 @@ def pull_object(
         bool: True 면 끌기 동작 성공
     """
     start_pos = np.array(start_position, dtype=float)
+    # HARDCODED grasp z (19cm above robot base) — 2D pix2robot 이 모든 점에
+    # z=table 을 부여하지만 drawer/door handle 은 실제론 캐비넷 높이만큼 떠
+    # 있다. caller 가 넘긴 start_position[2] (테이블 z) 는 무시하고 핸들
+    # 실측 높이로 override.
+    start_pos[2] = 0.19
     # Apply radial xy offset (same compensation as execute_pick_object): push
     # the grasp xy outward by skills.pick_xy_offset along the base→handle
     # direction so the Hold-phase radial undershoot lands on the handle, not
@@ -141,17 +146,28 @@ def pull_object(
     # - disable_sag=True — payload 없는 descent 에서 base_sag over-correction 회피
     # over-descent = pick_offset (≈2.5cm) + 1cm 추가 (drawer/door 핸들은
     # block grasp 보다 모터 saturation 더 가팔라 1cm 더 깊게 명령).
-    DESCENT_OVERSHOOT = float(getattr(skills, "pick_offset", 0.025)) + 0.01
+    # 단, hardcoded pull_z=0.16m 는 모터 saturation 영역(테이블 부근)에서
+    # 벗어나 있어 over-descent 가 오히려 실제 도달 z 를 어긋나게 한다 →
+    # caller 가 이미 approach 로 16cm 에 와 있는 상태에서 그대로 grasp.
+    DESCENT_OVERSHOOT = 0.0
     descent_target_z = pull_z - DESCENT_OVERSHOOT
     DESCENT_DURATION = 5.0
-    skills._log("\n[Step 1] Descend to grasp position (sag bypassed, over-descent)")
+    skills._log("\n[Step 1] Descend to grasp position (pitch locked, sag compensated)")
     skills._log(f"  handle z = {pull_z*100:.1f}cm, descent commanded z = "
                 f"{descent_target_z*100:.1f}cm  (over-descent {DESCENT_OVERSHOOT*100:.1f}cm)")
+    # maintain_pitch=True / disable_sag=False — 16cm grasp 정밀 보정.
+    # 과거 maintain_pitch=False + disable_sag=True 는 모터 saturation 영역(table z)
+    # 으로 강제 하강하는 패턴(payload-less + saturation 보상)을 가정한 설정인데,
+    # 우리는 이제 z=16cm 하드코딩으로 saturation 영역 밖에서 grasp 한다 → 가정이
+    # 깨짐. 그 상태에서 pitch 자유 + sag off 면 IK 가 푼 pitch 가 hold 중에 표류
+    # (-33.1° → -36.6° 관측) 하며 EE XY 가 같이 끌려나가 14mm hold-error 발생.
+    # 반면 32cm reach 에서 gravity sag 가 실재해 disable_sag=True 는 z 와 elbow
+    # 처짐을 그대로 둔다 → x, y, z 모두 어긋남. 둘 다 켜서 16cm grasp 정합.
     if not skills.move_to_position(
         position=[start_pos[0], start_pos[1], descent_target_z],
         duration=DESCENT_DURATION,
-        maintain_pitch=False,
-        disable_sag=True,
+        maintain_pitch=True,
+        disable_sag=False,
         target_name=object_name,
         skill_description=f"{desc_prefix}: descend to grasp",
         is_transit=False,

@@ -3,7 +3,7 @@
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
-dataset_repo_id: "CoRL2026/close_pot_ours_100_table1_"
+dataset_repo_id: "CoRL2026/new_pickandplace"
 recording_fps: 10
 robot_type: "so101"
 vcodec: "h264"  # Video codec: h264, hevc, libsvtav1, auto, h264_nvenc, h264_videotoolbox, h264_vaapi, h264_qsv
@@ -36,7 +36,7 @@ cameras:
   shared:
     - name: "top"
       type: "realsense"
-      serial_number: "335622072328"  # WS1 전용 RealSense
+      serial_number: "254622073196"  # WS1 에 현재 연결된 RealSense D435 (구 WS3 카메라)
       enabled: true
       enable_depth: true
       width: 640
@@ -48,7 +48,7 @@ cameras:
     - name: "wrist"
       type: "opencv"
       enabled: true
-      index_or_path: "/dev/video14"
+      index_or_path: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0"
       width: 640
       height: 480
       fps: 30

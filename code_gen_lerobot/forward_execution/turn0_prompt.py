@@ -1,23 +1,13 @@
 
 
-def turn0_scene_understanding_prompt(instruction: str, has_cad: bool = False) -> str:
+def turn0_scene_understanding_prompt(instruction: str) -> str:
     """Turn 0: Scene understanding prompt.
 
     Args:
         instruction: natural language task description.
-        has_cad: CAD reference multi-view images are available or not.
     """
-    if has_cad:
-        image_desc = """\
-The attached images include:
-1. An **overhead camera image** of the workspace (first image).
-2. **CAD reference images** of the task-relevant parts from multiple angles."""
-    else:
-        image_desc = """\
-The attached image is an **overhead camera image** of the workspace."""
-
     return f"""\
-{image_desc}
+The attached image is an **overhead camera image** of the workspace.
 
 Task: {instruction}
 

@@ -42,15 +42,49 @@ class TaskRunner:
         self.camera = camera
         self.recording_fps = recording_fps
 
+    @staticmethod
+    def _aliased_positions(d: Dict) -> Dict:
+        """positions dict 의 underscore/space alias 등록.
+
+        Codegen LLM 이 perception 의 raw label (`"green_block"`) 그대로 access
+        하고, runtime 은 `_normalize` (reset_execution/code_gen.py:513) 로
+        underscore→space 정규화 (`"green block"`) 한 dict 를 build → key mismatch
+        `KeyError: 'green_block'`. 둘 다 valid key 가 되도록 양쪽 등록.
+
+        non-dict 또는 valid label 아닌 key 는 그대로 둠 (idempotent).
+        """
+        if not isinstance(d, dict):
+            return d
+        out = dict(d)
+        for k in list(d.keys()):
+            if not isinstance(k, str):
+                continue
+            if "_" in k:
+                space_k = k.replace("_", " ")
+                if space_k not in out:
+                    out[space_k] = d[k]
+            elif " " in k:
+                under_k = k.replace(" ", "_")
+                if under_k not in out:
+                    out[under_k] = d[k]
+        return out
+
     def build_exec_globals(self, positions: Dict, extra_globals: Dict = None) -> Dict:
         """실행 환경 구성 — 싱글/멀티 100% 동일."""
         exec_globals = {
             "__name__": "__generated__",
             "skills": self.skills,
-            "positions": positions,
+            "positions": self._aliased_positions(positions),
         }
         if extra_globals:
-            exec_globals.update(extra_globals)
+            # current_positions / target_positions 도 같은 alias 처리.
+            aliased = {}
+            for k, v in extra_globals.items():
+                if k in ("current_positions", "target_positions", "positions"):
+                    aliased[k] = self._aliased_positions(v)
+                else:
+                    aliased[k] = v
+            exec_globals.update(aliased)
         return exec_globals
 
     def execute(self, code: str, positions: Dict, extra_globals: Dict = None) -> bool:
@@ -63,26 +97,6 @@ class TaskRunner:
         try:
             exec_globals = self.build_exec_globals(positions, extra_globals)
             self.skills._exec_positions = positions
-            # Push the initial detected scene to the planner's collision world
-            # BEFORE the LLM-generated code runs any transit. Without this the
-            # first plan_batch is computed against the static-only baseline
-            # (table cuboid), so the held lid would be allowed to cross the
-            # pot rim. Backends without update_scene (legacy / disabled
-            # transport) silently no-op via AttributeError.
-            _client = getattr(self.skills, "_skill_planner_client", None)
-            if _client is not None and positions:
-                _obstacles = {
-                    name: {"position": info["position"]}
-                    for name, info in positions.items()
-                    if isinstance(info, dict) and info.get("position") is not None
-                }
-                if _obstacles:
-                    try:
-                        _client.update_scene(_obstacles)
-                    except AttributeError:
-                        pass
-                    except Exception as _e:
-                        print(f"[TaskRunner] initial update_scene failed: {_e}")
             try:
                 if self.recorder is not None:
                     return self._execute_with_recording(code, exec_globals)
@@ -90,14 +104,6 @@ class TaskRunner:
                     return self._execute_bare(code, exec_globals)
             finally:
                 self.skills._exec_positions = None
-                # Release any payload still marked held (defensive — execute_place_lid
-                # already calls gripper_open → mark_released, but if the LLM code
-                # left a payload attached the next episode would inherit it).
-                if _client is not None:
-                    try:
-                        _client.mark_released()
-                    except AttributeError:
-                        pass
 
         except AssertionError as e:
             error_msg = str(e)

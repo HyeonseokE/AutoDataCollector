@@ -32,8 +32,10 @@ cd "$REPO_DIR"
 # -------- conda env --------
 CONDA_ENV="${CONDA_ENV:-lerobot}"
 # shellcheck disable=SC1091
+set +u
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
+set -u
 export PYTHONNOUSERSITE=1
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
@@ -48,14 +50,19 @@ VCODEC="${VCODEC:-h264}" # always h264 - hscho
 USE_DEGREES="${USE_DEGREES:-false}" # always false - hscho
 
 # -------- dataset --------
-REPO_ID="${REPO_ID:-CoRL2026-CSI/stack_RGB_blocks_on_bluedish}"
+REPO_ID="${REPO_ID:-CoRL2026-CSI/teleop_stack_demo}"
+RESET_REPO_ID="${RESET_REPO_ID:-CoRL2026-CSI/teleop_open_lid_ws1asdfas}"
 TASK="${TASK:-Stack red, green, and blue blocks on the blue dish from bottom to top.}"
-FPS="${FPS:-30}"
-EPISODE_TIME_S="${EPISODE_TIME_S:-100}"
-RESET_TIME_S="${RESET_TIME_S:-5}"
+RESET_TASK="${RESET_TASK:-}"
+FPS="${FPS:-10}"
+EPISODE_TIME_S="${EPISODE_TIME_S:-99999}"
+RESET_TIME_S="${RESET_TIME_S:-2}"
+RECORD_RESET="${RECORD_RESET:-false}"
+RESET_AS_EPISODE="${RESET_AS_EPISODE:-true}"
 NUM_EPISODES="${NUM_EPISODES:-100}"
 PUSH_TO_HUB="${PUSH_TO_HUB:-false}"
 DATASET_ROOT="${DATASET_ROOT:-$REPO_DIR/outputs/datasets/$REPO_ID}"
+RESET_DATASET_ROOT="${RESET_DATASET_ROOT:-$REPO_DIR/outputs/datasets/$RESET_REPO_ID}"
 DISPLAY_DATA="${DISPLAY_DATA:-true}"
 
 # -------- resume --------
@@ -63,7 +70,7 @@ RESUME="${RESUME:-false}"
 
 # -------- follower (robot) --------
 ROBOT_TYPE="${ROBOT_TYPE:-so101_follower}"
-FOLLOWER_PORT="${FOLLOWER_PORT:-/dev/ttyACM0}"
+FOLLOWER_PORT="${FOLLOWER_PORT:-/dev/ttyACM1}"
 FOLLOWER_ID="${FOLLOWER_ID:-so101_robot2}"
 
 # -------- leader (teleop) --------
@@ -74,36 +81,49 @@ LEADER_ID="${LEADER_ID:-so101_robot2_leader}"
 # -------- cameras --------
 # ws1 (recording_config_ws1.yaml) 와 동일 설정:
 #   shared/top:     RealSense 335622072328  640x480@30fps
-#   left_arm/wrist: OpenCV /dev/video6      640x480@30fps  (MJPG)
+#   left_arm/wrist: OpenCV /dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0  640x480@30fps  (MJPG)
 CAM_LEFT_WRIST_TYPE="${CAM_LEFT_WRIST_TYPE:-opencv}"
-CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/video6}"
+CAM_LEFT_WRIST_ID="${CAM_LEFT_WRIST_ID:-/dev/v4l/by-path/pci-0000:00:14.0-usb-0:1:1.0-video-index0}"
 CAM_LEFT_WRIST_WIDTH="${CAM_LEFT_WRIST_WIDTH:-640}"
 CAM_LEFT_WRIST_HEIGHT="${CAM_LEFT_WRIST_HEIGHT:-480}"
 CAM_LEFT_WRIST_FPS="${CAM_LEFT_WRIST_FPS:-30}"
 CAM_LEFT_WRIST_FOURCC="${CAM_LEFT_WRIST_FOURCC:-MJPG}"
+CAM_LEFT_WRIST_WARMUP_S="${CAM_LEFT_WRIST_WARMUP_S:-3}"
+CAM_LEFT_WRIST_BACKEND="${CAM_LEFT_WRIST_BACKEND:-200}" # OpenCV CAP_V4L2
 
 CAM_TOP_TYPE="${CAM_TOP_TYPE:-intelrealsense}"
 CAM_TOP_ID="${CAM_TOP_ID:-335622072328}"
 CAM_TOP_WIDTH="${CAM_TOP_WIDTH:-640}"
 CAM_TOP_HEIGHT="${CAM_TOP_HEIGHT:-480}"
 CAM_TOP_FPS="${CAM_TOP_FPS:-30}"
+CAM_TOP_WARMUP_S="${CAM_TOP_WARMUP_S:-1}"
+
+if [ "$CAM_LEFT_WRIST_TYPE" = "opencv" ] && [ -e "$CAM_LEFT_WRIST_ID" ]; then
+    CAM_LEFT_WRIST_RESOLVED_ID="$(readlink -f "$CAM_LEFT_WRIST_ID")"
+else
+    CAM_LEFT_WRIST_RESOLVED_ID="$CAM_LEFT_WRIST_ID"
+fi
 
 _cam_entry() {
-    local type="$1" id="$2" w="$3" h="$4" fps="$5" fourcc="${6:-}"
+    local type="$1" id="$2" w="$3" h="$4" fps="$5" fourcc="${6:-}" warmup_s="${7:-1}" backend="${8:-}"
     if [ "$type" = "opencv" ]; then
+        local backend_part=""
+        if [ -n "$backend" ]; then
+            backend_part=", backend: $backend"
+        fi
         if [ -n "$fourcc" ]; then
-            echo "{type: opencv, index_or_path: $id, width: $w, height: $h, fps: $fps, fourcc: '$fourcc'}"
+            echo "{type: opencv, index_or_path: $id, width: $w, height: $h, fps: $fps, fourcc: '$fourcc', warmup_s: $warmup_s$backend_part}"
         else
-            echo "{type: opencv, index_or_path: $id, width: $w, height: $h, fps: $fps}"
+            echo "{type: opencv, index_or_path: $id, width: $w, height: $h, fps: $fps, warmup_s: $warmup_s$backend_part}"
         fi
     else
-        echo "{type: intelrealsense, serial_number_or_name: '$id', width: $w, height: $h, fps: $fps}"
+        echo "{type: intelrealsense, serial_number_or_name: '$id', width: $w, height: $h, fps: $fps, warmup_s: $warmup_s}"
     fi
 }
 
 if [ -z "${CAMERAS+x}" ]; then
-    _lw=$(_cam_entry "$CAM_LEFT_WRIST_TYPE" "$CAM_LEFT_WRIST_ID" "$CAM_LEFT_WRIST_WIDTH" "$CAM_LEFT_WRIST_HEIGHT" "$CAM_LEFT_WRIST_FPS" "$CAM_LEFT_WRIST_FOURCC")
-    _top=$(_cam_entry "$CAM_TOP_TYPE" "$CAM_TOP_ID" "$CAM_TOP_WIDTH" "$CAM_TOP_HEIGHT" "$CAM_TOP_FPS")
+    _lw=$(_cam_entry "$CAM_LEFT_WRIST_TYPE" "$CAM_LEFT_WRIST_ID" "$CAM_LEFT_WRIST_WIDTH" "$CAM_LEFT_WRIST_HEIGHT" "$CAM_LEFT_WRIST_FPS" "$CAM_LEFT_WRIST_FOURCC" "$CAM_LEFT_WRIST_WARMUP_S" "$CAM_LEFT_WRIST_BACKEND")
+    _top=$(_cam_entry "$CAM_TOP_TYPE" "$CAM_TOP_ID" "$CAM_TOP_WIDTH" "$CAM_TOP_HEIGHT" "$CAM_TOP_FPS" "" "$CAM_TOP_WARMUP_S")
     CAMERAS="{ left_wrist: $_lw, top: $_top }"
     unset _lw _top
 fi
@@ -128,11 +148,14 @@ cat <<EOF
  norm mode : use_degrees=$USE_DEGREES  (false → 본체 5DoF -100~100, gripper 0~100)
  follower  : $ROBOT_TYPE ($FOLLOWER_ID)  port=$FOLLOWER_PORT
  leader    : $TELEOP_TYPE ($LEADER_ID)   port=$LEADER_PORT
- cameras   : left_wrist($CAM_LEFT_WRIST_TYPE:$CAM_LEFT_WRIST_ID ${CAM_LEFT_WRIST_WIDTH}x${CAM_LEFT_WRIST_HEIGHT}@${CAM_LEFT_WRIST_FPS}fps)
-             top($CAM_TOP_TYPE:$CAM_TOP_ID ${CAM_TOP_WIDTH}x${CAM_TOP_HEIGHT}@${CAM_TOP_FPS}fps)
+ cameras   : left_wrist($CAM_LEFT_WRIST_TYPE:$CAM_LEFT_WRIST_ID -> $CAM_LEFT_WRIST_RESOLVED_ID ${CAM_LEFT_WRIST_WIDTH}x${CAM_LEFT_WRIST_HEIGHT}@${CAM_LEFT_WRIST_FPS}fps warmup=${CAM_LEFT_WRIST_WARMUP_S}s backend=${CAM_LEFT_WRIST_BACKEND})
+             top($CAM_TOP_TYPE:$CAM_TOP_ID ${CAM_TOP_WIDTH}x${CAM_TOP_HEIGHT}@${CAM_TOP_FPS}fps warmup=${CAM_TOP_WARMUP_S}s)
  task      : $TASK
- dataset   : $REPO_ID  (root=$DATASET_ROOT)
- recording : ${NUM_EPISODES} episodes x ${EPISODE_TIME_S}s @ ${FPS}Hz  reset=${RESET_TIME_S}s
+ reset task: $RESET_TASK
+ close ds  : $REPO_ID  (root=$DATASET_ROOT)
+ open ds   : $RESET_REPO_ID  (root=$RESET_DATASET_ROOT)
+ recording : ${NUM_EPISODES} close/open cycles @ ${FPS}Hz
+             close=${EPISODE_TIME_S}s  open=${RESET_TIME_S}s  record_reset=$RECORD_RESET  reset_as_episode=$RESET_AS_EPISODE
  resume    : $RESUME  (true → 기존 데이터셋에 이어서)
  push_hub  : $PUSH_TO_HUB
 ====================================================
@@ -152,9 +175,14 @@ RECORD_ARGS=(
     --dataset.repo_id="$REPO_ID"
     --dataset.single_task="$TASK"
     --dataset.root="$DATASET_ROOT"
+    --dataset.reset_repo_id="$RESET_REPO_ID"
+    --dataset.reset_root="$RESET_DATASET_ROOT"
     --dataset.fps="$FPS"
     --dataset.episode_time_s="$EPISODE_TIME_S"
     --dataset.reset_time_s="$RESET_TIME_S"
+    --dataset.record_reset="$RECORD_RESET"
+    --dataset.reset_as_episode="$RESET_AS_EPISODE"
+    --dataset.reset_task="$RESET_TASK"
     --dataset.num_episodes="$NUM_EPISODES"
     --dataset.push_to_hub="$PUSH_TO_HUB"
     --dataset.vcodec="$VCODEC"

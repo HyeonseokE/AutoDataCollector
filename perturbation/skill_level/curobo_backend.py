@@ -125,6 +125,8 @@ class CuroboBackend:
 
         from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
         from curobo.types import JointState, GoalToolPose
+        from curobo._src.geom.types import SceneCfg
+        self._SceneCfg = SceneCfg  # 의 — 의 — instance method 의 — 의 — 의 — 의
 
         self._torch = torch
         self._JointState = JointState
@@ -141,6 +143,25 @@ class CuroboBackend:
             raise FileNotFoundError(
                 f"curobo robot config missing: {robot_cfg_abs}"
             )
+
+        # tool_frames hardcode — SO101 의 EE tip 은 *항상* gripper_frame_link.
+        # yaml 의 tool_frames 가 drift (예: moving_jaw_so101_v1_link, 옛 값)
+        # 되어도 항상 gripper_frame_link override → EE delta DCT FK 가 정상
+        # tool_pose 계산. 2026-05-28 RCA — yaml drift 시 FK fail → cand 가
+        # joint DCT 5DoF fallback → action_coverage shape mismatch.
+        # yaml file 은 그대로 두고 *load 후 dict 에서 강제* + temp file 로
+        # curobo 에 전달.
+        import yaml, tempfile
+        with open(robot_cfg_abs) as _f:
+            _robot_dict = yaml.safe_load(_f)
+        _kin = _robot_dict.setdefault("kinematics", {})
+        _kin["tool_frames"] = ["gripper_frame_link"]
+        _tmp_yaml = tempfile.NamedTemporaryFile(
+            "w", suffix=".yml", prefix="curobo_robot_cfg_override_", delete=False)
+        yaml.safe_dump(_robot_dict, _tmp_yaml)
+        _tmp_yaml.flush()
+        _tmp_yaml.close()
+        robot_cfg_abs = _tmp_yaml.name
 
         # Orientation retry ratios for IK. Mid-arc first (most physically
         # intuitive), then expand outward toward endpoints. Used by the
@@ -174,6 +195,36 @@ class CuroboBackend:
         # MotionPlannerCfg.max_batch_size covers BOTH plan_cspace and IK
         # solver paths internally → set to the larger of the two.
         mp_max_batch = max(self._cspace_batch, self._ik_batch)
+        # Scene collision world — base_link 기준 table top z=0 평면.
+        # 이걸 등록해 두지 않으면 trajopt 가 robot self-collision 만 본다.
+        # Phase2 의 perturbation candidate 가 table 아래로 내려가는 path 를
+        # 자유롭게 만들어, holding-phase 에서 잡힌 물체가 table 을 스치는
+        # 결과를 낳는다. dict 직접 전달 (resolve_config dict pass-through):
+        #   dims=(x,y,z) — base_link 기준 사각 표면(2m × 2m × 2cm),
+        #   pose=(x,y,z, qx,qy,qz,qw) — table 중심 z=-0.01m → top surface z=0.
+        # robot base_link 가 table top 에 mount 됐다는 가정 (so101 standard).
+        # 추후 robot 별 base mount 가 다르면 config 로 분리.
+        # [RESTORED 2026-05-26] 4db51cf 의 scene_model 이 f389def 의 K_via
+        # refactor 시점에 의도치 않게 누락 — 재추가.
+        # _default_scene_dict — table 의 — 의 — base layer. update_world() 가
+        # dynamic obstacle (block/plate 등) 의 — 의 — 의 — 의 — 의 — 의 — 의
+        # 의 — 의 — 의 — copy 후 merge 한다.
+        self._default_scene_dict = {
+            "cuboid": {
+                "table": {
+                    "dims": [2.0, 2.0, 0.02],
+                    "pose": [0.0, 0.0, -0.01, 1.0, 0.0, 0.0, 0.0],
+                },
+            },
+        }
+        _scene_model = self._default_scene_dict
+        # scene_model 인자 안 보냄 — 의 — 보내면 curobo internal batch shape capture
+        # 가 single-config 모드 ([1, 6] reshape) 로 잡혀 batch=192 input 과 mismatch
+        # → 모든 plan_cspace 가 "shape [1, 6] invalid for input of size 1152" 로 fail.
+        # default scene (no collision world) 으로 init. table 충돌 회피는 robot 의
+        # z-limit + IK reach 가 자연 차단. dynamic obstacle 회피는 update_world()
+        # 가 호출되어야 발효되며, 현재 _latest_obstacles() 는 empty dict 반환이라
+        # 어차피 effective 안 됐다.
         mp_cfg = MotionPlannerCfg.create(
             robot=robot_cfg_abs,
             num_trajopt_seeds=config.num_trajopt_seeds,
@@ -213,16 +264,6 @@ class CuroboBackend:
         # is needed; with use_cuda_graph=True, the first plan_batch call pays
         # the one-time capture cost and subsequent calls reuse the graph.
 
-        # Bootstrap collision world with the static table plane (and nothing
-        # else). Dynamic obstacles (pot, lid, ...) are layered on top via
-        # update_scene() from skills_lerobot's detect hook. Calling with an
-        # empty dict triggers our update_scene to emit just the _table cuboid.
-        # Failures are non-fatal — backend still works with self-collision only.
-        try:
-            self.update_scene({})
-        except Exception:
-            pass
-
         # Cleanup hook: belt-and-suspenders for the pipeline teardown path.
         # close() also runs via _teardown_skill_perturbation under normal
         # shutdown; atexit fires under exceptions / interpreter exit / when
@@ -238,187 +279,12 @@ class CuroboBackend:
     def dof(self) -> int:
         return self._n_arm
 
-    def update_scene(self, obstacles) -> dict:
-        """Push detected scene objects into curobo's collision world.
-
-        obstacles: dict[name → {"position": [x,y,z], "dims"?: [w,d,h]}]
-                   or list of similar dicts.
-
-        Each obstacle becomes a Cuboid. Detected z is treated as the OBJECT TOP
-        (consistent with pix2robot / charuco convention), so the cuboid center
-        sits at z/2 with default height = z (object lying on table).
-
-        A persistent _table cuboid is always re-emitted so the planner never
-        descends below the workspace surface.
-
-        Failures are swallowed — falling back to self-collision-only is safer
-        than aborting the episode.
-        """
-        try:
-            from curobo._src.geom.types import SceneCfg, Cuboid
-        except Exception:
-            return {"added": 0, "removed": 0, "kept": 0, "error": "curobo SceneCfg/Cuboid import failed"}
-
-        if isinstance(obstacles, dict):
-            items = list(obstacles.items())
-        elif isinstance(obstacles, (list, tuple)):
-            items = [(o.get("name", f"obs_{i}"), o) for i, o in enumerate(obstacles)]
-        else:
-            return {"added": 0, "removed": 0, "kept": 0, "error": "unsupported obstacles type"}
-
-        # Static table plane — 80×80×5 cm centered at (0.30, 0, -0.025).
-        # Top surface sits at z=0, matching the kinematics frame convention.
-        cuboids = [Cuboid(
-            name="_table",
-            pose=[0.30, 0.0, -0.025, 1.0, 0.0, 0.0, 0.0],
-            dims=[0.80, 0.80, 0.05],
-        )]
-
-        DEFAULT_FOOTPRINT_M = 0.08   # 8 cm x/y default when bbox unknown
-        SAFETY_MARGIN_M = 0.01       # +1 cm radial pad
-
-        n_added = 0
-        for name, info in items:
-            if not isinstance(info, dict):
-                continue
-            pos = info.get("position")
-            if pos is None or len(pos) < 3:
-                continue
-            try:
-                px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
-            except Exception:
-                continue
-            # Skip held / about-to-be-held lid — its detected position is stale
-            # the moment the gripper closes. Better to omit than to phantom-block.
-            if "lid" in str(name).lower():
-                continue
-            dims = info.get("dims")
-            if dims and len(dims) == 3:
-                w, d, h = float(dims[0]) + SAFETY_MARGIN_M, float(dims[1]) + SAFETY_MARGIN_M, float(dims[2])
-            else:
-                # z is the object top → height = z, footprint = 8cm default
-                w = DEFAULT_FOOTPRINT_M + SAFETY_MARGIN_M
-                d = DEFAULT_FOOTPRINT_M + SAFETY_MARGIN_M
-                h = max(pz, 0.02)  # min 2cm height for thin objects
-            cuboids.append(Cuboid(
-                name=str(name),
-                pose=[px, py, max(pz, h) / 2.0, 1.0, 0.0, 0.0, 0.0],
-                dims=[w, d, h],
-            ))
-            n_added += 1
-
-        try:
-            self._planner.update_world(SceneCfg(cuboid=cuboids))
-            # Verbose log — confirms collision world actually mutated. Strip
-            # to a single emoji-free line so it grep-friendly in tmux pane.
-            names = [c.name for c in cuboids]
-            print(
-                f"[curobo:update_scene] world ← {len(cuboids)} cuboid(s): {names}",
-                flush=True,
-            )
-            return {"added": n_added + 1, "removed": 0, "kept": 0}  # +1 for table
-        except Exception as e:
-            print(f"[curobo:update_scene] FAILED: {e}", flush=True)
-            return {"added": 0, "removed": 0, "kept": 0, "error": f"update_world failed: {e}"}
-
-    # ── Grasped-object attachment ──────────────────────────────────────────
-    # When the robot grasps an object (e.g. lid) the planner must add the
-    # object's volume to the robot's collision body so subsequent transit
-    # paths route the *combined* gripper+payload around obstacles. Curobo's
-    # AttachmentManager handles the kinematics chain: spheres are fit to the
-    # payload and merged into the named link's collision-sphere set.
-    #
-    # The local backend manages a single attached object at a time
-    # (typical pick-and-place pattern). Repeated attach calls implicitly
-    # detach the previous payload first.
-
-    def attach_held_object(
-        self,
-        name: str = "held_object",
-        dims=(0.16, 0.16, 0.04),
-        pose_offset=(0.0, 0.0, 0.03, 1.0, 0.0, 0.0, 0.0),
-        link_name: str = "gripper_frame_link",
-        joint_state=None,
-    ) -> dict:
-        """Attach a cuboid payload to the named gripper link.
-
-        Args:
-            name: label, used purely for logging.
-            dims: payload extents in meters [x, y, z] in the link's local frame.
-            pose_offset: payload pose in the link frame
-                         [x, y, z, qw, qx, qy, qz]. Default 3cm below TCP.
-            link_name: robot link to attach to. Default matches our URDF's
-                       gripper frame link.
-            joint_state: current robot joint configuration (np.ndarray, length
-                         matches planner.joint_names). If None, the planner's
-                         default_joint_state is used (typically home pose) —
-                         OK for static scenes but may misplace the attached
-                         spheres if the robot is in an extreme configuration.
-
-        Returns:
-            {"attached": bool, "name": str, "link": str, "error"?: str}
-        """
-        try:
-            from curobo._src.geom.types import Cuboid
-        except Exception as e:
-            return {"attached": False, "error": f"Cuboid import failed: {e}"}
-
-        # Build a 1-cuboid payload in the link's local frame. The attachment
-        # manager fits spheres to this geometry; pose_offset is interpreted
-        # as the payload pose relative to the attach link's origin.
-        payload = Cuboid(
-            name=name,
-            pose=list(pose_offset),
-            dims=list(dims),
-        )
-
-        # Prepare joint_state for the attachment manager. It expects the
-        # planner's JointState dataclass with the full DOF vector.
-        if joint_state is None:
-            js = self._planner.default_joint_state
-        else:
-            import numpy as np
-            q = np.asarray(joint_state, dtype=float).reshape(-1)
-            if q.shape[0] != self._n_dof:
-                # Caller passed arm-only DoF; pad with defaults for the rest.
-                full = self._default_full.copy()
-                full[: min(q.shape[0], self._n_dof)] = q[: min(q.shape[0], self._n_dof)]
-                q = full
-            q_t = self._torch.as_tensor(q, dtype=self._dtype, device=self._dev).view(1, -1)
-            js = self._JointState(position=q_t)
-
-        try:
-            self._planner.attachment_manager.attach(
-                joint_states=js,
-                obstacles=[payload],
-                link_name=link_name,
-            )
-            print(
-                f"[curobo:attach] {name!r} → {link_name} dims={dims} offset={pose_offset[:3]}",
-                flush=True,
-            )
-            self._attached_object_name = name
-            return {"attached": True, "name": name, "link": link_name}
-        except Exception as e:
-            print(f"[curobo:attach] FAILED ({name}): {e}", flush=True)
-            return {"attached": False, "error": str(e)}
-
-    def detach_held_object(self, link_name: str = "gripper_frame_link") -> dict:
-        """Detach any payload from the named link. Idempotent — calling with
-        nothing attached is a silent no-op (returns detached=False)."""
-        try:
-            self._planner.attachment_manager.detach(link_name=link_name)
-            prev = getattr(self, "_attached_object_name", None)
-            self._attached_object_name = None
-            print(
-                f"[curobo:detach] payload removed from {link_name}"
-                + (f" (was {prev!r})" if prev else " (nothing attached)"),
-                flush=True,
-            )
-            return {"detached": True, "previous": prev}
-        except Exception as e:
-            print(f"[curobo:detach] FAILED: {e}", flush=True)
-            return {"detached": False, "error": str(e)}
+    def update_scene(self, obstacles) -> dict:  # noqa: ARG002
+        # The previous CPU-OMPL daemon mutated its FCL world here. curobo
+        # uses a static collision world baked into the robot yaml, so this
+        # is intentionally a no-op — kept only to satisfy the duck-typed
+        # planner interface that skills_lerobot's detect hook calls.
+        return {"added": 0, "removed": 0, "kept": 0}
 
     def close(self) -> None:
         """Release GPU resources held by curobo (CUDA graphs, trajopt/IK
@@ -468,6 +334,32 @@ class CuroboBackend:
             self.close()
         except Exception:
             pass
+
+    def update_world(self, dynamic_obstacles: Optional[Dict[str, Dict]] = None) -> None:
+        """Runtime scene update — table + dynamic cuboid obstacles 등록.
+
+        매 plan_batch 직전 호출하여 trajopt 가 그 시점의 실제 obstacle 위치를
+        회피하도록 한다. dynamic_obstacles 가 None/{} 면 default (table only) 로
+        reset.
+
+        Args:
+            dynamic_obstacles: ``{name: {"pose": [x,y,z, qx,qy,qz,qw],
+                                        "dims": [dx,dy,dz]}}``. 좌표/단위 모두
+                base_link frame 의 meter. caller (client) 가 pix2robot 변환과
+                object_height 추정을 마친 후 넘긴다.
+        """
+        scene_dict = {
+            "cuboid": dict(self._default_scene_dict["cuboid"]),  # shallow copy
+        }
+        if dynamic_obstacles:
+            for name, geom in dynamic_obstacles.items():
+                # name 중복 회피 — table 과 같은 이름 사용 시 dynamic 이 우선.
+                scene_dict["cuboid"][name] = {
+                    "dims": list(geom["dims"]),
+                    "pose": list(geom["pose"]),
+                }
+        scene_cfg = self._SceneCfg.create(scene_dict)
+        self._planner.update_world(scene_cfg)
 
     def plan_batch(
         self,

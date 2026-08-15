@@ -20,8 +20,10 @@ cd "$REPO_DIR"
 # -------- conda env --------
 CONDA_ENV="${CONDA_ENV:-lerobot}"
 # shellcheck disable=SC1091
+set +u
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate "$CONDA_ENV"
+set -u
 export PYTHONNOUSERSITE=1
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
@@ -33,7 +35,7 @@ FOLLOWER_ID="${FOLLOWER_ID:-so101_robot2}"
 
 # -------- leader (robot2 leader) --------
 TELEOP_TYPE="${TELEOP_TYPE:-so101_leader}"
-LEADER_PORT="${LEADER_PORT:-/dev/ttyACM4}"
+LEADER_PORT="${LEADER_PORT:-/dev/ttyACM3}"
 LEADER_ID="${LEADER_ID:-so101_robot2_leader}"
 
 # -------- cameras --------

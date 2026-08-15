@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # 설정 (Configuration)
-MODEL="Qnvidia/Cosmos-Reason1-7B"  # 2B 권장, 7B는 더 정확
+MODEL="nvidia/Cosmos-Reason1-7B"  # 2B 권장, 7B는 더 정확
 HOST="0.0.0.0"
 PORT=8002  # LLM 서버(8001)와 분리
 MAX_MODEL_LEN=8192

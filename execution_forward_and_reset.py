@@ -173,9 +173,7 @@ class ForwardAndResetPipeline(BasePipeline):
         recording_fps: int = 30,
         resume_recording: bool = False,
         # Multi-turn options
-        multi_turn: bool = False,
-        cad_image_dirs: List[str] = None,
-        side_view_image: str = None,
+        multi_turn: bool = True,
         codegen_model: str = None,
         reset_instruction: str = None,
         skip_turn_test: bool = False,
@@ -201,7 +199,6 @@ class ForwardAndResetPipeline(BasePipeline):
             dataset_repo_id: 데이터셋 저장 경로 (예: "user/my_dataset")
             recording_fps: 레코딩 FPS (기본: 30)
             multi_turn: True면 crop-then-point 멀티턴 LLM 코드 생성 사용
-            cad_image_dirs: CAD 참조 이미지 디렉토리 리스트 (옵션)
             recording_config: recording config YAML 경로 (None이면 기본 recording_config.yaml)
             method3_phase: "phase1" (subgoal seeding, 기본) | "phase2" (MI selection).
                 phase1 → buffer-aware subgoal selector active.
@@ -221,8 +218,6 @@ class ForwardAndResetPipeline(BasePipeline):
 
         # Multi-turn options
         self.multi_turn = multi_turn
-        self.cad_image_dirs = cad_image_dirs or []
-        self.side_view_image = side_view_image
         self.codegen_model = codegen_model
         self.reset_instruction = reset_instruction or "move objects to certain position"
         self.skip_turn_test = skip_turn_test
@@ -286,7 +281,11 @@ class ForwardAndResetPipeline(BasePipeline):
         # Episode tracking for logging
         self.current_episode: int = 1
         self.total_episodes: int = 1
-        self.current_phase: str = "Forward"  # "Forward" or "Reset"
+        # "Idle" until an episode's forward execution starts; run() flips it to
+        # "Forward"/"Reset". Default is NOT "Forward" so pre-episode work (setup,
+        # _restore_to_seed seed-restore motion) is NOT picked up by the EE-trace
+        # logger, which only records while current_phase == "Forward".
+        self.current_phase: str = "Idle"  # "Idle" | "Forward" | "Reset"
 
         # First episode positions for "original" reset mode
         # Stores the first episode's detection result to avoid cumulative drift
@@ -304,6 +303,11 @@ class ForwardAndResetPipeline(BasePipeline):
         # 레코딩 모드 초기화 (resume 모드는 cleanup 후 초기화)
         if self.record_dataset and not self.resume_recording:
             self._init_recording()
+
+        # Recording 안 켜져도 LivePreview(top + wrist) 를 띄울 수 있게 camera_manager
+        # + AsyncCameraCapture 를 선행 init. RECORD_DATASET=true 경로는 _init_recording
+        # 가 동등한 setup 을 이미 하므로 이 메서드는 그 경우 no-op.
+        self._init_live_preview_camera()
 
     @staticmethod
     def _extract_position_keys(code: str) -> List[str]:
@@ -706,7 +710,14 @@ class ForwardAndResetPipeline(BasePipeline):
             # 디렉터리 기준으로 _finalize_subgoal_buffer 에서 해석된다.
             # None → 메모리 전용 (이 run 동안만 grow).
             self._subgoal_buffer_file = pert_raw.get("buffer_file")
-            buffer = SubgoalBuffer()  # file 은 finalize 에서 바인딩
+            buffer = SubgoalBuffer()  # forward buffer — file 은 finalize 에서 바인딩
+            # enabled_reset=true 면 reset 동작의 subgoal 을 별도 buffer 에 분리
+            # 저장한다. forward staging 은 selector.buffer(=forward), reset flush
+            # 시점에만 selector.buffer 를 이 reset buffer 로 swap 한다 (reset judge
+            # 후). reset=false 면 None — reset 중 selector 가 detach 돼 staging 자체
+            # 가 없으므로 기존 단일-buffer 동작과 동일.
+            self._subgoal_buffer_forward = buffer
+            self._subgoal_buffer_reset = SubgoalBuffer() if reset else None
             # kinematics 주입 — paradigm 일관화 _on_skill_stamp callback 이
             # start_state(joint) → start_ee 변환에 사용. _skills.kinematics
             # 는 LeRobotSkills 가 connect() 후 노출.
@@ -762,6 +773,18 @@ class ForwardAndResetPipeline(BasePipeline):
                 path = base / path
             selector.buffer.set_file(path)
             selector.buffer.load()
+            # reset buffer 도 별도 파일로 바인딩 (forward 와 분리 영속화).
+            # forward 가 subgoal_buffer.npz 면 reset 은 subgoal_buffer_reset.npz.
+            _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+            if _reset_buf is not None:
+                _rpath = path.with_name(f"{path.stem}_reset{path.suffix}")
+                _reset_buf.set_file(_rpath)
+                _reset_buf.load()
+                print(
+                    f"\033[92m[Perturbation] reset subgoal buffer → "
+                    f"{_reset_buf.file_path()} (preloaded {_reset_buf.total_size()} "
+                    f"entries over {len(_reset_buf.skill_ids())} skills)\033[0m"
+                )
             # subgoal selection trace (jsonl) — 분석용. 사용자 요청.
             # session_dir/subgoal_phase1_trace.jsonl 에 각 select_subgoal 호출의
             # candidate scores + 선정 정보 append.
@@ -875,6 +898,69 @@ class ForwardAndResetPipeline(BasePipeline):
         except Exception as e:
             print(f"[Perturbation] subgoal buffer finalize skipped: {e}")
 
+    def _reconcile_one_subgoal_buffer(self, bf_path, keep_ids, label: str) -> None:
+        """단일 subgoal buffer ``.npz`` 의 stale entry 를 ``keep_ids`` 기준 제거 + save.
+
+        ``_reconcile_subgoal_buffer_on_resume`` 의 per-buffer 로직 (forward/reset
+        buffer 공용). ``bf_path`` 가 없으면 no-op. forward 와 reset 은 같은
+        episode_id 로 stamp 되므로 동일한 ``keep_ids`` 를 그대로 사용한다.
+        """
+        from method3.phase1_state_seeding import SubgoalBuffer
+        _GREEN = "\033[92m"
+        _YELLOW = "\033[93m"
+        _RESET = "\033[0m"
+        if not bf_path.exists():
+            print(
+                f"{_YELLOW}[Perturbation] resume reconcile — no {label} file at "
+                f"{bf_path} (nothing to reconcile){_RESET}"
+            )
+            return
+        buf = SubgoalBuffer()
+        buf.set_file(bf_path)
+        buf.load()
+        _before_total = buf.total_size()
+
+        # Pre-reconcile breakdown
+        _to_drop: dict[str, dict[str, int]] = {}
+        _untagged_kept = 0
+        for _sid, _entries in buf._skills.items():
+            for _e in _entries:
+                _eid = str(getattr(_e, "episode_id", ""))
+                if not _eid:
+                    _untagged_kept += 1
+                    continue
+                if _eid not in keep_ids:
+                    _to_drop.setdefault(_eid, {})
+                    _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
+
+        if _to_drop:
+            _n_eps = len(_to_drop)
+            _total = sum(sum(d.values()) for d in _to_drop.values())
+            print(
+                f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
+                f"to drop from {label} ({_total} entries total):{_RESET}"
+            )
+            for _eid in sorted(_to_drop):
+                _per_ep = sum(_to_drop[_eid].values())
+                _bd = ", ".join(
+                    f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
+                )
+                print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
+        else:
+            print(
+                f"{_GREEN}[Perturbation] resume reconcile — no stale {label} "
+                f"entries to drop ({_before_total} entries; kept {len(keep_ids)} "
+                f"TRUE episodes){_RESET}"
+            )
+
+        _removed = buf.retain_episodes(keep_ids)  # auto save()
+        print(
+            f"{_GREEN}[Perturbation] resume reconcile DONE ({label}) — kept "
+            f"{len(keep_ids)} TRUE episodes, dropped {_removed} stale buffer "
+            f"entries (buffer {_before_total} → {buf.total_size()}; "
+            f"{_untagged_kept} untagged preserved){_RESET}"
+        )
+
     def _reconcile_subgoal_buffer_on_resume(self, session_dir: str | None) -> None:
         """Resume 시 subgoal_buffer.npz 의 stale entry 를 정리한다 (selector-free).
 
@@ -926,68 +1012,20 @@ class ForwardAndResetPipeline(BasePipeline):
         if not buffer_file:
             return
         try:
-            from method3.phase1_state_seeding import SubgoalBuffer
             from method3.episode_lifecycle import episode_id
             bf_path = Path(buffer_file)
             if not bf_path.is_absolute():
                 base = Path(session_dir) if session_dir else Path(".")
                 bf_path = base / bf_path
-            _GREEN = "\033[92m"
-            _YELLOW = "\033[93m"
-            _RESET = "\033[0m"
-            if not bf_path.exists():
-                print(
-                    f"{_YELLOW}[Perturbation] resume reconcile — "
-                    f"no buffer file at {bf_path} (nothing to reconcile){_RESET}"
-                )
-                self._resume_kept_true_episodes = None
-                return
-
-            buf = SubgoalBuffer()
-            buf.set_file(bf_path)
-            buf.load()
-            _before_total = buf.total_size()
             _keep_ids = {episode_id(n) for n in _kept}
-
-            # Pre-reconcile breakdown
-            _to_drop: dict[str, dict[str, int]] = {}
-            _untagged_kept = 0
-            for _sid, _entries in buf._skills.items():
-                for _e in _entries:
-                    _eid = str(getattr(_e, "episode_id", ""))
-                    if not _eid:
-                        _untagged_kept += 1
-                        continue
-                    if _eid not in _keep_ids:
-                        _to_drop.setdefault(_eid, {})
-                        _to_drop[_eid][_sid] = _to_drop[_eid].get(_sid, 0) + 1
-
-            if _to_drop:
-                _n_eps = len(_to_drop)
-                _total = sum(sum(d.values()) for d in _to_drop.values())
-                print(
-                    f"{_GREEN}[Perturbation] resume reconcile — {_n_eps} episode(s) "
-                    f"to drop from subgoal_buffer ({_total} entries total):{_RESET}"
-                )
-                for _eid in sorted(_to_drop):
-                    _per_ep = sum(_to_drop[_eid].values())
-                    _bd = ", ".join(
-                        f"{sk}={n}" for sk, n in sorted(_to_drop[_eid].items())
-                    )
-                    print(f"{_GREEN}    - {_eid}: {_per_ep} entries ({_bd}){_RESET}")
-            else:
-                print(
-                    f"{_GREEN}[Perturbation] resume reconcile — no stale subgoal_buffer "
-                    f"entries to drop ({_before_total} entries; kept {len(_keep_ids)} "
-                    f"TRUE episodes){_RESET}"
-                )
-
-            _removed = buf.retain_episodes(_keep_ids)  # auto save()
-            print(
-                f"{_GREEN}[Perturbation] resume reconcile DONE — kept {len(_keep_ids)} "
-                f"TRUE episodes, dropped {_removed} stale buffer entries "
-                f"(buffer {_before_total} → {buf.total_size()}; "
-                f"{_untagged_kept} untagged preserved){_RESET}"
+            # forward buffer + reset buffer (subgoal_buffer_reset.npz) 를 동일한
+            # keep_ids 로 정리. forward 와 reset 은 같은 episode_id 로 stamp 되므로
+            # stale 판정 기준이 동일하다. reset buffer 파일이 없으면(enabled_reset
+            # 미사용/첫 run) 헬퍼가 no-op.
+            self._reconcile_one_subgoal_buffer(bf_path, _keep_ids, "subgoal_buffer")
+            _rpath = bf_path.with_name(f"{bf_path.stem}_reset{bf_path.suffix}")
+            self._reconcile_one_subgoal_buffer(
+                _rpath, _keep_ids, "subgoal_buffer_reset"
             )
 
             # 중복 호출 방지 — finalize 의 reconcile 블록이 None 보고 skip.
@@ -1588,6 +1626,21 @@ class ForwardAndResetPipeline(BasePipeline):
                 )
         except Exception as e:
             print(f"[Perturbation] subgoal buffer persist skipped: {e}")
+        # reset buffer 도 영속화 (forward 와 분리). reset flush 마다 save 되지만
+        # 마지막 미flush staging 대비 + 일관성 위해 teardown 에서도 한 번 더.
+        _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+        if _reset_buf is not None:
+            try:
+                _reset_buf.save()
+                _rfp = _reset_buf.file_path()
+                if _rfp is not None:
+                    print(
+                        f"[Perturbation] reset subgoal buffer saved → {_rfp} "
+                        f"({_reset_buf.total_size()} entries over "
+                        f"{len(_reset_buf.skill_ids())} skills)"
+                    )
+            except Exception as e:
+                print(f"[Perturbation] reset subgoal buffer persist skipped: {e}")
         self._subgoal_selector = None
         if hasattr(self, "_skills") and self._skills is not None:
             try:
@@ -2407,6 +2460,99 @@ class ForwardAndResetPipeline(BasePipeline):
                 f"Fix the recorder/camera error, or drop --record to run without recording."
             ) from e
 
+    def _init_live_preview_camera(self) -> None:
+        """RECORD_DATASET=false 에서도 LivePreview 가 frame 을 받도록 카메라 선행 init.
+
+        recording 모드일 땐 _init_recording 이 camera_manager 와 AsyncCameraCapture
+        (per-skill-exec, RecordingContext.setup 경로) 를 띄우므로 여기서는 no-op.
+        non-recording 모드에서는:
+            1) recording_config yaml 로 MultiCameraManager build + connect
+            2) 장수명 AsyncCameraCapture 를 띄워 RecordingContext._async_capture 에 attach
+            3) atexit 로 stop + disconnect 보장
+        PipelineCamera.initialize() 가 camera_manager 기반 'top' 카메라를 우선 사용하므로
+        VLM capture 경로와 device 충돌 없음.
+        """
+        import os
+        if os.environ.get("LIVE_PREVIEW_ENABLED", "").lower() != "true":
+            return
+        if self.record_dataset:
+            return
+        if not self.recording_config:
+            print("[LivePreview] recording_config 미지정 → 비-레코딩 preview 카메라 init skip")
+            return
+        try:
+            from record_dataset.config import create_camera_manager_from_config
+            from record_dataset.async_camera import AsyncCameraCapture
+            from record_dataset.context import RecordingContext
+
+            print("[LivePreview] non-recording 모드 — camera_manager + AsyncCameraCapture 선행 init")
+            self.camera_manager = create_camera_manager_from_config(
+                yaml_path=self.recording_config, num_robots=1,
+            )
+            self.camera_manager.connect_all()
+            print(f"[LivePreview] cameras connected: {self.camera_manager.camera_names}")
+
+            # capture_fps 는 의도적으로 낮춤(15Hz). Recording 모드의 50Hz 제어 루프와
+            # 달리, preview 는 LIVE_PREVIEW_FPS=10 으로 표시되기 때문에 60Hz 캡처는
+            # 과잉. MultiCameraManager.async_read_all 은 카메라 ≥2 일 때 매 호출마다
+            # ThreadPoolExecutor 를 새로 spawn (multi_camera.py:225) 하므로 60Hz×2cam
+            # = 120 spawn/sec → GIL 압박이 커 rerun gRPC writer thread 가 starve →
+            # "Write messages call failed: transport error" 로 EE trace 실시간
+            # streaming 이 끊긴다. 15Hz 로 낮춰 30 spawn/sec 까지 줄임.
+            cap = AsyncCameraCapture(camera_manager=self.camera_manager, capture_fps=15)
+            cap.start()
+            RecordingContext._async_capture = cap
+            self._live_preview_capture = cap
+
+            import atexit
+            atexit.register(self._teardown_live_preview_camera)
+        except Exception as e:
+            print(f"[LivePreview] non-recording preview 카메라 setup 실패: {e}")
+            import traceback; traceback.print_exc()
+            # 카메라가 부분적으로 열려있으면 정리. 실패해도 파이프라인 자체는
+            # 계속 (PipelineCamera 가 direct RealSense 로 fallback 함).
+            if self.camera_manager is not None:
+                try:
+                    self.camera_manager.disconnect_all()
+                except Exception:
+                    pass
+            self.camera_manager = None
+            self._live_preview_capture = None
+
+    def _teardown_live_preview_camera(self) -> None:
+        """_init_live_preview_camera 가 띄운 자원 정리 (atexit 콜백).
+
+        Ctrl+C 가 두 번 들어와 atexit chain 자체가 끊겨도 cosmetic 노이즈
+        ("[AsyncCamera] Capture error: cannot schedule new futures after
+        interpreter shutdown") 가 나오지 않도록, stop_event 먼저 set 하고
+        에러 출력 카운터(_capture_errors) 를 임계치(5) 위로 올려 둔다 —
+        capture loop 의 except 가 print 를 silently skip.
+        """
+        cap = getattr(self, "_live_preview_capture", None)
+        if cap is not None:
+            try:
+                # 에러 출력 prefix-suppress: capture loop 의 except 가 _capture_errors <= 5
+                # 일 때만 print 함. 인터프리터 종료 단계에서 ThreadPoolExecutor 가
+                # 새 future 거부하며 매 호출 raise → 우리는 이미 stop 하는 중이라 silently.
+                cap._capture_errors = 999
+                cap._stop_event.set()
+                cap.stop()
+            except Exception:
+                pass
+            try:
+                from record_dataset.context import RecordingContext
+                if RecordingContext._async_capture is cap:
+                    RecordingContext._async_capture = None
+            except Exception:
+                pass
+            self._live_preview_capture = None
+        if not self.record_dataset and self.camera_manager is not None:
+            try:
+                self.camera_manager.disconnect_all()
+            except Exception:
+                pass
+            self.camera_manager = None
+
     def _start_reset_episode_recording(self, target_positions: Dict) -> None:
         """Reset 에피소드 레코딩 시작 (별도 dataset, recorder 교체)"""
         try:
@@ -2628,8 +2774,6 @@ class ForwardAndResetPipeline(BasePipeline):
             total_episodes=self.total_episodes,
             fallback_positions=positions,
             camera=active_camera,
-            cad_image_dirs=self.cad_image_dirs,
-            side_view_image=self.side_view_image,
             codegen_model=self.codegen_model,
             skip_codegen=skip_codegen,
             canonical_labels=canonical_labels,
@@ -3966,6 +4110,32 @@ class ForwardAndResetPipeline(BasePipeline):
                     rj_pred = reset_judge_result.get('prediction', 'UNCERTAIN')
                     pred_color = GREEN if rj_pred == "TRUE" else RED if rj_pred == "FALSE" else YELLOW
                     print(f"  Prediction: {pred_color}{rj_pred}{RESET}")
+
+                    # reset 동작의 staged subgoal 을 *reset 전용* buffer 에 commit.
+                    # forward flush(judge 직후)가 이미 _pending 을 비웠으므로 여기
+                    # _pending 에는 reset phase staging 만 남아 있다. flush 동안만
+                    # selector.buffer 를 reset buffer 로 swap → subgoal_buffer_reset.npz
+                    # 에 저장. reset judge TRUE 면 commit, 아니면 discard(둘 다 _pending
+                    # clear). enabled_reset=false 면 _subgoal_buffer_reset=None → skip
+                    # (reset 중 selector detach 라 staging 자체가 없음).
+                    _subgoal_sel = getattr(self, "_subgoal_selector", None)
+                    _reset_buf = getattr(self, "_subgoal_buffer_reset", None)
+                    if _subgoal_sel is not None and _reset_buf is not None:
+                        _orig_buf = _subgoal_sel.buffer
+                        _subgoal_sel.buffer = _reset_buf
+                        try:
+                            if rj_pred == "TRUE":
+                                from method3.episode_lifecycle import episode_id as _mk_ep_id
+                                _ep_n = getattr(self, "current_episode", None)
+                                _ep_id = _mk_ep_id(_ep_n) if _ep_n else ""
+                                _subgoal_sel.flush_episode(episode_id=_ep_id)
+                            else:
+                                _subgoal_sel.discard_episode()
+                        except Exception as _e:
+                            print(f"[Perturbation] reset subgoal buffer flush skipped: {_e}")
+                        finally:
+                            _subgoal_sel.buffer = _orig_buf
+
                     rj_reasoning = reset_judge_result.get('reasoning', '')
                     if rj_reasoning:
                         reasoning_preview = rj_reasoning[:200]
@@ -4926,6 +5096,11 @@ class ForwardAndResetPipeline(BasePipeline):
 
         현재 물체 위치를 검출하고, target_positions로 이동하는 Reset 코드를 생성/실행.
         """
+        # Seed-restore is reset-like (no dataset recording) — mark the phase so the
+        # EE-trace logger (records only while current_phase == "Forward") skips the
+        # restore motion. run() flips it back to "Forward" at the next episode.
+        self.current_phase = "Reset"
+
         CYAN = "\033[96m"
         GREEN = "\033[92m"
         RED = "\033[91m"
@@ -5916,19 +6091,21 @@ def main():
              "If not specified, uses pipeline_config/recording_config.yaml"
     )
 
-    # Multi-turn 옵션
+    # Multi-turn 은 이제 기본 동작. --multi-turn 은 기존 ws2/3/4/8 스크립트가
+    # 계속 넘기고 있어 no-op 으로 남겨둔다 (제거하면 그쪽이 깨짐).
     parser.add_argument(
         "--multi-turn",
+        dest="multi_turn",
         action="store_true",
-        help="Use crop-then-point multi-turn LLM code generation (requires Gemini model)"
+        default=True,
+        help="(default, no-op) crop-then-point multi-turn LLM code generation"
     )
-
     parser.add_argument(
-        "--cad-image-dirs",
-        type=str,
-        nargs="*",
-        default=None,
-        help="CAD reference image directories for Turn 0 scene understanding"
+        "--no-multi-turn",
+        dest="multi_turn",
+        action="store_false",
+        help="Opt out of multi-turn and use the legacy single-turn "
+             "(Grounding DINO detection) code generation path"
     )
 
     parser.add_argument(
@@ -5945,12 +6122,6 @@ def main():
         help="VLM model for detect_objects skill (default: uses gemini-3.1-flash-lite)"
     )
 
-    parser.add_argument(
-        "--side-view-image",
-        type=str,
-        default=None,
-        help="Side-view image path for Turn Test waypoint trajectory prediction"
-    )
 
     parser.add_argument(
         "--reset-instruction",
@@ -6001,9 +6172,33 @@ def main():
 
     args = parser.parse_args()
 
+    # Live side-by-side camera preview — env-driven, non-intrusive.
+    # RecordingContext._async_capture 가 cycle 시작 시 init 되면 그때부터 frame
+    # polling 시작. cycle 종료 시 atexit 로 자동 stop.
+    if os.environ.get("LIVE_PREVIEW_ENABLED", "").lower() == "true":
+        try:
+            from record_dataset.live_preview import LivePreviewWindow
+            _cams = [
+                c.strip()
+                for c in os.environ.get("LIVE_PREVIEW_CAMERAS", "top,left_wrist").split(",")
+                if c.strip()
+            ]
+            _live_preview = LivePreviewWindow(
+                camera_names=_cams,
+                fps=float(os.environ.get("LIVE_PREVIEW_FPS", "10")),
+                scale=float(os.environ.get("LIVE_PREVIEW_SCALE", "1.0")),
+            )
+            _live_preview.start()
+            import atexit as _atexit
+            _atexit.register(_live_preview.stop)
+        except Exception as _e:
+            print(f"  [LivePreview] init failed: {_e}", flush=True)
+
     # 서버 모드 설정 (환경변수로 전달)
     if args.use_server:
-        import os
+        # NOTE: `os` is imported at module top (line 24). A function-local
+        # `import os` here would make `os` local to main() for the WHOLE scope,
+        # breaking the earlier os.environ.get() calls (UnboundLocalError).
         os.environ["USE_LLM_SERVER"] = "1"
         os.environ["USE_VLM_SERVER"] = "1"  # Judge용 VLM 서버 모드 활성화
         # CodeGen LLM 서버 설정
@@ -6033,8 +6228,6 @@ def main():
             dataset_repo_id=args.dataset_repo_id,
             resume_recording=bool(args.resume),
             multi_turn=args.multi_turn,
-            cad_image_dirs=args.cad_image_dirs,
-            side_view_image=args.side_view_image,
             recording_fps=args.recording_fps,
             codegen_model=args.codegen_session2_model,
             reset_instruction=args.reset_instruction,
@@ -6067,8 +6260,6 @@ def main():
             dataset_repo_id=args.dataset_repo_id,
             resume_recording=bool(args.resume),
             multi_turn=args.multi_turn,
-            cad_image_dirs=args.cad_image_dirs,
-            side_view_image=args.side_view_image,
             recording_fps=args.recording_fps,
             codegen_model=args.codegen_session2_model,
             reset_instruction=args.reset_instruction,
@@ -6076,8 +6267,37 @@ def main():
             detect_model=args.detect_model,
             resetspace_per_robot=resetspace_per_robot,
             recording_config=args.recording_config,
-            method3_phase=args.phase,
         )
+
+    # Live 3D EE-trajectory trace — env-driven, non-intrusive (mirrors LivePreview).
+    # Wired AFTER pipeline construction because the poller reads pipeline state
+    # (_latest_robot_state / current_episode / current_phase). Single-arm only.
+    if os.environ.get("EE_TRACE_ENABLED", "").lower() == "true":
+        if len(robot_ids) == 1 and hasattr(pipeline, "_latest_robot_state"):
+            try:
+                from record_dataset.live_ee_trace import LiveEETraceWindow
+                _ee_trace = LiveEETraceWindow(
+                    pipeline=pipeline,
+                    robot_id=robot_ids[0],
+                    fps=float(os.environ.get("EE_TRACE_FPS", "15")),
+                    npz_path=os.environ.get("EE_TRACE_NPZ") or None,
+                    rrd_path=os.environ.get("EE_TRACE_RRD") or None,
+                    # 누적 경로 rerun 뷰어는 TRAJ_VISUALIZER=true 일 때만 뜬다.
+                    # 미지정이면 legacy EE_TRACE_SPAWN 으로 fallback.
+                    viewer=os.environ.get(
+                        "TRAJ_VISUALIZER",
+                        os.environ.get("EE_TRACE_SPAWN", "false"),
+                    ).lower() == "true",
+                    max_speed_mps=float(os.environ.get("EE_TRACE_MAX_SPEED", "2.0")),
+                    max_jump_m=float(os.environ.get("EE_TRACE_MAX_JUMP", "0.08")),
+                )
+                _ee_trace.start()
+                import atexit as _atexit
+                _atexit.register(_ee_trace.stop)
+            except Exception as _e:
+                print(f"  [EETrace] init failed: {_e}", flush=True)
+        else:
+            print("  [EETrace] skipped — single-arm pipeline required", flush=True)
 
     # 에피소드 실행: resume 모드와 새 세션 모드 분기
     if args.resume:

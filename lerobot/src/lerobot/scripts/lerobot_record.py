@@ -296,6 +296,29 @@ class RecordConfig:
 """
 
 
+# EE-trajectory trace hook (AutoDataCollector add-on, env-gated). Logs the
+# teleoperated demonstration's end-effector path into the rerun session that
+# `display_data` already started, one distinct color per episode. Self-contained
+# and non-intrusive: a no-op unless EE_TRACE_ENABLED=true. See
+# record_dataset/live_ee_trace.py (TeleopEETraceLogger).
+_EE_LOGGER = None
+_EE_LOGGER_INIT = False
+
+
+def _ee_trace_logger():
+    global _EE_LOGGER, _EE_LOGGER_INIT
+    if not _EE_LOGGER_INIT:
+        _EE_LOGGER_INIT = True
+        try:
+            from record_dataset.live_ee_trace import get_teleop_ee_logger
+
+            _EE_LOGGER = get_teleop_ee_logger()
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"[EETrace] disabled ({e})")
+            _EE_LOGGER = None
+    return _EE_LOGGER
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -319,6 +342,7 @@ def record_loop(
     single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
+    ee_trace: bool = False,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -437,6 +461,12 @@ def record_loop(
             log_rerun_data(
                 observation=obs_processed, action=action_values, compress_images=display_compressed_images
             )
+
+        # Accumulate this demonstration's EE path into the same rerun session.
+        if ee_trace and dataset is not None:
+            _logger = _ee_trace_logger()
+            if _logger is not None:
+                _logger.log_obs(obs_processed, dataset.num_episodes)
 
         dt_s = time.perf_counter() - start_loop_t
 
@@ -617,6 +647,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
+                    ee_trace=True,
                 )
 
                 if cfg.dataset.record_reset and cfg.dataset.reset_as_episode:
@@ -711,6 +742,11 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                 recorded_episodes += 1
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
+
+        # Dump accumulated EE-trajectory trace for offline mp4 rendering.
+        _ee_logger = _ee_trace_logger()
+        if _ee_logger is not None:
+            _ee_logger.dump_npz()
 
         if dataset:
             dataset.finalize()

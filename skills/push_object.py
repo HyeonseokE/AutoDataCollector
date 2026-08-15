@@ -52,6 +52,7 @@ def push_object(
     object_name: Optional[str] = None,
     skill_description: Optional[str] = None,
     compliance_torque: Optional[int] = None,
+    disable_descent_overshoot: bool = False,
 ) -> bool:
     """
     물체를 접촉하여 직선으로 밀기.
@@ -118,7 +119,10 @@ def push_object(
     # push_height 그대로 명령하면 그리퍼가 push_height 위 1.5cm 에서 멈춰
     # 물체 / 핸들에 닿지 않음. pick_offset 만큼 더 깊게 명령해 saturation 을
     # 보상하면 실제 도달 z 가 push_height 부근에 정착.
-    DESCENT_OVERSHOOT = float(getattr(skills, "pick_offset", 0.025))
+    # caller 가 disable_descent_overshoot=True 면 saturation 영역(테이블 근처)
+    # 밖이라 over-descent 가 오히려 어긋남 → 0 으로 (drawer/door handle 같은
+    # 케이스: pull_object 와 동일 패턴).
+    DESCENT_OVERSHOOT = 0.0 if disable_descent_overshoot else float(getattr(skills, "pick_offset", 0.025))
     MIN_PUSH_Z = -0.025   # 책상 아래 -2.5cm 까지 명령 허용 (모터 자체 floor 이 보호)
     descent_target_z = max(push_height - DESCENT_OVERSHOOT, MIN_PUSH_Z)
 
@@ -266,22 +270,29 @@ def push_object_handle_close(
     HANDLE_PUSH_TORQUE_LIMIT = 500   # 0-1000, Step 2 (linear push) 동안만 적용
                                      # 너무 낮으면 motor 가 못 푸시 / 못 holds; 500 이 적정선
 
-    # 핸들 z 보다 3cm 낮은 지점에서 밀기 — robot0 새 캘리브에서 핸들 z 그대로
-    # 밀면 너무 위쪽 (핸들 상단/위) 을 치는 문제 보정. 하드코딩 (per-robot
-    # 튜닝 필요해지면 compensation 파일로 옮길 것).
-    PUSH_HEIGHT_OFFSET = -0.03
+    # PUSH_HEIGHT_OFFSET 은 historically -3cm (pix2robot z 가 핸들보다 위로
+    # 평가되는 보정용) 였지만, 아래에서 start_pos[2] 를 측정 기반 16cm 로
+    # 하드코딩하므로 offset 불필요 → 0.
+    PUSH_HEIGHT_OFFSET = 0.0
 
     start_pos = np.array(start_position, dtype=float)
+    # HARDCODED grasp z (16cm above robot base) — pull_object 와 동일한 패치.
+    # 2D pix2robot 이 모든 점에 z=table 을 부여하지만 drawer/door handle 은
+    # 실제론 캐비넷 높이만큼 떠 있음 → caller 의 start_position[2] (테이블 z)
+    # 무시하고 실측 높이로 override.
+    start_pos[2] = 0.16
     actual_push_distance = float(distance) + CLOSE_OVERSHOOT
     end_pos = [float(start_pos[0]) + actual_push_distance, float(start_pos[1]), float(start_pos[2])]
     push_height = float(start_pos[2]) + PUSH_HEIGHT_OFFSET
     skills._log(f"\n[execute_push close] input distance={float(distance)*100:.1f}cm, "
                 f"+overshoot {CLOSE_OVERSHOOT*100:.0f}cm = actual push {actual_push_distance*100:.1f}cm"
-                f" | push_height={push_height*100:.1f}cm (handle_z{PUSH_HEIGHT_OFFSET*100:+.0f}cm)")
+                f" | push_height={push_height*100:.1f}cm (handle_z hardcoded 16cm)")
 
     # compliance_torque=HANDLE_PUSH_TORQUE_LIMIT 를 push_object 에 위임.
     # push_object 가 Step 2 (linear push) 직전에 set, 직후 restore — Step 1 (descent)
     # 와 Step 3 (retreat) 는 full 토크로 진행되어 도달/복귀 보장.
+    # disable_descent_overshoot=True — 16cm 는 모터 saturation 영역 밖이라
+    # over-descent 가 오히려 실제 도달 z 를 어긋나게 한다 (pull_object 와 동일).
     return push_object(
         skills,
         start_position=start_pos,
@@ -292,6 +303,7 @@ def push_object_handle_close(
         object_name=object_name,
         skill_description=skill_description,
         compliance_torque=HANDLE_PUSH_TORQUE_LIMIT,
+        disable_descent_overshoot=True,
     )
 
 

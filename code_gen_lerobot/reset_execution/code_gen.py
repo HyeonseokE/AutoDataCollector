@@ -899,7 +899,7 @@ def lerobot_reset_code_gen_multi_turn(
         obj_strategy = strategy_by_label.get(label)
         resp = gemini_chat_send(chat, gen_config,
             {
-                "text": turn2_crop_pointing_prompt(label, has_side_view=False, manipulation_strategy=obj_strategy),
+                "text": turn2_crop_pointing_prompt(label, manipulation_strategy=obj_strategy),
                 "image_path": crop_path,
             },
             turn_label=f"Crop: {label}")

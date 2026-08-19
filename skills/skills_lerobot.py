@@ -851,6 +851,9 @@ class LeRobotSkills:
             Tuple of (normalized_arm, radians_arm, ee_position)
         """
         pos_all = self.robot.read_positions(normalize=True)
+        # SCRAPE: keep the full 6-joint measurement so recording sites can log
+        # observation.state without issuing a second read_positions() call.
+        self._last_measured_all = pos_all.astype(np.float32)
         pos_arm_norm = pos_all[:5]
         # Note: self.current_gripper_pos는 목표값(action)으로 유지, 실제값으로 덮어쓰지 않음
 
@@ -966,7 +969,11 @@ class LeRobotSkills:
                 break
 
             # 1. Read current state BEFORE writing command (_execute_trajectory와 동일)
-            actual_arm = self.robot.read_positions(normalize=True)[:5]
+            # SCRAPE fix: read all 6 joints. The gripper used to be logged as the
+            # interpolated TARGET (gripper_pos), which made observation.state[5]
+            # bit-identical to action[5] in every frame.
+            actual_all = self.robot.read_positions(normalize=True)
+            actual_arm = actual_all[:5]
 
             # 2. Cosine smoothing (time-based)
             alpha = min(elapsed / duration, 1.0)
@@ -986,7 +993,7 @@ class LeRobotSkills:
             # 5. Recording: state=명령 전 실제 서보, action=보간된 목표
             if self.recording_callback is not None:
                 try:
-                    state_full = np.concatenate([actual_arm, [gripper_pos]]).astype(np.float32)
+                    state_full = actual_all.astype(np.float32)
                     self.recording_callback(state_full, full_normalized.copy())
                 except Exception as _rec_e:
                     if not getattr(self, '_rec_err_logged', False):
@@ -1047,9 +1054,11 @@ class LeRobotSkills:
             # Send command
             self.robot.write_positions(full_normalized, normalize=True)
 
-            # Inline recording (reuse current_arm_norm, no extra serial read)
+            # SCRAPE fix: state must be MEASURED, not the command we just sent.
+            # This logged current_arm_norm + current_gripper -- both commands --
+            # so observation.state == action for all 6 joints here.
             if self.recording_callback is not None:
-                state_full = np.concatenate([current_arm_norm, [current_gripper]])
+                state_full = self.robot.read_positions(normalize=True)
                 self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
 
             # precise_sleep to maintain RECORDING_FPS
@@ -1178,7 +1187,9 @@ class LeRobotSkills:
             # Inline recording (every iteration = 1 frame at RECORDING_FPS)
             # Traj + Hold 모두 녹화: state=실제 서보, action=명령 목표
             if self.recording_callback is not None:
-                state_full = np.concatenate([actual_norm, [gripper_cmd]])
+                # SCRAPE fix: gripper was logged as the command (gripper_cmd).
+                # _get_current_state() above already measured all 6 joints.
+                state_full = self._last_measured_all
                 self.recording_callback(state_full.astype(np.float32), full_normalized.copy())
 
             # Live gripper pitch (debug). FK is ~0.1ms so per-step is fine.

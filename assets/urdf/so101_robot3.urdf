@@ -279,7 +279,7 @@
       <geometry>
         <mesh filename="assets/wrist_roll_follower_so101_v1.stl"/>
       </geometry>
-      <material name="3d_printed"/>
+      <material name="sts3215"/>
     </visual>
     <collision>
       <origin xyz="8.32667e-17 -0.000218214 0.000949706" rpy="-3.14159 -5.55112e-17 0"/>
@@ -319,7 +319,7 @@
       <geometry>
         <mesh filename="assets/moving_jaw_so101_v1.stl"/>
       </geometry>
-      <material name="3d_printed"/>
+      <material name="sts3215"/>
     </visual>
     <collision>
       <origin xyz="-5.55112e-17 -5.55112e-17 0.0189" rpy="9.53145e-17 6.93889e-18 1.24077e-24"/>
@@ -335,7 +335,11 @@
     <parent link="gripper_link"/>
     <child link="moving_jaw_so101_v1_link"/>
     <axis xyz="0 0 1"/>
-    <limit effort="10" velocity="10" lower="-0.00153" upper="2.25648"/>
+    <!-- lower extended -0.00153 -> -0.18 to match SCRAPE's verified gripper
+         convention: ADC normalized=0 is the same encoder position as RWDC
+         normalized=-100, which is -0.18 rad (fully closed sit pose).
+         See SCRAPE-IsaacLab 76ebc6f and SCRAPE_SIT_POSE_RAD in so101_cfg.py. -->
+    <limit effort="10" velocity="10" lower="-0.18" upper="2.25648"/>
   </joint>
 
   <transmission name="gripper_trans">

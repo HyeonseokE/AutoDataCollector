@@ -12,8 +12,17 @@ from __future__ import annotations
 
 import numpy as np
 
-# descriptor = concat(x_EE (3), x_EE - goal (3))
-DESCRIPTOR_DIM = 6
+# [GOAL-RELATIVE 2026-08-25] descriptor 에서 절대 좌표 x_EE 를 뺀다.
+# 기존 6-dim `[x_EE, x_EE - g]` 는 절대 좌표 절반이 섞여 있어, 버퍼에 20개
+# layout 의 절대 위치가 함께 쌓이면 novelty 가 "어느 레이아웃인가"에 지배됐다
+# (레이아웃 간 수십 cm ≫ 후보 간 ≤5cm). 그 결과 argmax 가 이전 레이아웃들에서
+# 멀어지는 한 방향으로만 쏠렸다 (실측: offset 크기가 반경의 93%, 방향 일관성 0.45).
+# 목표 상대분만 남기면 novelty 가 "이 skill 에서 어떤 상대 접근을 이미 써봤나"를
+# 재게 되어 레이아웃 위치가 개입하지 않는다.
+# 절대 공간의 state coverage 는 layout seed 20 개가 담당한다.
+# Phase2 는 이 필드를 쓰지 않는다 (seed_anchor 는 entry.subgoal 절대 xyz 사용).
+# descriptor = x_EE - goal (3)
+DESCRIPTOR_DIM = 3
 
 
 def state_descriptor(ee_xyz: np.ndarray, goal: np.ndarray) -> np.ndarray:
@@ -28,4 +37,4 @@ def state_descriptor(ee_xyz: np.ndarray, goal: np.ndarray) -> np.ndarray:
     """
     ee = np.asarray(ee_xyz, dtype=np.float64).reshape(3)
     g = np.asarray(goal, dtype=np.float64).reshape(3)
-    return np.concatenate([ee, ee - g])
+    return ee - g

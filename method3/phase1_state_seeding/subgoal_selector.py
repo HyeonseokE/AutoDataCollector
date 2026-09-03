@@ -39,6 +39,12 @@ from method3.phase1_state_seeding.subgoal_validity import (
 )
 from method3.phase1_state_seeding.terminal_descriptor import state_descriptor
 
+# [POISSON-DISK 2026-08-26] 최소 분리거리 계수. r_min = 이 값 · R · (1/(n+1))^(1/3)
+# (R = clip_factor·sigma, n = 해당 skill 버퍼 크기). 0.75 는 더미 실험에서
+# 거리 분포를 균등 수준(0.805 vs 0.794)으로 유지하면서 최소 분리 0.162R 을
+# 확보한 값이다. 0 으로 두면 모든 후보가 통과해 순수 랜덤(=A1)이 된다.
+POISSON_R_MIN_FACTOR = 0.75
+
 # module-level optional import — _on_skill_stamp 의 hot path 라 매 호출 import
 # 회피. record_dataset 가 install 안 된 환경 (테스트) 에서는 None.
 try:
@@ -361,11 +367,44 @@ class Phase1SubgoalSelector:
             gain = float(np.mean(novelties))                              # §5.4 G_S^goal
             reports.append(SubgoalScoreReport(int(j), goal, gain))
 
-        # §5.4 — gain 내림차순으로 feasibility 를 검사해 처음 통과하는 후보를
-        # 선택한다 (= feasible 후보 중 argmax G_S^goal). 전부 infeasible 이면
-        # nominal 로 폴백한다 (하류 move_to_position 의 retry·abort 에 위임).
-        ranked = sorted(range(len(reports)), key=lambda i: reports[i].gain,
-                        reverse=True)
+        # [POISSON-DISK 2026-08-26] argmax G_S^goal 를 최소분리 제약 + 랜덤
+        # 채택으로 바꾼다.
+        #
+        # 왜: 후보는 반경 R = clip_factor·sigma 구 안에 갇혀 있는데, argmax 는
+        # "버퍼에서 가장 먼 후보"라 구조적으로 구 껍질만 고른다 (더미 실험:
+        # 거리/R 중앙 0.938, 경계>0.95R 45%; 실측 sort_by_color A2 는 0.956/54%).
+        # sort_by_color 는 에피소드당 섭동 스킬이 13 종이라 R 급 섭동이 연쇄되어
+        # 수집 성공률이 23% 까지 떨어졌다 (push_button 은 2 종이라 97%).
+        # 게다가 argmax 는 "가장 먼 하나"만 볼 뿐 실제 분리를 보장하지 않아
+        # 최근접 분리가 0.048R 까지 내려간다 — 겹치는 subgoal 이 실제로 생긴다.
+        #
+        # 대신 "최근접 버퍼 점까지 거리 >= r_min" 인 후보들 중 랜덤으로 뽑는다
+        # (poisson-disk / blue-noise). 더미 실험: 거리/R 중앙 0.805(균등 0.794 와
+        # 동등), 경계>0.95R 16%, 최소 분리 0.162R — 겹침 방지는 오히려 3 배 낫다.
+        # r_min 은 버퍼가 찰수록 자동 축소해 후보 고갈을 막고, 전부 기각되면
+        # gain 최대(= 기존 argmax)로 폴백한다.
+        # [SCALE FIX 2026-08-26] r_min 은 descriptor 공간에서 재야 한다.
+        # d_sep 는 terminal descriptor 거리인데 초기 구현은 offset 공간의
+        # R = clip_factor·sigma 를 썼다. 두 공간의 스케일이 달라 실측에서는
+        # 후보 1 개만 통과했고(선택==argmax 63/67) poisson 경로가 사실상 죽었다.
+        # 버퍼 자신의 해상도 s_g (= max(d̄_NN, s_min), §5.4 에서 이미 계산) 를
+        # 기준으로 삼으면 공간이 일치하고 skill 마다 자동으로 맞춰진다.
+        _n_buf = int(keys.shape[0])
+        _r_min = POISSON_R_MIN_FACTOR * float(scale)
+        _sep = {}
+        for _ri, _rep in enumerate(reports):
+            _h, _ = self._terminal_region(current_ee, _rep.goal)
+            _sep[_ri] = float(min(
+                float(np.min(np.linalg.norm(keys - _h_tau, axis=1)))
+                for _h_tau in _h))
+        _ok = [i for i, d in _sep.items() if d >= _r_min]
+        if _ok:
+            ranked = [int(i) for i in rng.permutation(np.asarray(_ok))]
+            ranked += sorted((i for i in range(len(reports)) if i not in set(_ok)),
+                             key=lambda i: reports[i].gain, reverse=True)
+        else:
+            ranked = sorted(range(len(reports)), key=lambda i: reports[i].gain,
+                            reverse=True)
         for n_checked, ri in enumerate(ranked, start=1):
             best_idx = reports[ri].candidate_index
             if bool(feas(candidates[best_idx])):

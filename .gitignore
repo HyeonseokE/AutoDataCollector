@@ -95,3 +95,6 @@ grpc_server/buffer/
 
 # docs trajectory/dataset npz cache (downloaded, regenerable)
 docs/.cache_*/
+
+# 작업 중 만든 원본 백업 (로컬 전용)
+*.bak

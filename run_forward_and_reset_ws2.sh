@@ -162,9 +162,31 @@ EE_TRACE_ROTATE_DEG="${EE_TRACE_ROTATE_DEG:-0}"     # 0=고정 시점(싱크/합
 EE_TRACE_EYE="${EE_TRACE_EYE:-0 -0.05 0.15}"        # 카메라 위치 (3값, 공백 구분)
 EE_TRACE_HEAD_SIZE="${EE_TRACE_HEAD_SIZE:-110}"     # 현재 EE 강조 점 크기
 
-# Multi-turn (crop-then-point) 코드 생성은 이제 기본 동작 — 토글 제거됨.
-# 굳이 옛 single-turn (Grounding DINO 검출) 경로를 쓰려면 --no-multi-turn 을 붙일 것.
-# CAD 참조 이미지 / side-view 이미지 옵션도 미사용이라 제거됨.
+# ===================== task 종류 ============================
+## distribute chocolate pies to each plate
+# INSTRUCTION="Distribute chocolate pies to each plate"
+# RESET_INSTRUCTION=""
+
+# # open and close the pot
+# INSTRUCTION="Close the pot."
+# RESET_INSTRUCTION="Open the pot."
+
+## Open drawer
+# INSTRUCTION="Open the top drawer 7cm."
+# RESET_INSTRUCTION="Close the top drawer 7cm."
+
+### [dual arm task]
+## towel folding
+# INSTRUCTION="fold the towel in half from top to bottom."
+# RESET_INSTRUCTION="unfold the towel from bottom to top to recover its original flat state"
+
+## move
+# INSTRUCTION="move the yellow block from top-left area to bottom-right edge"
+# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left area"
+
+## hand over the sponge
+# INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
+# RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
 
 # ============================================================
 # Config 파일 로드 함수

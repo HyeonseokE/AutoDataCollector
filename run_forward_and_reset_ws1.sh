@@ -119,11 +119,6 @@ EE_TRACE_ROTATE_DEG="${EE_TRACE_ROTATE_DEG:-0}"     # 0=고정 시점(싱크/합
 EE_TRACE_EYE="${EE_TRACE_EYE:-0 -0.05 0.15}"        # 카메라 위치 (3값, 공백 구분)
 EE_TRACE_HEAD_SIZE="${EE_TRACE_HEAD_SIZE:-110}"     # 현재 EE 강조 점 크기
 
-# Multi-turn (crop-then-point) 코드 생성은 이제 기본 동작 — 토글 제거됨.
-# 굳이 옛 single-turn (Grounding DINO 검출) 경로를 쓰려면 --no-multi-turn 을 붙일 것.
-# CAD 참조 이미지 / side-view 이미지 옵션도 미사용이라 제거됨.
-
-
 # ===================== task 종류 ============================
 ## distribute chocolate pies to each plate
 # INSTRUCTION="Distribute chocolate pies to each plate"
@@ -149,8 +144,6 @@ EE_TRACE_HEAD_SIZE="${EE_TRACE_HEAD_SIZE:-110}"     # 현재 EE 강조 점 크�
 ## hand over the sponge
 # INSTRUCTION="move the yellow block from top-left edge to bottom-right edge"
 # RESET_INSTRUCTION="move the yellow block from bottom-right edge to top-left edge"
-
-## Reset_instruction(Empty is default: "move objects to certain position")
 
 # ============================================================
 # Config 파일 로드 함수

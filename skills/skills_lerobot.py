@@ -202,6 +202,7 @@ class LeRobotSkills:
 
         # Last movement error (for reporting)
         self.last_error: Optional[dict] = None
+        self.last_stall_detected: bool = False  # 직전 move 가 접촉으로 조기 종료됐는지
 
         # Pix2Robot calibrator (loaded on connect if available)
         self.pix2robot = None
@@ -1067,6 +1068,21 @@ class LeRobotSkills:
     # Recording FPS — controls the single-loop rate (same as LeRobot official)
     RECORDING_FPS = 30
 
+    # ── Contact-stall detection ──────────────────────────────────────────────
+    # 그리퍼가 테이블/물체에 닿아 더 못 가는데도 루프가 MAX_TOTAL_TIME 까지 도달
+    # 불가능한 Goal_Position 을 계속 재전송하면, STS3215 내부 P 제어기가
+    # Torque_Limit(기본 1000)까지 전류를 올려 stall 한다. 정체 + 고부하를 보고
+    # 조기 종료해 밀어붙이는 시간을 ~1.5s → ~0.3s 로 줄인다.
+    # 토크 설정은 건드리지 않으므로 중력 유지력은 그대로 (팔 처짐 위험 없음).
+    STALL_DETECT_ENABLED = True
+    STALL_ERROR_DELTA = 0.0005   # tick 당 오차 변화 < 0.5mm 면 "정체"
+    STALL_MIN_TICKS = 8          # 정체가 이만큼 지속되면 부하 확인 시작 (~0.27s @30Hz)
+    STALL_CONFIRM_TICKS = 2      # 고부하가 연속 이만큼 확인되면 종료 (단발 오독 방지)
+    STALL_LOAD_THRESHOLD = 500   # arm 5축 |Present_Load| 임계 (0~1000)
+    STALL_LOAD_READ_EVERY = 3    # 정체 중 부하 읽기 주기 (tick). 매 tick 읽으면
+                                 # 시리얼 왕복 6회가 30Hz 예산을 갉아먹어 녹화
+                                 # 프레임 간격이 흔들린다 → 3 tick 마다만 읽는다.
+
     def _execute_trajectory(
         self,
         trajectory,
@@ -1105,6 +1121,12 @@ class LeRobotSkills:
 
         target_reached = False
         reach_time = None
+
+        # Contact-stall 상태 (클래스 상수 설명 참조)
+        stagnant_ticks = 0
+        stall_confirm = 0
+        prev_error = None
+        stalled = False
 
         # Real-time gripper pitch tracking (debug). pitch = arcsin(gripper Z
         # elevation): 0° horizontal, -90° straight down. Tracked per control
@@ -1216,6 +1238,40 @@ class LeRobotSkills:
             else:
                 reach_time = None
 
+            # ── Contact stall: 오차 정체 + 모터 고부하 = 뭔가에 닿아 못 감 → 조기 종료 ──
+            # 정체 판정은 이미 읽은 position_error 비교라 공짜. Present_Load 는 시리얼
+            # 왕복 6회라 비싸므로, 정체가 STALL_MIN_TICKS 이상 확인된 뒤에만 읽는다
+            # → 정상 이동 중에는 추가 시리얼 트래픽 0.
+            if self.STALL_DETECT_ENABLED:
+                if (prev_error is not None
+                        and position_error > POSITION_TOLERANCE
+                        and abs(prev_error - position_error) < self.STALL_ERROR_DELTA):
+                    stagnant_ticks += 1
+                else:
+                    stagnant_ticks = 0
+                    stall_confirm = 0
+                prev_error = position_error
+
+                if (stagnant_ticks >= self.STALL_MIN_TICKS
+                        and (stagnant_ticks - self.STALL_MIN_TICKS)
+                            % self.STALL_LOAD_READ_EVERY == 0):
+                    try:
+                        # gripper(idx 5) 제외 — 파지력은 정상적으로 높다.
+                        arm_load = float(np.max(np.abs(self.robot.read_present_load()[:5])))
+                    except Exception:  # 읽기 실패 시 0 → 조기 종료 안 함 (보수적)
+                        arm_load = 0.0
+                    if arm_load > self.STALL_LOAD_THRESHOLD:
+                        stall_confirm += 1
+                        if stall_confirm >= self.STALL_CONFIRM_TICKS:
+                            stalled = True
+                            if self.verbose:
+                                print(f"\n  Contact stall — err {position_error*1000:.1f}mm "
+                                      f"정체 {stagnant_ticks} tick, arm load {arm_load:.0f}/1000. "
+                                      f"조기 종료 ({elapsed:.2f}s / {MAX_TOTAL_TIME:.2f}s)")
+                            break
+                    else:
+                        stall_confirm = 0
+
             # Timeout
             if elapsed > MAX_TOTAL_TIME:
                 if self.verbose:
@@ -1238,6 +1294,8 @@ class LeRobotSkills:
                 )
             if target_reached:
                 print(f"\r  [{'=' * 30}] Done (err: {position_error*1000:.1f}mm){pitch_report}    ")
+            elif stalled:
+                print(f"\r  [{'=' * 30}] Contact stall (err: {position_error*1000:.1f}mm){pitch_report}")
             else:
                 print(f"\r  [{'=' * 30}] Timeout (err: {position_error*1000:.1f}mm){pitch_report}")
 
@@ -1252,6 +1310,10 @@ class LeRobotSkills:
             actual_position=final_ee,
         )
         self._print_error(self.last_error, description)
+
+        # 접촉으로 조기 종료했는지 — caller 가 "실제 도달 z" 를 쓰는 판단에 참고
+        # (push_object/pull_object 의 saturation 보정 로직이 읽을 수 있게 노출).
+        self.last_stall_detected = stalled
 
         return target_reached or position_error < POSITION_TOLERANCE * 4  # 20mm 허용
     

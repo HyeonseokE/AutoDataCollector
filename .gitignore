@@ -56,7 +56,6 @@ pipeline_config/paid_api_config.yaml
 pipeline_config/free_api_config.yaml
 pipeline_config/cad_images/
 pipeline_config/side_view_images/
-robot_configs/
 
 # Legacy folders (DO NOT MODIFY)
 code_gen/

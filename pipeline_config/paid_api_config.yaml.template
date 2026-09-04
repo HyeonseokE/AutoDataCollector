@@ -1,0 +1,28 @@
+# Paid API Configuration
+#
+# TEMPLATE — pipeline_config/paid_api_config.yaml 로 복사 후 사용.
+# (실제 파일은 .gitignore 로 제외됨. API 키는 환경변수로 주입.)
+# 유료 API (OpenAI, Google 등) 사용 시 설정
+# USE_SERVER=false 일 때 사용됨
+
+# 코드 생성용 LLM 모델 (Session 1: scene understanding, detection, waypoints)
+# 예: gpt-4o-mini, gpt-4o, gemini-1.5-flash, deepseek-chat
+codegen_llm_model: "gemini-3.1-flash-lite"
+
+# Code Generation Session 2 모델 (context handoff 후 코드 생성 전용)
+# Session 1의 누적 컨텍스트 없이 요약 + API doc만으로 코드 생성
+codegen_session2_model: "gemini-3-flash-preview"
+
+# detect_objects 스킬용 VLM 모델 (코드 실행 중 객체 재검출)
+detect_objects_model: "gemini-3-flash-preview"
+
+# Judge VLM 모델
+# 예: gpt-4o, gpt-4o-mini
+# judge_vlm_model: "gpt-4o"
+judge_vlm_model: "gemini-3.1-flash-lite"
+
+# Judge UI 타임아웃 (초)
+# 0이면 키 입력 대기 (무한 대기)
+# 10초 = EXECUTE_RESET=false 일 때 manual reset window (사용자가 환경 재배치할 시간).
+# 끝나면 키 한 번 누르면 즉시 다음 episode 진행.
+judge_timeout: 10.0

@@ -1,0 +1,111 @@
+{
+  "robot_id": "robot0",
+  "description": "Adaptive compensation parameters for SO-101 Robot 0 (auto-calibrated)",
+  "calibration_date": "2026-05-06",
+  "deadband": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 1.35,
+    "elbow_flex": 2.22,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "offset_positive": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": -1.226,
+    "elbow_flex": -2.318,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "offset_negative": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.127,
+    "elbow_flex": -0.114,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "preload_gain": 0.5,
+
+  "z_offset": 0.01,
+  "_z_offset_comment": "Per-robot pick/place z offset (meters, signed). Added to BOTH execute_pick_object and execute_place_object commanded z. Positive = raise (descend less), negative = descend further. 2026-05-23: +0.04 → 0.0 (neutralized after robot0 recalibration; observe new sag baseline before re-tuning).",
+
+  "pick_xy_offset": 0.01,
+  "_pick_xy_offset_comment": "Pick-only radial xy offset (meters, signed). Pushes pick xy outward along base→object direction. Positive = further from base, negative = closer. Applied at execute_pick_object AND pull_object (shared helper). 2026-05-23: +0.03 → +0.01 (3cm was over-shooting drawer handles).",
+
+  "pick_offset": 0.02,
+  "_pick_offset_comment": "Per-robot pick depth from object top (meters). pick_z = object_height − pick_offset + z_offset + sag_offset. Larger = grip higher on object. 2026-05-25: 0.0 → 0.02 (close-lid task: grip lid handle 2cm above its top for safer pinch).",
+
+  "base_compensation": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.13,
+    "elbow_flex": 0.52,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "z_adaptive": {
+    "low_z_threshold": 0.12,
+    "mid_z_threshold": 0.15,
+    "low_z_factor": 2.0,
+    "mid_z_factor": 1.75,
+    "high_z_factor": 1.5
+  },
+  "gravity_sag": {
+    "enabled": true,
+    "base_sag": 0.20,
+    "gain": 0.24,
+    "reach_power": 2.0,
+    "z_deadzone": 0.05,
+    "max_offset": 0.05,
+    "_comment": "Hand-tuned over auto-cal (auto fit settled at base_sag=0 because no-payload calibration data was ~6mm at low z; production pick with payload showed 14.7mm at reach=0.27). base_sag=0.20 + reach_power=2.0 reproduces the 14.7mm pick-region observation while preserving cantilever-style reach^2 scaling. gain=0.24 retained for high-z extra droop."
+  },
+  "gravity_lut": {
+    "joint_names": [
+      "shoulder_pan",
+      "shoulder_lift",
+      "elbow_flex",
+      "wrist_flex",
+      "wrist_roll"
+    ],
+    "lut": {
+      "shoulder_lift": {
+        "angles": [
+          -60.0,
+          -46.67,
+          -33.33,
+          -20.0,
+          -6.67,
+          6.67,
+          20.0
+        ],
+        "corrections": [
+          0.505,
+          0.028,
+          0.14,
+          -0.168,
+          -0.225,
+          -0.281,
+          0.084
+        ]
+      },
+      "elbow_flex": {
+        "angles": [
+          0.0,
+          13.33,
+          26.67,
+          40.0,
+          53.33,
+          66.67,
+          80.0
+        ],
+        "corrections": [
+          -2.216,
+          -0.461,
+          -0.335,
+          -0.208,
+          -0.262,
+          -0.498,
+          0.081
+        ]
+      }
+    }
+  }
+}

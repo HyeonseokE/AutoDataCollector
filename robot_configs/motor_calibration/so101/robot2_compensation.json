@@ -1,0 +1,108 @@
+{
+  "robot_id": "robot2",
+  "description": "Adaptive compensation parameters for SO-101 Robot 2",
+  "calibration_date": "2025-12-18",
+  "deadband": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 1.91,
+    "elbow_flex": 2.86,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "offset_positive": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": -0.92,
+    "elbow_flex": 1.48,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "offset_negative": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 0.92,
+    "elbow_flex": -1.48,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "preload_gain": 0.5,
+  "z_offset": 0.04,
+  "_z_offset_comment": "Per-robot pick/place z offset (meters, signed). Added to BOTH execute_pick_object and execute_place_object commanded z. Positive = raise (descend less), negative = descend further. 2026-05-24: 0.0 → +0.03 (+3cm).",
+  "pick_xy_offset": 0.0,
+  "_pick_xy_offset_comment": "Per-robot pick xy radial overshoot (meters, signed). Pushes execute_pick_object's pick xy outward along the base→object radial direction. Positive = reach further out. Compensates the controller's systematic radial undershoot at Hold-phase plateau (elbow/wrist_flex deadband). 2026-05-24: 0.01 → 0.0.",
+  "pick_offset": 0.04,
+  "_pick_offset_comment": "Per-robot pick depth from object top (meters). execute_pick_object uses pick_z = object_height - pick_offset + z_offset. Larger = descend lower. 2026-06-04: set to 0.04 with z_offset=+0.03 so ws1 robot2 forward/reset pick commands 1cm below object top.",
+  "place_offset": 0.01,
+  "_place_offset_comment": "Per-robot additional place descent (meters). execute_place_object subtracts this from computed place_z. Larger = release lower. 2026-06-04: set to 0.02 so ws1 robot2 places blocks 2cm lower.",
+  "base_compensation": {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": 1.84,
+    "elbow_flex": 2.95,
+    "wrist_flex": 0.0,
+    "wrist_roll": 0.0
+  },
+  "z_adaptive": {
+    "low_z_threshold": 0.12,
+    "mid_z_threshold": 0.15,
+    "low_z_factor": 2.0,
+    "mid_z_factor": 1.75,
+    "high_z_factor": 1.5
+  },
+  "gravity_sag": {
+    "enabled": true,
+    "gain": 1.1,
+    "reach_power": 2.0,
+    "z_deadzone": 0.05,
+    "max_offset": 0.05,
+    "_comment": "sag = gain * reach^reach_power * max(0, z - z_deadzone). Calibrated from robot2 logs."
+  },
+  "gravity_lut": {
+    "joint_names": [
+      "shoulder_pan",
+      "shoulder_lift",
+      "elbow_flex",
+      "wrist_flex",
+      "wrist_roll"
+    ],
+    "lut": {
+      "shoulder_lift": {
+        "angles": [
+          -60.0,
+          -46.67,
+          -33.33,
+          -20.0,
+          -6.67,
+          6.67,
+          20.0
+        ],
+        "corrections": [
+          0.505,
+          0.028,
+          0.14,
+          -0.168,
+          -0.225,
+          -0.281,
+          0.084
+        ]
+      },
+      "elbow_flex": {
+        "angles": [
+          0.0,
+          13.33,
+          26.67,
+          40.0,
+          53.33,
+          66.67,
+          80.0
+        ],
+        "corrections": [
+          -2.216,
+          -0.461,
+          -0.335,
+          -0.208,
+          -0.262,
+          -0.498,
+          0.081
+        ]
+      }
+    }
+  }
+}

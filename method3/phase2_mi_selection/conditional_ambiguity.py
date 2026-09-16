@@ -44,6 +44,11 @@ class ConditionalAmbiguityReport:
     delta_h_a_given_s: float   # ΔH_A|S — covered window aggregation
     n_covered: int             # |T_covered(ξ)|
     n_windows: int             # |T(ξ)|
+    # [RATIO-TRACE 2026-09-13] 계측용 원값 — covered window 별 (d_min^a, s_a, |이웃|).
+    # 정규화·클리핑 전 raw 거리라 비율형 점수(log d_global/d_cond) 검증에 쓴다.
+    # [RATIO/RANK-TRACE] covered window 별 원값 —
+    #   (d_min, s_a, n_neighbors, eps_k, n_glob, d_glob, k_used)
+    raw_windows: tuple = ()
 
     @property
     def covered_ratio(self) -> float:
@@ -94,6 +99,7 @@ def conditional_ambiguity(
     eps: float = 1e-6,
     agg: str = "mean",
     db_z_pdist: np.ndarray | None = None,
+    rank_k: int = 2,
 ) -> ConditionalAmbiguityReport:
     """``ΔH_A|S(D_t, ξ)`` — trajectory-level conditional ambiguity (문서 §9).
 
@@ -123,7 +129,7 @@ def conditional_ambiguity(
     if cand_keys.ndim != 2:
         raise ValueError(f"candidate_keys must be (T, D_e), got {cand_keys.shape}")
     if db_keys.ndim != 2 or db_keys.shape[0] == 0:
-        return ConditionalAmbiguityReport(0.0, 0, n_windows)
+        return ConditionalAmbiguityReport(0.0, 0, n_windows, ())
 
     _t = _tm.perf_counter()
     # §9.1 covered window — state distance. window 축 broadcast
@@ -151,6 +157,7 @@ def conditional_ambiguity(
     _t = _tm.perf_counter()
 
     deltas: list[float] = []
+    raw_rows: list[tuple] = []      # [RATIO-TRACE] covered window 별 원값
     for tau in range(n_windows):
         if int(covered_count[tau]) < k_min:
             continue
@@ -167,6 +174,16 @@ def conditional_ambiguity(
             s_a = max(float(_sub.min(axis=1).mean()), s_min)
         else:
             s_a = max(mean_nn_distance(db_z[neighbors]), s_min)
+        # [RANK-SCORE 2026-09-14] 순위 기반 점수(신규 scoring="rank")의 재료.
+        #   eps_k  : 상태 이웃 중 k번째 행동거리 = 공유 반경
+        #   n_glob : 그 반경 안에 드는 전역 버퍼 점 수 (= 그 거리의 전역 순위)
+        #   d_glob : 전역 버퍼 기준 최근접 행동거리 (하드 필터 하한용)
+        _k = max(1, min(int(rank_k), int(neighbors.size)))
+        _eps_k = float(np.sort(z_dist[cz_idx, neighbors])[_k - 1])
+        _n_glob = int((z_dist[cz_idx] <= _eps_k).sum())
+        _d_glob = float(z_dist[cz_idx].min())
+        raw_rows.append((float(d_min), float(s_a), int(neighbors.size),
+                         _eps_k, _n_glob, _d_glob, _k))
         if d_min <= 0.0:
             deltas.append(0.0)                             # log(0) 단락
         else:
@@ -174,6 +191,6 @@ def conditional_ambiguity(
     _AMB_T["loop"] += _tm.perf_counter() - _t
 
     if not deltas:
-        return ConditionalAmbiguityReport(0.0, 0, n_windows)
+        return ConditionalAmbiguityReport(0.0, 0, n_windows, ())
     value = float(np.mean(deltas) if agg == "mean" else np.max(deltas))
-    return ConditionalAmbiguityReport(value, len(deltas), n_windows)
+    return ConditionalAmbiguityReport(value, len(deltas), n_windows, tuple(raw_rows))

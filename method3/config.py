@@ -132,6 +132,12 @@ def load_phase2_config(
         selection_mode=str(mi.get("selection_mode", "Q1")),
         # Q1 ablation — "argmax" (paper default) | "argmedian" (outlier-robust).
         q1_chosen_strategy=str(mi.get("q1_chosen_strategy", "argmax")),
+        # [RANK-SCORE 2026-09-14] 점수 방식 스위치. 기본 "legacy" = 종전 동작.
+        #   "rank" → score=log[(k/m)/(n_glob/N)] 절대 게이트 + 크기 하드 필터(a,c).
+        scoring=str(mi.get("scoring", "rank")),   # [2026-09-14] 기본 rank (legacy 는 yaml 에 명시)
+        filter_a=float(mi.get("filter_a", 0.25)),
+        filter_c=float(mi.get("filter_c", 10.0)),
+        rank_k=int(mi.get("rank_k", 2)),
     )
 
     re = raw.get("reembedding") or {}

@@ -29,6 +29,8 @@ Backward-compat: ``vla_scorer=None`` 으로 ``select`` 를 호출하면 stage 2 
 """
 from __future__ import annotations
 
+import os as _os
+
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -40,6 +42,7 @@ from method3.phase2_mi_selection.conditional_ambiguity import (
     reset_amb_timing,
     get_amb_timing,
 )
+from method3.phase2_mi_selection.neighbor_search import mean_nn_distance
 from method3.phase2_mi_selection.radius import state_neighborhood_radius
 from method3.phase2_mi_selection.vector_db import SkillVectorDB, VectorDBEntry
 
@@ -114,6 +117,16 @@ class Phase2MIConfig:
     #                           (= "selection rule 자체의 효과" 분리).
     # fallback (eligible=∅): Q1/Q3 → argmax M_MI ; Q2/Q4 → argmin M_MI ;
     #                       random → random pick (under_covered 포함 전체).
+    # [RANK-SCORE 2026-09-14] 점수 방식 스위치.
+    #   "legacy" : M_MI = β·ΔH_A − λ·ΔH_A|S 를 batch z-score 로 게이트 (종전 동작, 기본값)
+    #   "rank"   : score = log[(k/m)/(n_glob/N)] ≥ 0 절대 게이트 + 크기 하드 필터
+    # legacy 경로 코드는 그대로 두었으므로 scoring 만 되돌리면 종전 동작으로 복구된다.
+    # [2026-09-14] 기본값을 rank 로 전환. 이전 수집(benchmark Ours, ablation_renew)은 전부
+    # legacy 로 모였으므로, 그 데이터를 재현하려면 yaml 에 scoring: legacy 를 명시해야 한다.
+    scoring: str = "rank"
+    filter_a: float = 0.25        # 하한: d_global ≥ a·간격 (준중복 배제)
+    filter_c: float = 10.0        # 상한: d_cond ≤ c·간격  (근거 없는 극단 배제)
+    rank_k: int = 2               # 공유 반경을 정하는 순위 k
     selection_mode: str = "Q1"
     # Q1 의 chosen 전략 ablation — paper default 는 argmax (extreme uncertainty),
     # "argmedian" 은 eligible 의 U_VLA 중간값 chosen (outlier-robust variant).
@@ -173,6 +186,8 @@ class Phase2ScoreReport:
     q2_norm: float              # §13.2 M̃_MI — batch 정규화
     covered_ratio: float        # §15.1 R_cov(ξ)
     under_covered: bool         # covered window < T_min → MI 평가 신뢰 불가
+    # [RANK-SCORE] scoring="rank" 에서 크기 하드 필터 통과 여부. legacy 경로는 항상 True.
+    filter_ok: bool = True
     u_vla: float = 0.0          # §12 U_VLA — vla_scorer 가 있을 때만 의미
 
 
@@ -244,6 +259,33 @@ class Phase2MISelector:
                 )
         arr = np.asarray(z, dtype=np.float64).reshape(1, -1)
         return arr
+
+    def _ratio_trace(self, path, candidate, index, cand_z, db_z, amb, delta_a, q2) -> None:
+        """[RATIO-TRACE] covered window 별 원 거리를 jsonl 로 남긴다 (정규화·클리핑 전)."""
+        import json as _json
+        rng = getattr(self, "_rt_rng", None)
+        if rng is None:
+            rng = np.random.default_rng(0); self._rt_rng = rng
+        rows = []
+        n_db = int(db_z.shape[0])
+        for w, (d_cond, s_a, n_nb) in enumerate(amb.raw_windows):
+            if w >= cand_z.shape[0] or n_nb <= 0:
+                continue
+            dz = np.linalg.norm(db_z - cand_z[w][None, :], axis=1)
+            k = min(int(n_nb), n_db)
+            d_glob = float(np.sort(dz)[:k].mean())                     # 전역 전체 기준
+            picks = [float(np.sort(dz[rng.choice(n_db, size=min(int(n_nb), n_db), replace=False)])[:k].mean())
+                     for _ in range(3)]
+            d_match = float(np.mean(picks))                            # 크기 맞춘 전역 기준
+            rows.append({"w": w, "n_nb": int(n_nb), "d_cond": float(d_cond), "s_a": float(s_a),
+                         "d_glob": d_glob, "d_glob_matched": d_match})
+        if not rows:
+            return
+        rec = {"skill": str(candidate.skill_id), "cand": int(index), "n_db": n_db,
+               "delta_h_a": float(delta_a), "delta_h_a_given_s": float(amb.delta_h_a_given_s),
+               "q2": float(q2), "windows": rows}
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec) + "\n")
 
     def score_one(self, index: int, candidate: Phase2Candidate) -> Phase2ScoreReport:
         """후보 하나의 ΔH_A·ΔH_A|S·Q2 (정규화 전) 계산 (문서 §8-11)."""
@@ -334,12 +376,53 @@ class Phase2MISelector:
         amb = conditional_ambiguity(
             candidate.state_keys, cand_z, db_keys, db_z,
             radius, cfg.k_min, cfg.s_min_a, cfg.eps, cfg.amb_agg,
-            db_z_pdist=db_z_pdist)
+            db_z_pdist=db_z_pdist, rank_k=cfg.rank_k)
         if _acc is not None:
             _acc["amb"] += _tmod.perf_counter() - _t
 
         under = amb.n_covered < cfg.min_covered_windows
+        # ── legacy 점수 (β·ΔH_A − λ·ΔH_A|S). scoring="legacy" 면 이 값이 그대로 쓰인다.
         q2 = cfg.beta * delta_a - cfg.lambda_ * amb.delta_h_a_given_s   # §11
+        filter_ok = True
+
+        if str(cfg.scoring).lower() == "rank":
+            # [RANK-SCORE 2026-09-14] 순위 기반 점수 + 크기 하드 필터.
+            #   score  = mean_covered log[(k/m) / (n_glob/N)]
+            #            = "정보가 없다면 기대되는 순위" 대비 "실제 순위"
+            #   하한   : d_global ≥ a·간격   (준중복 배제 — 비율은 스케일을 보지 않으므로 필요)
+            #   상한   : d_cond  ≤ c·간격    (근거 없는 극단 배제)
+            # 간격은 버퍼 자신의 평균 최근접거리(하한 s_min_a). skill 마다 자동으로 맞춰진다.
+            spacing = max(float(mean_nn_distance(db_z)), float(cfg.s_min_a))
+            n_db = int(db_z.shape[0])
+            scores = []
+            d_glob_min = float("inf")
+            d_cond_max = 0.0
+            for (_d_min, _s_a, _n_nb, _eps_k, _n_glob, _d_glob, _k_used) in amb.raw_windows:
+                if _n_nb <= 0 or n_db <= 0:
+                    continue
+                p_cond = float(_k_used) / float(_n_nb)
+                p_glob = max(float(_n_glob), 1.0) / float(n_db)
+                scores.append(float(np.log(p_cond / p_glob)))
+                d_glob_min = min(d_glob_min, float(_d_glob))
+                d_cond_max = max(d_cond_max, float(_d_min))
+            if scores:
+                q2 = float(np.mean(scores))
+                filter_ok = (d_glob_min >= cfg.filter_a * spacing
+                             and d_cond_max <= cfg.filter_c * spacing)
+            else:
+                q2 = 0.0
+                filter_ok = False
+
+        # [RATIO-TRACE 2026-09-13] 비율형 점수 검증용 계측 (SCRAPE_PHASE2_RATIO_TRACE=<path> 일 때만).
+        # 기록: d_cond(상태 이웃 안에서의 최근접 행동거리), d_global(전역 버퍼 기준 같은 통계),
+        #       d_global_matched(전역에서 이웃과 **같은 개수**만 뽑아 잰 값), 이웃 수.
+        # 크기를 맞추지 않으면 표본 수 차이 때문에 비율이 항상 음수로 치우친다(LOO 실측 확인).
+        _rt = _os.environ.get("SCRAPE_PHASE2_RATIO_TRACE")
+        if _rt and amb.raw_windows:
+            try:
+                self._ratio_trace(_rt, candidate, index, cand_z, db_z, amb, delta_a, q2)
+            except Exception as _e:  # 계측 실패가 수집을 막지 않게
+                print(f"[Phase2-MI][ratio-trace] skip: {str(_e)[:120]}", flush=True)
         self._dbg(
             f"skill={candidate.skill_id} cand#{index} | "
             f"ΔH_A={delta_a:.4f} ΔH_A|S={amb.delta_h_a_given_s:.4f} "
@@ -348,6 +431,7 @@ class Phase2MISelector:
         )
         return Phase2ScoreReport(
             candidate_index=index,
+            filter_ok=filter_ok,
             delta_h_a=delta_a,
             delta_h_a_given_s=amb.delta_h_a_given_s,
             q2=q2,
@@ -395,8 +479,14 @@ class Phase2MISelector:
         # extreme M_MI 가 전체 분포를 왜곡해 정상 cand 의 M̃_MI 가 ±0 근처로 몰리는
         # 문제 발생). scale 은 std 유지 — z-score-like normalization.
         m_mi = np.array([r.q2 for r in reports], dtype=np.float64)
-        mu, sigma = float(np.median(m_mi)), float(m_mi.std())
-        m_mi_norm = (m_mi - mu) / (sigma + cfg.eps)
+        if str(cfg.scoring).lower() == "rank":
+            # [RANK-SCORE 2026-09-14] 절대 게이트 — batch 정규화를 하지 않는다.
+            # score 자체가 "우연 대비 순위" 라 0 이 무정보 지점이고, 배치 구성과 무관하다.
+            # (legacy 의 batch z-score 는 아래 else 에 그대로 보존)
+            m_mi_norm = m_mi.copy()
+        else:
+            mu, sigma = float(np.median(m_mi)), float(m_mi.std())
+            m_mi_norm = (m_mi - mu) / (sigma + cfg.eps)
 
         # U_VLA 채점 — vla_scorer 가 주어졌을 때만. eligible 후보에만 호출해
         # 비용 절약 (cost-aware: stage 1 통과한 것에만 R-stochastic eval 수행).
@@ -416,6 +506,7 @@ class Phase2MISelector:
             eligible = [
                 i for i, r in enumerate(reports)
                 if m_mi_norm[i] >= cfg.tau_MI and not r.under_covered
+                and r.filter_ok          # [RANK-SCORE] 크기 하드 필터 (legacy 는 항상 True)
             ]
         else:  # Q2, Q4
             eligible = [
@@ -467,6 +558,7 @@ class Phase2MISelector:
         reports = [
             Phase2ScoreReport(
                 candidate_index=r.candidate_index,
+                filter_ok=r.filter_ok,          # [RANK-SCORE] 재생성 시 플래그 보존
                 delta_h_a=r.delta_h_a,
                 delta_h_a_given_s=r.delta_h_a_given_s,
                 q2=r.q2,

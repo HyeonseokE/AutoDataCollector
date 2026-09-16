@@ -144,6 +144,13 @@ def iter_skill_segments(
     needed = ["action", skill_col, "task_index", "index"]
     if "skill.natural_language" in schema_cols:
         needed.append("skill.natural_language")
+    # GOAL-BOUNDARY: 같은 natural_language 로 연속 호출된 skill (예: pull_cube
+    # execute_pull 의 2연속 move) 은 nl run-length 만으로는 하나로 합쳐져
+    # Method3 subgoal buffer (skill 호출 단위) 와 개수가 어긋난다. goal_position
+    # 변화도 경계로 사용해 skill 호출 단위와 일치시킨다.
+    goal_col = "skill.goal_position.robot_xyzrpy"
+    if goal_col in schema_cols:
+        needed.append(goal_col)
     tbl = pa.concat_tables([pq.read_table(f, columns=needed) for f in data_files])
     tbl = tbl.sort_by("index")
     actions = np.array(tbl["action"].to_pylist(), dtype=np.float64)
@@ -153,6 +160,15 @@ def iter_skill_segments(
         tbl["skill.natural_language"].to_pylist()
         if "skill.natural_language" in needed else None
     )
+    goal_keys_all: list[tuple] | None = None
+    if goal_col in needed:
+        goal_keys_all = []
+        for v in tbl[goal_col].to_pylist():
+            if v is None:
+                goal_keys_all.append(())
+                continue
+            arr = np.asarray(v, dtype=np.float64).ravel()[:3]
+            goal_keys_all.append(tuple(np.round(arr, 4).tolist()))
 
     # 2. tasks lookup (task_index → instruction string).
     tasks_table = pq.read_table(root / "meta" / "tasks.parquet")
@@ -199,7 +215,11 @@ def iter_skill_segments(
         if skill_nl is not None:
             ep_boundary = [str(v) if v else "" for v in skill_nl[f0:f1]]
         else:
-            ep_boundary = ep_skill
+            ep_boundary = list(ep_skill)
+        if goal_keys_all is not None:
+            ep_boundary = [
+                (b, g) for b, g in zip(ep_boundary, goal_keys_all[f0:f1])
+            ]
 
         segments = _run_length_segments(ep_boundary)
         for skill_idx, (s, e, _seg_key) in enumerate(segments):

@@ -20,6 +20,7 @@ trajectory 의 T_end descriptor 평균 ``h*`` 을 ``SubgoalBufferEntry`` 로 buf
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -44,6 +45,43 @@ from method3.phase1_state_seeding.terminal_descriptor import state_descriptor
 # 거리 분포를 균등 수준(0.805 vs 0.794)으로 유지하면서 최소 분리 0.162R 을
 # 확보한 값이다. 0 으로 두면 모든 후보가 통과해 순수 랜덤(=A1)이 된다.
 POISSON_R_MIN_FACTOR = 0.75
+
+# [ABLATION-RENEW 2026-09-12] 선택 규칙을 실험 조건으로 바꿀 수 있게 계수를 env 로 노출한다.
+#   SCRAPE_PHASE1_POISSON_R_MIN_FACTOR
+#     미설정      → POISSON_R_MIN_FACTOR (0.75). 현행 동작 그대로.
+#     매우 큰 값  → 통과 후보가 없어 gain 내림차순 폴백 = **논문 식 (4) argmax** 재현.
+#     0           → 모든 후보 통과 → 순수 랜덤 (feasibility 만 적용).
+# 값이 잘못됐으면 기본값으로 돌아가고 경고를 한 번 출력한다 (조용한 조건 오염 방지).
+_POISSON_ENV = "SCRAPE_PHASE1_POISSON_R_MIN_FACTOR"
+_poisson_factor_warned = False
+
+
+def poisson_r_min_factor() -> float:
+    """r_min 계수. env override 가 있으면 그 값, 없으면 POISSON_R_MIN_FACTOR."""
+    global _poisson_factor_warned
+    raw = os.environ.get(_POISSON_ENV)
+    if raw is None or str(raw).strip() == "":
+        return float(POISSON_R_MIN_FACTOR)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        if not _poisson_factor_warned:
+            print(f"[Subgoal-Phase1] {_POISSON_ENV}={raw!r} 를 float 로 못 읽어 "
+                  f"기본값 {POISSON_R_MIN_FACTOR} 사용", flush=True)
+            _poisson_factor_warned = True
+        return float(POISSON_R_MIN_FACTOR)
+    if val < 0.0:
+        if not _poisson_factor_warned:
+            print(f"[Subgoal-Phase1] {_POISSON_ENV}={val} < 0 — 기본값 "
+                  f"{POISSON_R_MIN_FACTOR} 사용", flush=True)
+            _poisson_factor_warned = True
+        return float(POISSON_R_MIN_FACTOR)
+    if not _poisson_factor_warned:
+        rule = ("argmax G_S^goal (논문 식 (4))" if val > 1e6
+                else "순수 랜덤" if val == 0.0 else "poisson-disk")
+        print(f"[Subgoal-Phase1] {_POISSON_ENV}={val} → 선택 규칙: {rule}", flush=True)
+        _poisson_factor_warned = True
+    return val
 
 # module-level optional import — _on_skill_stamp 의 hot path 라 매 호출 import
 # 회피. record_dataset 가 install 안 된 환경 (테스트) 에서는 None.
@@ -390,7 +428,7 @@ class Phase1SubgoalSelector:
         # 버퍼 자신의 해상도 s_g (= max(d̄_NN, s_min), §5.4 에서 이미 계산) 를
         # 기준으로 삼으면 공간이 일치하고 skill 마다 자동으로 맞춰진다.
         _n_buf = int(keys.shape[0])
-        _r_min = POISSON_R_MIN_FACTOR * float(scale)
+        _r_min = poisson_r_min_factor() * float(scale)
         _sep = {}
         for _ri, _rep in enumerate(reports):
             _h, _ = self._terminal_region(current_ee, _rep.goal)
